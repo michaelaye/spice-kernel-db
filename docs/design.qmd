@@ -1,0 +1,240 @@
+---
+title: "Design"
+subtitle: "How the pieces fit together"
+---
+
+## Database schema
+
+The database is backed by [DuckDB](https://duckdb.org/), chosen for its zero-configuration embedded operation, fast analytical queries, and ability to handle large result sets without a separate server process.
+
+```{mermaid}
+erDiagram
+    kernels {
+        VARCHAR sha256 PK
+        VARCHAR filename
+        VARCHAR kernel_type
+        BIGINT size_bytes
+    }
+    locations {
+        VARCHAR sha256 PK
+        VARCHAR abs_path PK
+        VARCHAR mission
+        VARCHAR source_url
+        TIMESTAMP scanned_at
+    }
+    metakernels {
+        VARCHAR mk_path PK
+        INTEGER entry_index PK
+        VARCHAR raw_entry
+        VARCHAR filename
+    }
+    kernels ||--o{ locations : "one hash → many locations"
+```
+
+The separation between `kernels` and `locations` is the core of the design:
+
+- A **kernel** is a unique piece of content, identified by its SHA-256 hash. The `filename` column stores the first-registered name (the "canonical" name), but this is purely informational.
+- A **location** is a place on disk where that content exists. The same hash can appear in many locations — that's exactly how duplicates are represented.
+
+When `generic_kernels/spk/satellites/jup365.bsp` and `JUICE/kernels/spk/jup365_19900101_20500101.bsp` have identical content:
+
+| Table | sha256 | filename / abs_path | mission |
+|-------|--------|---------------------|---------|
+| `kernels` | `a1b2c3...` | `jup365.bsp` | — |
+| `locations` | `a1b2c3...` | `.../generic_kernels/spk/satellites/jup365.bsp` | `generic` |
+| `locations` | `a1b2c3...` | `.../JUICE/kernels/spk/jup365_19900101_20500101.bsp` | `JUICE` |
+
+One hash, two locations, two different filenames. The tool knows they're the same file.
+
+
+## Content-addressed identity {#content-identity}
+
+Every file registered with the database goes through SHA-256 hashing. This is the sole source of truth for "are these the same file?"
+
+```python
+from spice_kernel_db.hashing import sha256_file
+
+h1 = sha256_file("/data/generic_kernels/spk/satellites/jup365.bsp")
+h2 = sha256_file("/data/JUICE/kernels/spk/jup365_19900101_20500101.bsp")
+assert h1 == h2  # same content, different names
+```
+
+Why SHA-256 and not a simpler check like file size?
+
+- **File size is not unique.** Two different CK files could easily have the same byte count.
+- **Filename is not reliable.** As shown above, missions rename files.
+- **SHA-256 is fast enough.** Even for large SPK/BSP files (hundreds of MB), hashing takes under a second on modern hardware. The cost is paid once at scan time.
+
+### What happens when the same content arrives under a different name?
+
+When you `scan_directory`, each file is hashed. If the hash already exists in `kernels` but under a different filename, the tool:
+
+1. Logs an informational message: `"Hash match: jup365_19900101_20500101.bsp is identical to already-registered jup365.bsp"`
+2. Records the new *location* (with the new path and filename) pointing to the existing hash
+3. Does **not** create a second `kernels` row
+
+This means `find_by_filename("jup365_19900101_20500101.bsp")` will find all locations whose path ends with that filename, even though the canonical name in the `kernels` table is `jup365.bsp`. The lookup checks both the `kernels.filename` column and the actual filename in `locations.abs_path`.
+
+
+## Mission-aware resolution {#mission-aware-resolution}
+
+When the tool needs to find a local file for a kernel name — for instance, when rewriting a metakernel — it follows a strict priority chain:
+
+```{mermaid}
+flowchart TD
+    A["resolve_kernel(filename, preferred_mission)"] --> B{Exact filename<br/>in preferred mission?}
+    B -->|Yes| C["✅ Return path<br/>(no warning)"]
+    B -->|No| D{Exact filename<br/>in any mission?}
+    D -->|Yes| E["⚠️ Return path + warning:<br/>'not found in [MISSION],<br/>using copy from [OTHER]'"]
+    D -->|No| F{Fuzzy match<br/>in preferred mission?}
+    F -->|Yes| G["⚠️ Return path + warning:<br/>'matched by content hash<br/>to [canonical_name]'"]
+    F -->|No| H{Fuzzy match<br/>in any mission?}
+    H -->|Yes| I["⚠️ Return path + warning:<br/>'matched by hash to<br/>[name] in [OTHER]'"]
+    H -->|No| J["❌ Return None"]
+
+    style C fill:#d4edda
+    style E fill:#fff3cd
+    style G fill:#fff3cd
+    style I fill:#fff3cd
+    style J fill:#f8d7da
+```
+
+### Why mission preference matters
+
+Consider a scenario where both JUICE and generic_kernels have `pck00011.tpc`. They happen to be identical now. But if a future JUICE release ships a mission-specific override of that PCK file, the JUICE copy should take precedence when working with JUICE data.
+
+By always checking the preferred mission first, the tool naturally handles this: it uses the mission's own copy when available, and only falls back to other sources when necessary — always with a warning so you know what happened.
+
+### Fuzzy matching for filename aliases
+
+The "fuzzy match" steps handle cases where a metakernel requests a file under a name that doesn't exist in the database, but the *content* does exist under a different name.
+
+The fuzzy match works by progressively stripping underscore-delimited suffixes from the filename stem. For `jup365_19900101_20500101.bsp`:
+
+1. Try `jup365_19900101_20500101%` → no match
+2. Try `jup365_19900101%` → no match
+3. Try `jup365%` → matches `jup365.bsp` ✅
+
+If a match is found, the tool checks that it refers to a file that actually exists on disk, then returns it with a warning noting the alias.
+
+::: {.callout-note}
+Fuzzy matching is a fallback for convenience. The authoritative identity check is always the SHA-256 hash. If you download the file the metakernel asks for and it turns out to have the same hash as something already in the database, the tool will detect that at scan time — no fuzzy matching needed.
+:::
+
+
+## Minimal metakernel edits {#minimal-edits}
+
+This is the most opinionated design decision in the tool. When rewriting a metakernel, the goal is to change as little as possible.
+
+### Why not just rewrite all the paths?
+
+You could replace every entry in `KERNELS_TO_LOAD` with absolute paths to wherever the files live locally. This works, but:
+
+- The resulting metakernel is unrecognisable compared to the original. A `diff` would show every line changed.
+- You lose the ability to visually verify that the kernel list matches the mission's official release.
+- If a kernel is loaded from a different mission's tree (via fallback), it's not obvious from reading the file.
+- The metakernel becomes tied to your specific machine's filesystem layout.
+
+### The symlink tree strategy
+
+Instead, `rewrite_metakernel()` creates a **symlink tree** that mirrors the original directory structure:
+
+```
+link_root/
+├── ck/
+│   └── juice_sc_default_v01.bc  →  /data/JUICE/kernels/ck/juice_sc_default_v01.bc
+├── fk/
+│   └── juice_v44.tf             →  /data/JUICE/kernels/fk/juice_v44.tf
+├── lsk/
+│   └── naif0012.tls             →  /data/generic_kernels/lsk/naif0012.tls
+├── pck/
+│   ├── pck00011.tpc             →  /data/JUICE/kernels/pck/pck00011.tpc
+│   ├── gm_de431.tpc             →  /data/JUICE/kernels/pck/gm_de431.tpc
+│   └── juice_jup012.tpc         →  /data/JUICE/kernels/pck/juice_jup012.tpc
+├── sclk/
+│   └── juice_fict_160326_v02.tsc → /data/JUICE/kernels/sclk/juice_fict_160326_v02.tsc
+└── spk/
+    ├── de432s.bsp               →  /data/JUICE/kernels/spk/de432s.bsp
+    ├── jup365_19900101_20500101.bsp → /data/generic_kernels/spk/satellites/jup365.bsp
+    └── juice_crema_5_1_a3_v01.bsp   → /data/JUICE/kernels/spk/juice_crema_5_1_a3_v01.bsp
+```
+
+The rewritten metakernel differs from the original in exactly one place:
+
+```diff
+-  PATH_VALUES  = ( '..' )
++  PATH_VALUES  = ( '/data/spice/unified_kernels' )
+```
+
+Everything else — `PATH_SYMBOLS`, `KERNELS_TO_LOAD`, the header comments, the loading order — is preserved character for character.
+
+### Trust and traceability
+
+This approach means:
+
+- You can `diff` the original and rewritten metakernels to verify that only `PATH_VALUES` changed.
+- The `KERNELS_TO_LOAD` list is the mission team's original list, untouched. If they made a mistake, it's their mistake, not yours.
+- The symlink tree is transparent: `ls -la` shows you exactly where each file actually lives.
+- If a kernel was resolved from a different mission via fallback, it shows up in the warnings at rewrite time — not silently buried in the metakernel.
+
+### Bridging filename aliases
+
+The symlink tree also handles the filename alias problem seamlessly. If the metakernel asks for `$KERNELS/spk/jup365_19900101_20500101.bsp` but the tool found the content under `jup365.bsp` in generic_kernels, the symlink is:
+
+```
+link_root/spk/jup365_19900101_20500101.bsp  →  /data/generic_kernels/spk/satellites/jup365.bsp
+```
+
+The symlink is *named* what the metakernel expects, and *points to* where the content actually lives. SPICE follows symlinks transparently, so it loads the right data.
+
+
+## Deduplication strategy
+
+For users who want to reclaim disk space, the tool can replace duplicate files with symlinks to a single canonical copy.
+
+The canonical copy is selected with a preference for the `generic_kernels` tree, on the grounds that:
+
+- Generic kernels are the "source of truth" for shared files
+- They're typically the first place you'd download from
+- Mission-specific copies should be replaceable without loss of information
+
+The `deduplicate_with_symlinks()` method supports a `dry_run` mode (the default) so you can see exactly what would change before committing. After deduplication, all original paths still work — they're just symlinks now — and the database remains accurate because the hash and location information hasn't changed.
+
+::: {.callout-warning}
+Deduplication with symlinks requires a filesystem that supports symlinks (Linux, macOS). It won't work on Windows NTFS without elevated privileges, and won't work at all on FAT32.
+:::
+
+
+## Kernel type classification
+
+Files are classified by extension into SPICE kernel types:
+
+| Extension | Kernel type | Description |
+|-----------|------------|-------------|
+| `.bc` | CK | Orientation / pointing |
+| `.bsp` | SPK | Ephemeris / trajectory |
+| `.bpc` | PCK | Binary planetary constants |
+| `.tpc` | PCK | Text planetary constants |
+| `.tf` | FK | Frame definitions |
+| `.ti` | IK | Instrument parameters |
+| `.tls` | LSK | Leapseconds |
+| `.tsc` | SCLK | Spacecraft clock coefficients |
+| `.bds` | DSK | Digital shape models |
+| `.tm` | MK | Metakernels |
+
+This classification is used for the `stats()` breakdown and is stored in the database for potential future filtering.
+
+
+## Mission auto-detection
+
+When scanning a directory, if you don't supply a `--mission` flag, the tool guesses the mission name from the directory structure. It looks for the pattern `.../<MISSION>/kernels/...` and takes the directory name immediately before `kernels/`.
+
+For example:
+
+| Path | Detected mission |
+|------|-----------------|
+| `/data/JUICE/kernels/lsk/naif0012.tls` | `JUICE` |
+| `/data/MRO/kernels/ck/mro_sc_2024.bc` | `MRO` |
+| `/data/generic_kernels/lsk/naif0012.tls` | Falls back to filename heuristic → `generic` |
+
+You can always override this with the `mission` parameter in the API or `--mission` on the CLI.

@@ -1,0 +1,53 @@
+---
+title: "spice-kernel-db"
+subtitle: "Content-addressed SPICE kernel database for deduplication and metakernel rewriting across planetary missions"
+---
+
+## What is this?
+
+`spice-kernel-db` is a Python tool that solves two practical problems for anyone working with NAIF SPICE kernels across multiple planetary missions:
+
+1. **You're storing the same kernel files multiple times.** Generic kernels like `naif0012.tls`, `pck00011.tpc`, and `de432s.bsp` are duplicated across every mission archive you download. With missions like JUICE, MRO, Cassini, and others, those gigabytes add up.
+
+2. **Metakernels don't work with your local file layout.** A mission's `.tm` file expects all kernels under a specific directory tree. But your local setup is different — files are scattered across mission archives, generic kernel directories, and maybe a shared NAS.
+
+This tool uses **SHA-256 content hashing** to identify duplicate files regardless of filename, provides **mission-aware kernel resolution** so you always know where a file came from, and rewrites metakernels with **minimal edits** — only `PATH_VALUES` is changed, preserving full trust in the original kernel list.
+
+## Installation
+
+```bash
+pip install spice-kernel-db
+```
+
+From source:
+
+```bash
+git clone https://github.com/michaelaye/spice-kernel-db
+cd spice-kernel-db
+pip install -e ".[dev]"
+```
+
+## Quick taste
+
+```python
+from spice_kernel_db import KernelDB
+
+db = KernelDB()
+
+# Register all your kernel trees
+db.scan_directory("/data/spice/generic_kernels", mission="generic")
+db.scan_directory("/data/spice/JUICE/kernels")
+db.scan_directory("/data/spice/MRO/kernels")
+
+# What's duplicated?
+db.report_duplicates()
+
+# Rewrite a JUICE metakernel for local use
+db.rewrite_metakernel(
+    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
+    output="juice_local.tm",
+    mission="JUICE",
+)
+```
+
+See the [Usage Guide](usage.qmd) for the full walkthrough.

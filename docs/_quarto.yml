@@ -1,0 +1,34 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "spice-kernel-db"
+  description: "Content-addressed SPICE kernel database for deduplication and metakernel rewriting"
+  repo-url: https://github.com/michaelaye/spice-kernel-db
+  repo-actions: [edit, issue]
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: motivation.qmd
+        text: Motivation
+      - href: design.qmd
+        text: Design
+      - href: usage.qmd
+        text: Usage Guide
+      - href: cli.qmd
+        text: CLI Reference
+      - href: api.qmd
+        text: API Reference
+    right:
+      - icon: github
+        href: https://github.com/michaelaye/spice-kernel-db
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: wrap

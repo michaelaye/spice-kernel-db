@@ -1,0 +1,241 @@
+---
+title: "API Reference"
+subtitle: "Python API"
+---
+
+## `KernelDB`
+
+```python
+from spice_kernel_db import KernelDB
+```
+
+The main class. Wraps a DuckDB database and provides all scanning, lookup, and rewriting operations.
+
+### Constructor
+
+```python
+KernelDB(db_path: str | Path = "~/.spice_kernels.duckdb")
+```
+
+Opens (or creates) the database at the given path. The schema is initialized automatically.
+
+Supports context manager usage:
+
+```python
+with KernelDB() as db:
+    ...
+```
+
+---
+
+### Scanning
+
+#### `scan_directory`
+
+```python
+db.scan_directory(
+    root: str | Path,
+    mission: str | None = None,
+    extensions: set[str] | None = None,
+    verbose: bool = False,
+) -> int
+```
+
+Recursively scan a directory tree and register all kernel files. Returns the number of files registered.
+
+If `mission` is not provided, it's auto-detected from the path structure (looks for `.../<MISSION>/kernels/...`).
+
+`extensions` defaults to all known SPICE kernel extensions (`.tls`, `.tpc`, `.bsp`, `.bc`, `.tf`, `.ti`, `.tsc`, `.bds`, `.tm`).
+
+#### `register_file`
+
+```python
+db.register_file(
+    path: str | Path,
+    mission: str | None = None,
+    source_url: str | None = None,
+) -> str
+```
+
+Register a single kernel file. Returns its SHA-256 hash.
+
+If the file's content already exists in the database under a different filename, the new location is recorded pointing to the same hash. This is logged at the `INFO` level.
+
+---
+
+### Lookup
+
+#### `find_by_filename`
+
+```python
+db.find_by_filename(filename: str) -> list[dict]
+```
+
+Find all locations for a kernel by filename (basename). Checks both the canonical filename in the `kernels` table and the actual filename in `locations.abs_path`.
+
+Returns a list of dicts with keys: `sha256`, `abs_path`, `mission`, `kernel_type`, `size_bytes`.
+
+#### `find_by_hash`
+
+```python
+db.find_by_hash(sha256: str) -> list[dict]
+```
+
+Find all locations for a kernel by its SHA-256 hash.
+
+Returns a list of dicts with keys: `abs_path`, `mission`, `filename`.
+
+#### `resolve_kernel`
+
+```python
+db.resolve_kernel(
+    filename: str,
+    preferred_mission: str | None = None,
+) -> tuple[str | None, list[str]]
+```
+
+Resolve a kernel filename to an absolute path on disk.
+
+Returns `(path, warnings)` where `path` is the resolved absolute path (or `None` if not found) and `warnings` is a list of human-readable strings about any fallback decisions.
+
+**Resolution priority** (see [Mission-aware resolution](design.qmd#mission-aware-resolution)):
+
+1. Exact filename match in `preferred_mission` → no warning
+2. Exact filename match in any mission → warning
+3. Fuzzy match (prefix-based) in `preferred_mission` → warning
+4. Fuzzy match in any mission → warning
+5. Not found → `(None, [])`
+
+---
+
+### Metakernel operations
+
+#### `check_metakernel`
+
+```python
+db.check_metakernel(
+    mk_path: str | Path,
+    mission: str | None = None,
+) -> dict
+```
+
+Check which kernels from a metakernel are available locally.
+
+Returns a dict with keys:
+
+- `found`: list of `(raw_entry, local_path)` tuples
+- `missing`: list of `raw_entry` strings
+- `warnings`: list of warning strings
+
+#### `rewrite_metakernel`
+
+```python
+db.rewrite_metakernel(
+    mk_path: str | Path,
+    output: str | Path,
+    *,
+    mission: str | None = None,
+    link_root: str | Path | None = None,
+) -> tuple[Path, list[str]]
+```
+
+Rewrite a metakernel for local use with minimal edits.
+
+Creates a symlink tree at `link_root` (default: `kernels/` next to the output file) that mirrors the original directory structure. Only `PATH_VALUES` in the output `.tm` file is changed — `KERNELS_TO_LOAD`, `PATH_SYMBOLS`, and all comments are preserved.
+
+Returns `(output_path, warnings)`.
+
+See [Minimal metakernel edits](design.qmd#minimal-edits) for the design rationale.
+
+#### `index_metakernel`
+
+```python
+db.index_metakernel(mk_path: str | Path)
+```
+
+Parse a metakernel and store its entries in the `metakernels` table for future reference.
+
+---
+
+### Deduplication
+
+#### `report_duplicates`
+
+```python
+db.report_duplicates(min_copies: int = 2) -> list[dict]
+```
+
+Find and report kernels that exist in multiple locations.
+
+Returns a list of dicts with keys: `sha256`, `filename`, `size_bytes`, `count`, `paths`, `missions`, `wasted_bytes`.
+
+#### `deduplicate_plan`
+
+```python
+db.deduplicate_plan() -> list[dict]
+```
+
+Generate a deduplication plan without executing it.
+
+For each set of identical files, selects a canonical copy (preferring `generic` mission) and lists the rest as removable.
+
+Returns a list of dicts with keys: `filename`, `size_bytes`, `keep`, `remove`.
+
+#### `deduplicate_with_symlinks`
+
+```python
+db.deduplicate_with_symlinks(dry_run: bool = True) -> list[dict]
+```
+
+Replace duplicate files with symlinks to the canonical copy.
+
+With `dry_run=True` (the default), only prints what would happen.
+
+---
+
+### Statistics
+
+#### `stats`
+
+```python
+db.stats() -> dict
+```
+
+Print and return summary statistics.
+
+Returns a dict with keys: `n_kernels`, `n_locations`, `total_bytes`, `n_duplicates`, `missions`.
+
+---
+
+## `parse_metakernel`
+
+```python
+from spice_kernel_db import parse_metakernel
+```
+
+```python
+parse_metakernel(path: str | Path) -> ParsedMetakernel
+```
+
+Parse a SPICE metakernel (`.tm`) file without needing a database.
+
+### `ParsedMetakernel`
+
+Dataclass with attributes:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `source_path` | `Path` | Absolute path to the source file |
+| `header` | `str` | Everything before the first `\begindata` |
+| `path_values` | `list[str]` | Contents of `PATH_VALUES` |
+| `path_symbols` | `list[str]` | Contents of `PATH_SYMBOLS` |
+| `kernels` | `list[str]` | Contents of `KERNELS_TO_LOAD` |
+
+Properties and methods:
+
+| Name | Returns | Description |
+|------|---------|-------------|
+| `symbol_map` | `dict[str, str]` | Mapping from symbol name to path value |
+| `resolve(entry)` | `str` | Replace `$SYMBOL`s with their values |
+| `kernel_filenames()` | `list[str]` | Basenames of all kernels |
+| `kernel_relpaths()` | `list[str]` | Relative paths with `$SYMBOL` stripped |

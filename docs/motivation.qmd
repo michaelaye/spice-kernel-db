@@ -1,0 +1,150 @@
+---
+title: "Motivation"
+subtitle: "Why this tool exists"
+---
+
+## The SPICE kernel ecosystem
+
+The NAIF SPICE system provides the fundamental infrastructure for computing observation geometry in planetary science. Each mission distributes its kernels through NAIF's servers:
+
+- **Generic kernels** at `naif.jpl.nasa.gov/pub/naif/generic_kernels/` — leapseconds, planetary constants, planetary ephemerides, satellite ephemerides
+- **Mission-specific kernels** at `naif.jpl.nasa.gov/pub/naif/<MISSION>/kernels/` — spacecraft orientation (CK), trajectory (SPK), instrument parameters (IK), frame definitions (FK), spacecraft clocks (SCLK)
+
+Each mission archive is self-contained. A mission like JUICE or MRO ships a complete kernel set that includes not only its own mission-specific kernels but also copies of whatever generic kernels its metakernels need. This makes the archives portable — you can download one mission's tree and have everything needed to compute geometry for that mission.
+
+The design is practical and sound. But when you work with *multiple* missions, it creates two concrete problems.
+
+## Problem 1: Duplicated files across missions
+
+Generic kernels are duplicated everywhere. Consider these files:
+
+| Kernel | What it is | Who ships it |
+|--------|-----------|--------------|
+| `naif0012.tls` | Leapseconds | Every mission |
+| `pck00011.tpc` | IAU rotation models | Every mission |
+| `de432s.bsp` | Planetary ephemeris (31 MB) | Most missions |
+| `jup365.bsp` | Jupiter satellite ephemeris (323 MB) | JUICE, Juno, Clipper, ... |
+| `gm_de431.tpc` | GM values | Most missions |
+
+If you maintain local copies of JUICE, MRO, Cassini, Juno, and MESSENGER kernels, `de432s.bsp` alone is stored five times — 155 MB of identical bytes. For `jup365.bsp`, which JUICE ships as `jup365_19900101_20500101.bsp` (same content, different name), the waste is even larger.
+
+Across a real multi-mission setup, hundreds of megabytes to several gigabytes are wasted on identical content.
+
+### The filename alias problem
+
+The duplication isn't always obvious. NAIF's `generic_kernels` tree has:
+
+```
+generic_kernels/spk/satellites/jup365.bsp
+```
+
+But JUICE ships the same file as:
+
+```
+JUICE/kernels/spk/jup365_19900101_20500101.bsp
+```
+
+The content is byte-for-byte identical — but the filenames differ. A naive filename-based deduplication tool would miss this entirely. You need content-based identity (i.e., hashing) to catch it.
+
+
+## Problem 2: Metakernels don't match your local layout
+
+A SPICE metakernel (`.tm` file) is a text file that tells SPICE which kernels to load. A typical JUICE metakernel looks like:
+
+```text
+KPL/MK
+
+JUICE metakernel for cruise phase
+==================================
+
+\begindata
+
+  PATH_VALUES  = ( '..' )
+  PATH_SYMBOLS = ( 'KERNELS' )
+
+  KERNELS_TO_LOAD = (
+
+    '$KERNELS/lsk/naif0012.tls'
+    '$KERNELS/pck/pck00011.tpc'
+    '$KERNELS/pck/gm_de431.tpc'
+    '$KERNELS/fk/juice_v44.tf'
+    '$KERNELS/ik/juice_janus_v08.ti'
+    '$KERNELS/sclk/juice_fict_160326_v02.tsc'
+    '$KERNELS/spk/de432s.bsp'
+    '$KERNELS/spk/jup365_19900101_20500101.bsp'
+    '$KERNELS/spk/juice_crema_5_1_a3_v01.bsp'
+    '$KERNELS/ck/juice_sc_default_v01.bc'
+
+  )
+
+\begintext
+```
+
+The `PATH_VALUES = ( '..' )` means `$KERNELS` resolves to the parent directory of the `.tm` file. So the metakernel expects a directory tree like:
+
+```
+JUICE/kernels/
+├── mk/
+│   └── juice_cruise.tm        ← the metakernel
+├── lsk/
+│   └── naif0012.tls
+├── pck/
+│   ├── pck00011.tpc
+│   └── gm_de431.tpc
+├── fk/
+│   └── juice_v44.tf
+├── spk/
+│   ├── de432s.bsp
+│   ├── jup365_19900101_20500101.bsp
+│   └── juice_crema_5_1_a3_v01.bsp
+└── ...
+```
+
+This works if you've mirrored the exact NAIF archive structure locally. But what if:
+
+- You already have `naif0012.tls` in your `generic_kernels/lsk/` from another mission?
+- You have `jup365.bsp` (without the date range suffix) in `generic_kernels/spk/satellites/`?
+- Your kernels are spread across different mount points or a shared lab server?
+
+You could manually copy files around to match the expected layout. Or you could edit the metakernel's `KERNELS_TO_LOAD` list to point to absolute paths. But editing the kernel list is risky — the metakernel is a carefully assembled description of which kernels, in which order, produce correct geometry for a given mission scenario. Changing it introduces a chance of error and breaks the direct traceability to the mission's official release.
+
+
+## The approach: content-addressed identity + symlink indirection
+
+`spice-kernel-db` addresses both problems with two key ideas.
+
+### Content identity via SHA-256
+
+Every kernel file is identified by the SHA-256 hash of its contents. The database tracks:
+
+- **Kernels**: one row per unique content (`sha256`, `filename`, `kernel_type`, `size_bytes`)
+- **Locations**: one row per place a file exists on disk (`sha256`, `abs_path`, `mission`)
+
+When you scan `generic_kernels/` and then `JUICE/kernels/`, the tool hashes every file. If `jup365.bsp` and `jup365_19900101_20500101.bsp` produce the same hash, they share a single `kernels` row but have separate `locations` rows — one tagged `generic`, one tagged `JUICE`.
+
+This means:
+
+- Duplicates are detected automatically, even across filenames
+- You can see exactly which missions share which kernels
+- You can reclaim disk space by replacing duplicates with symlinks to a canonical copy
+
+### Minimal metakernel edits via symlink trees
+
+When rewriting a metakernel for local use, the tool does **not** touch the `KERNELS_TO_LOAD` list. Instead, it:
+
+1. Creates a symlink tree that mirrors the original directory structure expected by the metakernel
+2. Each symlink points to wherever the actual file lives on your disk (possibly in a different mission's tree)
+3. Only `PATH_VALUES` in the `.tm` file is changed — to point to the symlink tree root
+
+The result: the kernel list, the loading order, the header comments — everything stays identical to the mission's official release. You can `diff` the original and rewritten metakernels and see exactly one line changed. This preserves full trust in the metakernel's validity.
+
+If the metakernel asks for `jup365_19900101_20500101.bsp` but you only have `jup365.bsp` (with matching hash), the symlink bridges the gap: it's *named* `jup365_19900101_20500101.bsp` but *points to* wherever `jup365.bsp` actually lives.
+
+### Mission-aware resolution
+
+When resolving kernel filenames, the tool prefers copies from the same mission. If you're rewriting a JUICE metakernel, it will:
+
+1. First look for the file in JUICE's registered locations
+2. Only fall back to other missions if not found in JUICE — and emit a warning when it does
+
+This ensures that mission-specific overrides (e.g., a mission-tuned PCK) take precedence over generic versions, while still benefiting from cross-mission sharing of truly generic files. See [Mission-aware resolution](design.qmd#mission-aware-resolution) for the full priority chain.

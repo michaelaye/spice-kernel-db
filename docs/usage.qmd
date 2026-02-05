@@ -1,0 +1,260 @@
+---
+title: "Usage Guide"
+subtitle: "End-to-end walkthrough"
+---
+
+## Setting up
+
+Install the package:
+
+```bash
+pip install spice-kernel-db
+```
+
+The database is created automatically on first use. By default it lives at `~/.spice_kernels.duckdb`.
+
+```python
+from spice_kernel_db import KernelDB
+
+db = KernelDB()  # uses ~/.spice_kernels.duckdb
+# or:
+db = KernelDB("/path/to/custom.duckdb")
+```
+
+## Scanning kernel directories
+
+Register your local kernel trees. The tool recursively finds all files with known SPICE kernel extensions (`.tls`, `.tpc`, `.bsp`, `.bc`, `.tf`, `.ti`, `.tsc`, `.bds`, `.tm`).
+
+```python
+# Scan with explicit mission labels
+db.scan_directory("/data/spice/generic_kernels", mission="generic")
+db.scan_directory("/data/spice/JUICE/kernels", mission="JUICE")
+db.scan_directory("/data/spice/MRO/kernels", mission="MRO")
+
+# Or let the tool guess the mission from the path
+db.scan_directory("/data/spice/JUICE/kernels")  # auto-detects "JUICE"
+```
+
+Each scan prints a summary:
+
+```
+Scanned /data/spice/generic_kernels: 847 kernel files registered.
+Scanned /data/spice/JUICE/kernels: 312 kernel files registered.
+Scanned /data/spice/MRO/kernels: 1243 kernel files registered.
+```
+
+You can re-scan directories at any time. Existing files are updated (not duplicated) based on their hash and path.
+
+## Checking database stats
+
+```python
+db.stats()
+```
+
+```
+==================================================
+SPICE Kernel Database: /home/user/.spice_kernels.duckdb
+==================================================
+  Unique kernels:   1847
+  Total locations:  2402
+  Unique content:   12.34 GB
+  Duplicated files: 127
+  Missions:         JUICE, MRO, generic
+
+  By type:
+    spk       423 files    8234.1 MB
+    ck        892 files    3102.5 MB
+    pck        34 files     456.2 MB
+    ...
+```
+
+The gap between "unique kernels" and "total locations" tells you how much duplication exists.
+
+## Finding duplicates
+
+```python
+dups = db.report_duplicates()
+```
+
+```
+======================================================================
+Duplicate kernels: 127 files with 2+ copies
+Total wasted space: 2847.3 MB
+======================================================================
+
+  de432s.bsp  (31.2 MB × 3 copies)
+    [generic] /data/spice/generic_kernels/spk/planets/de432s.bsp
+    [JUICE]   /data/spice/JUICE/kernels/spk/de432s.bsp
+    [MRO]     /data/spice/MRO/kernels/spk/de432s.bsp
+
+  jup365.bsp  (323.4 MB × 2 copies)
+    [generic] /data/spice/generic_kernels/spk/satellites/jup365.bsp
+    [JUICE]   /data/spice/JUICE/kernels/spk/jup365_19900101_20500101.bsp
+  ...
+```
+
+Notice how `jup365.bsp` and `jup365_19900101_20500101.bsp` are correctly identified as the same file despite different names.
+
+## Checking a metakernel
+
+Before rewriting, you can check which kernels from a `.tm` file are already available locally and which need to be downloaded:
+
+```python
+result = db.check_metakernel(
+    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
+    mission="JUICE",
+)
+```
+
+```
+Metakernel: /data/spice/JUICE/kernels/mk/juice_crema_5_1.tm
+  Mission:        JUICE
+  Found locally:  38/42
+  Missing:        4
+  Missing files:
+    $KERNELS/ck/juice_sc_crema_5_1_a3_v01.bc
+    $KERNELS/ck/juice_sa_crema_5_1_a3_v01.bc
+    $KERNELS/spk/juice_orb_crema_5_1_a3_v01.bsp
+    $KERNELS/sclk/juice_step_240501.tsc
+  Warnings:
+    ⚠ naif0012.tls: not found in [JUICE] registry, using copy from [generic]
+```
+
+The output tells you:
+
+- **38 out of 42 kernels** are already available locally
+- **4 kernels** still need to be downloaded
+- **1 warning**: `naif0012.tls` was found, but not in the JUICE tree — it's coming from the generic kernels
+
+## Resolving a single kernel
+
+To find where a specific kernel lives on disk:
+
+```python
+path, warnings = db.resolve_kernel("naif0012.tls", preferred_mission="JUICE")
+print(path)
+# /data/spice/JUICE/kernels/lsk/naif0012.tls
+
+path, warnings = db.resolve_kernel("mro_sc_2024.bc", preferred_mission="JUICE")
+print(path)
+# /data/spice/MRO/kernels/ck/mro_sc_2024.bc
+print(warnings)
+# ['mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]']
+```
+
+## Rewriting a metakernel
+
+This is the core workflow. The tool creates a symlink tree and a rewritten `.tm` file:
+
+```python
+out_path, warnings = db.rewrite_metakernel(
+    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
+    output="/data/spice/local/juice_crema_5_1.tm",
+    mission="JUICE",
+    link_root="/data/spice/local/kernels",  # optional, defaults to kernels/ next to output
+)
+```
+
+This produces:
+
+1. **A symlink tree** at `/data/spice/local/kernels/` mirroring the original layout:
+
+    ```
+    /data/spice/local/kernels/
+    ├── ck/
+    │   └── juice_sc_default_v01.bc  →  /data/spice/JUICE/kernels/ck/juice_sc_default_v01.bc
+    ├── lsk/
+    │   └── naif0012.tls             →  /data/spice/JUICE/kernels/lsk/naif0012.tls
+    ├── spk/
+    │   └── jup365_19900101_20500101.bsp → /data/spice/generic_kernels/spk/satellites/jup365.bsp
+    └── ...
+    ```
+
+2. **A rewritten `.tm` file** that differs from the original in exactly one line:
+
+    ```diff
+    -  PATH_VALUES  = ( '..' )
+    +  PATH_VALUES  = ( '/data/spice/local/kernels' )
+    ```
+
+    The `KERNELS_TO_LOAD` list is untouched. The header comments are preserved. You can `diff` the files to confirm.
+
+You can then use the rewritten metakernel with `spiceypy` (or any SPICE toolkit):
+
+```python
+import spiceypy as spice
+
+spice.furnsh("/data/spice/local/juice_crema_5_1.tm")
+# All kernels load via the symlinks — SPICE doesn't care that they're symlinks
+```
+
+## Reclaiming disk space with deduplication
+
+If you want to replace duplicate files with symlinks:
+
+```python
+# Preview first (dry run)
+db.deduplicate_with_symlinks(dry_run=True)
+```
+
+```
+  WOULD replace /data/spice/JUICE/kernels/lsk/naif0012.tls
+    -> symlink to /data/spice/generic_kernels/lsk/naif0012.tls
+  WOULD replace /data/spice/MRO/kernels/lsk/naif0012.tls
+    -> symlink to /data/spice/generic_kernels/lsk/naif0012.tls
+  ...
+
+Would save: 2847.3 MB
+```
+
+When you're satisfied:
+
+```python
+db.deduplicate_with_symlinks(dry_run=False)
+```
+
+After deduplication, all paths still work — they're just symlinks now. The database remains accurate.
+
+
+## Using the context manager
+
+`KernelDB` supports the context manager protocol:
+
+```python
+with KernelDB() as db:
+    db.scan_directory("/data/spice/JUICE/kernels")
+    db.report_duplicates()
+# connection is closed automatically
+```
+
+
+## Typical workflow
+
+A typical session for a multi-mission researcher:
+
+```python
+from spice_kernel_db import KernelDB
+
+with KernelDB() as db:
+    # 1. Register everything you have
+    db.scan_directory("/data/spice/generic_kernels", mission="generic")
+    db.scan_directory("/data/spice/JUICE/kernels")
+    db.scan_directory("/data/spice/MRO/kernels")
+
+    # 2. Check what you need for a specific metakernel
+    result = db.check_metakernel("juice_cruise.tm", mission="JUICE")
+    # → download anything in result["missing"]
+
+    # 3. Re-scan after downloading
+    db.scan_directory("/data/spice/JUICE/kernels")
+
+    # 4. Rewrite the metakernel for local use
+    db.rewrite_metakernel(
+        "juice_cruise.tm",
+        output="juice_local.tm",
+        mission="JUICE",
+    )
+
+    # 5. Optionally deduplicate to save space
+    db.deduplicate_with_symlinks(dry_run=False)
+```

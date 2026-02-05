@@ -13,3 +13,5 @@ build/
 .eggs/
 venv/
 .venv/
+docs/_site/
+docs/.quarto/

@@ -1,0 +1,148 @@
+---
+title: "CLI Reference"
+subtitle: "Command-line interface"
+---
+
+All commands share a `--db` option for specifying the database path (default: `~/.spice_kernels.duckdb`).
+
+## `scan`
+
+Recursively scan a directory and register all kernel files.
+
+```bash
+spice-kernel-db scan <directory> [--mission NAME] [-v]
+```
+
+| Option | Description |
+|--------|-------------|
+| `directory` | Root directory to scan recursively |
+| `--mission` | Override auto-detected mission name |
+| `-v, --verbose` | Print each registered file |
+
+```bash
+# Auto-detect mission from path structure
+spice-kernel-db scan /data/spice/JUICE/kernels
+
+# Explicit mission label
+spice-kernel-db scan /data/spice/generic_kernels --mission generic
+
+# Verbose output
+spice-kernel-db scan /data/spice/MRO/kernels -v
+```
+
+## `stats`
+
+Print database summary statistics.
+
+```bash
+spice-kernel-db stats
+```
+
+Shows unique kernels, total locations, total size, number of duplicates, registered missions, and a breakdown by kernel type.
+
+
+## `duplicates`
+
+Report all duplicated kernels.
+
+```bash
+spice-kernel-db duplicates
+```
+
+Lists each kernel that exists in 2+ locations, showing all paths and missions, with a total wasted space calculation.
+
+
+## `check`
+
+Check which kernels from a metakernel are available locally.
+
+```bash
+spice-kernel-db check <metakernel> [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Path to the `.tm` file |
+| `--mission` | Mission name for preferred-mission resolution |
+
+```bash
+spice-kernel-db check juice_crema_5_1.tm --mission JUICE
+```
+
+Reports found/missing counts, lists missing files, and shows warnings for cross-mission fallbacks.
+
+
+## `rewrite`
+
+Rewrite a metakernel with a local symlink tree.
+
+```bash
+spice-kernel-db rewrite <metakernel> -o <output> [--link-root DIR] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Path to original `.tm` file |
+| `-o, --output` | Output `.tm` path (required) |
+| `--link-root` | Root for symlink tree (default: `kernels/` next to output) |
+| `--mission` | Mission name for preferred-mission resolution |
+
+```bash
+# Basic usage
+spice-kernel-db rewrite juice_crema_5_1.tm -o juice_local.tm
+
+# Custom symlink root
+spice-kernel-db rewrite juice_crema_5_1.tm -o juice_local.tm \
+    --link-root /data/spice/unified
+
+# Explicit mission
+spice-kernel-db rewrite juice_crema_5_1.tm -o juice_local.tm --mission JUICE
+```
+
+
+## `resolve`
+
+Find the local path for a single kernel filename.
+
+```bash
+spice-kernel-db resolve <filename> [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `filename` | Kernel filename to look up |
+| `--mission` | Preferred mission for resolution |
+
+```bash
+spice-kernel-db resolve naif0012.tls --mission JUICE
+# /data/spice/JUICE/kernels/lsk/naif0012.tls
+
+spice-kernel-db resolve mro_sc_2024.bc --mission JUICE
+# /data/spice/MRO/kernels/ck/mro_sc_2024.bc
+#   ⚠ mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]
+```
+
+Prints the resolved path to stdout and any warnings to stderr.
+
+
+## `dedup`
+
+Replace duplicate kernel files with symlinks.
+
+```bash
+spice-kernel-db dedup [--execute]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--execute` | Actually replace files (default: dry run) |
+
+```bash
+# Preview (default, safe)
+spice-kernel-db dedup
+
+# Do it
+spice-kernel-db dedup --execute
+```
+
+The canonical copy (the file that symlinks point to) is chosen with a preference for files in the `generic` mission.

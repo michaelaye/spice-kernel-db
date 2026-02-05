@@ -14,6 +14,15 @@ NAIF SPICE kernel archives for different missions often ship identical copies of
 
 3. **Mission-aware resolution**: When resolving kernel paths, prefers copies from the same mission. Falls back to other missions with a clear warning.
 
+## Documentation
+
+Full documentation (motivation, design, usage guide, API reference) is in the `docs/` directory and built with [Quarto](https://quarto.org/):
+
+```bash
+cd docs
+quarto preview
+```
+
 ## Installation
 
 ```bash
