@@ -3,8 +3,6 @@ name: Deploy Quarto site to GitHub Pages
 on:
   push:
     branches: [main]
-    paths:
-      - 'docs/**'
   workflow_dispatch:
 
 permissions:
@@ -25,6 +23,8 @@ jobs:
 
       - name: Setup Quarto
         uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          cache: true
 
       - name: Render Quarto Project
         uses: quarto-dev/quarto-actions/render@v2
