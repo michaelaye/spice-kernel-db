@@ -52,14 +52,11 @@ class ParsedMetakernel:
         return result
 
 
-def parse_metakernel(path: str | Path) -> ParsedMetakernel:
-    """Parse a SPICE metakernel (.tm) file.
+def _parse_text(text: str, source_path: Path) -> ParsedMetakernel:
+    """Parse metakernel content from text.
 
     Handles multiple \\begindata / \\begintext blocks as per SPICE spec.
     """
-    path = Path(path)
-    text = path.read_text(errors="replace")
-
     # Split on \begindata blocks — collect all data sections
     data_sections: list[str] = []
     parts = re.split(r"\\begindata", text)
@@ -83,12 +80,35 @@ def parse_metakernel(path: str | Path) -> ParsedMetakernel:
         return re.findall(r"'([^']*)'", block)
 
     return ParsedMetakernel(
-        source_path=path.resolve(),
+        source_path=source_path,
         header=header,
         path_values=_extract_list("PATH_VALUES"),
         path_symbols=_extract_list("PATH_SYMBOLS"),
         kernels=_extract_list("KERNELS_TO_LOAD"),
     )
+
+
+def parse_metakernel(path: str | Path) -> ParsedMetakernel:
+    """Parse a SPICE metakernel (.tm) file.
+
+    Handles multiple \\begindata / \\begintext blocks as per SPICE spec.
+    """
+    path = Path(path)
+    text = path.read_text(errors="replace")
+    return _parse_text(text, path.resolve())
+
+
+def parse_metakernel_text(text: str, source: str) -> ParsedMetakernel:
+    """Parse a SPICE metakernel from text content.
+
+    Use this for metakernels fetched from remote URLs where no local
+    file exists.
+
+    Args:
+        text: The metakernel text content.
+        source: Source identifier (e.g. URL) stored as source_path.
+    """
+    return _parse_text(text, Path(source))
 
 
 def write_metakernel(

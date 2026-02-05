@@ -5,17 +5,20 @@ from __future__ import annotations
 import argparse
 import sys
 
+from spice_kernel_db.config import ensure_config
 from spice_kernel_db.db import KernelDB
 
 
 def main(argv: list[str] | None = None):
+    config = ensure_config()
+
     parser = argparse.ArgumentParser(
         prog="spice-kernel-db",
         description="SPICE kernel deduplication database and metakernel rewriter",
     )
     parser.add_argument(
-        "--db", default="~/.spice_kernels.duckdb",
-        help="Path to DuckDB database file (default: ~/.spice_kernels.duckdb)",
+        "--db", default=config.db_path,
+        help=f"Path to DuckDB database file (default: {config.db_path})",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -75,6 +78,22 @@ def main(argv: list[str] | None = None):
     p_resolve.add_argument("filename", help="Kernel filename to resolve")
     p_resolve.add_argument("--mission", help="Preferred mission")
 
+    # --- acquire ---
+    p_acquire = sub.add_parser(
+        "acquire",
+        help="Download missing kernels for a remote metakernel",
+    )
+    p_acquire.add_argument("url", help="URL to a remote .tm metakernel")
+    p_acquire.add_argument(
+        "--download-dir", default=config.kernel_dir,
+        help=f"Directory for downloaded kernels (default: {config.kernel_dir})",
+    )
+    p_acquire.add_argument("--mission", help="Override auto-detected mission name")
+    p_acquire.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -119,6 +138,14 @@ def main(argv: list[str] | None = None):
                 print(f"Not found: {args.filename}", file=sys.stderr)
             for w in warnings:
                 print(f"  ⚠ {w}", file=sys.stderr)
+
+        elif args.command == "acquire":
+            db.acquire_metakernel(
+                args.url,
+                download_dir=args.download_dir,
+                mission=args.mission,
+                yes=args.yes,
+            )
 
     finally:
         db.close()

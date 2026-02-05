@@ -27,9 +27,29 @@ from spice_kernel_db.hashing import (
     guess_mission,
     sha256_file,
 )
-from spice_kernel_db.parser import ParsedMetakernel, parse_metakernel, write_metakernel
+from spice_kernel_db.parser import (
+    ParsedMetakernel,
+    parse_metakernel,
+    parse_metakernel_text,
+    write_metakernel,
+)
+from spice_kernel_db.remote import (
+    download_kernel,
+    fetch_metakernel,
+    query_remote_sizes,
+    resolve_kernel_urls,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _format_size(n: int) -> str:
+    """Format byte count as human-readable string."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
 
 
 class KernelDB:
@@ -526,6 +546,138 @@ class KernelDB:
                 print(f"    ⚠ {w}")
 
         return out_path, all_warnings
+
+    # ------------------------------------------------------------------
+    # Acquire (remote metakernel)
+    # ------------------------------------------------------------------
+
+    def acquire_metakernel(
+        self,
+        url: str,
+        download_dir: str | Path | None = None,
+        mission: str | None = None,
+        yes: bool = False,
+    ) -> dict:
+        """Fetch a remote metakernel, show status, and download missing kernels.
+
+        Args:
+            url: URL to a remote .tm metakernel file.
+            download_dir: Where to store downloaded kernels. Preserves the
+                remote subdirectory structure (lsk/, spk/, etc.).
+            mission: Override auto-detected mission name.
+            yes: If True, skip the confirmation prompt.
+
+        Returns:
+            dict with keys: found, missing, downloaded, warnings
+        """
+        # 1. Fetch and parse
+        print(f"Fetching {url} ...")
+        text = fetch_metakernel(url)
+        parsed = parse_metakernel_text(text, url)
+        if mission is None:
+            mission = guess_mission(url)
+
+        # 2. Resolve kernel URLs
+        kernel_urls = resolve_kernel_urls(url, parsed)
+        relpaths = parsed.kernel_relpaths()
+        filenames = parsed.kernel_filenames()
+
+        # 3. Check local DB for each kernel
+        found_indices: list[int] = []
+        missing_indices: list[int] = []
+        for i, fname in enumerate(filenames):
+            local, _ = self.resolve_kernel(fname, preferred_mission=mission)
+            if local and Path(local).is_file():
+                found_indices.append(i)
+            else:
+                missing_indices.append(i)
+
+        # 4. Query remote sizes for ALL kernels (parallel HEAD)
+        print(f"Querying file sizes for {len(kernel_urls)} kernels ...")
+        sizes = query_remote_sizes(kernel_urls)
+
+        # 5. Display table
+        mk_name = url.rsplit("/", 1)[-1]
+        total = len(filenames)
+        n_found = len(found_indices)
+        n_missing = len(missing_indices)
+        download_bytes = sum(
+            sizes.get(kernel_urls[i]) or 0 for i in missing_indices
+        )
+
+        print(f"\nMetakernel: {mk_name} ({total} kernels)\n")
+        name_width = max((len(filenames[i]) for i in range(total)), default=20)
+        name_width = max(name_width, 20)
+        print(f"  {'Kernel':<{name_width}}  {'Size':>10}  Status")
+        print(f"  {'─' * name_width}  {'─' * 10}  {'─' * 8}")
+        for i in range(total):
+            fname = filenames[i]
+            sz = sizes.get(kernel_urls[i])
+            sz_str = _format_size(sz) if sz is not None else "unknown"
+            status = "in db" if i in found_indices else "missing"
+            print(f"  {fname:<{name_width}}  {sz_str:>10}  {status}")
+
+        print(
+            f"\n  Total: {total} | In DB: {n_found} | "
+            f"Missing: {n_missing} | Download: {_format_size(download_bytes)}"
+        )
+
+        if n_missing == 0:
+            print("\n  All kernels already in database.")
+            return {
+                "found": found_indices,
+                "missing": [],
+                "downloaded": [],
+                "warnings": [],
+            }
+
+        # 6. Prompt
+        if not yes:
+            answer = input(
+                f"\nDownload {n_missing} missing kernels "
+                f"({_format_size(download_bytes)})? [y/N]: "
+            ).strip().lower()
+            if answer not in ("y", "yes"):
+                print("Aborted.")
+                return {
+                    "found": found_indices,
+                    "missing": missing_indices,
+                    "downloaded": [],
+                    "warnings": [],
+                }
+
+        # 7. Download and register
+        if download_dir is None:
+            download_dir = Path("~/.local/share/spice-kernel-db/kernels").expanduser()
+        download_dir = Path(download_dir).expanduser().resolve()
+
+        downloaded: list[str] = []
+        warnings: list[str] = []
+        for idx, i in enumerate(missing_indices, 1):
+            kurl = kernel_urls[i]
+            relpath = relpaths[i]
+            dest = download_dir / mission / relpath
+            print(f"  [{idx}/{n_missing}] {filenames[i]} ... ", end="", flush=True)
+            try:
+                download_kernel(kurl, dest)
+                self.register_file(dest, mission=mission, source_url=kurl)
+                downloaded.append(str(dest))
+                print("ok")
+            except Exception as e:
+                warnings.append(f"{filenames[i]}: {e}")
+                print(f"FAILED ({e})")
+
+        print(f"\n  Downloaded: {len(downloaded)}/{n_missing}")
+        if warnings:
+            for w in warnings:
+                print(f"  ⚠ {w}")
+
+        return {
+            "found": found_indices,
+            "missing": missing_indices,
+            "downloaded": downloaded,
+            "warnings": warnings,
+        }
 
     # ------------------------------------------------------------------
     # Stats

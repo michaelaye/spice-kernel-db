@@ -147,6 +147,31 @@ Returns `(output_path, warnings)`.
 
 See [Minimal metakernel edits](design.qmd#minimal-edits) for the design rationale.
 
+#### `acquire_metakernel`
+
+```python
+db.acquire_metakernel(
+    url: str,
+    download_dir: str | Path | None = None,
+    mission: str | None = None,
+    yes: bool = False,
+) -> dict
+```
+
+Fetch a remote metakernel, display a status table, and download missing kernels.
+
+1. Fetches and parses the remote `.tm` file
+2. Resolves kernel entries to full URLs (using `PATH_VALUES` relative to the metakernel URL)
+3. Checks each kernel against the local database
+4. Queries remote file sizes via parallel HTTP HEAD requests
+5. Displays a summary table with kernel names, sizes, and status (`in db` / `missing`)
+6. Prompts for confirmation (unless `yes=True`)
+7. Downloads missing kernels, preserving subdirectory structure, and registers them
+
+`download_dir` defaults to the configured `kernel_dir` from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
+
+Returns a dict with keys: `found`, `missing`, `downloaded`, `warnings`.
+
 #### `index_metakernel`
 
 ```python
@@ -217,7 +242,19 @@ from spice_kernel_db import parse_metakernel
 parse_metakernel(path: str | Path) -> ParsedMetakernel
 ```
 
-Parse a SPICE metakernel (`.tm`) file without needing a database.
+Parse a SPICE metakernel (`.tm`) file from a local path without needing a database.
+
+## `parse_metakernel_text`
+
+```python
+from spice_kernel_db import parse_metakernel_text
+```
+
+```python
+parse_metakernel_text(text: str, source: str) -> ParsedMetakernel
+```
+
+Parse a SPICE metakernel from text content (e.g. fetched from a remote URL). The `source` string is stored as the `source_path` attribute for reference.
 
 ### `ParsedMetakernel`
 
@@ -239,3 +276,52 @@ Properties and methods:
 | `resolve(entry)` | `str` | Replace `$SYMBOL`s with their values |
 | `kernel_filenames()` | `list[str]` | Basenames of all kernels |
 | `kernel_relpaths()` | `list[str]` | Relative paths with `$SYMBOL` stripped |
+
+---
+
+## Configuration
+
+```python
+from spice_kernel_db import Config, ensure_config
+```
+
+### `ensure_config`
+
+```python
+ensure_config() -> Config
+```
+
+Load configuration from `~/.config/spice-kernel-db/config.toml`. If no config file exists, runs an interactive first-time setup prompting for the database path and kernel storage directory.
+
+### `Config`
+
+Dataclass with attributes:
+
+| Attribute | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `db_path` | `str` | `~/.local/share/spice-kernel-db/kernels.duckdb` | Path to the DuckDB database |
+| `kernel_dir` | `str` | `~/.local/share/spice-kernel-db/kernels` | Default directory for downloaded kernels |
+
+---
+
+## Remote utilities
+
+```python
+from spice_kernel_db import fetch_metakernel, resolve_kernel_urls
+```
+
+### `fetch_metakernel`
+
+```python
+fetch_metakernel(url: str) -> str
+```
+
+Download and return the text content of a remote metakernel file.
+
+### `resolve_kernel_urls`
+
+```python
+resolve_kernel_urls(mk_url: str, parsed: ParsedMetakernel) -> list[str]
+```
+
+Resolve each `KERNELS_TO_LOAD` entry in a parsed metakernel to a full URL, using `PATH_VALUES` relative to the metakernel's own URL.

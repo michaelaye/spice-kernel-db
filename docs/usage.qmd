@@ -11,12 +11,54 @@ Install the package:
 pip install spice-kernel-db
 ```
 
-The database is created automatically on first use. By default it lives at `~/.spice_kernels.duckdb`.
+### First-run configuration
+
+On first use, the tool prompts you to configure where to store things:
+
+```
+spice-kernel-db: First-time setup
+
+  Database location [~/.local/share/spice-kernel-db/kernels.duckdb]:
+  Kernel storage directory [~/.local/share/spice-kernel-db/kernels/]:
+
+  Config saved to ~/.config/spice-kernel-db/config.toml
+```
+
+Your choices are saved to `~/.config/spice-kernel-db/config.toml`:
+
+```toml
+[database]
+path = "~/.local/share/spice-kernel-db/kernels.duckdb"
+
+[storage]
+kernel_dir = "~/.local/share/spice-kernel-db/kernels"
+```
+
+You can edit this file directly at any time. The `--db` CLI flag overrides the configured database path for a single command.
+
+### Multi-machine setup with Dropbox
+
+If you want to share kernel files across machines via Dropbox (or similar sync services), the recommended setup is:
+
+- **Kernel files on Dropbox** — they're write-once, read-many, safe for sync
+- **Database local to each machine** — DuckDB uses file locking that doesn't play well with sync services
+
+```toml
+[database]
+path = "~/.local/share/spice-kernel-db/kernels.duckdb"
+
+[storage]
+kernel_dir = "~/Dropbox/spice-kernels"
+```
+
+After setting up a new machine, rebuild the index with `spice-kernel-db scan ~/Dropbox/spice-kernels`. The `acquire` command downloads into the shared Dropbox folder, and kernels sync to other machines automatically.
+
+### Python API
 
 ```python
 from spice_kernel_db import KernelDB
 
-db = KernelDB()  # uses ~/.spice_kernels.duckdb
+db = KernelDB()  # uses the configured database path
 # or:
 db = KernelDB("/path/to/custom.duckdb")
 ```
@@ -125,6 +167,55 @@ The output tells you:
 - **38 out of 42 kernels** are already available locally
 - **4 kernels** still need to be downloaded
 - **1 warning**: `naif0012.tls` was found, but not in the JUICE tree — it's coming from the generic kernels
+
+## Acquiring kernels from a remote metakernel
+
+Instead of manually downloading missing kernels, you can point the tool at a remote metakernel URL and let it figure out what's needed:
+
+```python
+result = db.acquire_metakernel(
+    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm",
+    mission="JUICE",
+)
+```
+
+The tool:
+
+1. Fetches and parses the remote `.tm` file
+2. Resolves each kernel entry to a full URL (using `PATH_VALUES` relative to the metakernel location)
+3. Checks which kernels are already in your local database
+4. Queries file sizes for all kernels via parallel HTTP HEAD requests
+5. Displays a summary table:
+
+```
+Metakernel: juice_crema_5_1.tm (42 kernels)
+
+  Kernel                                    Size       Status
+  ─────────────────────────────────────── ────────── ────────
+  naif0012.tls                               5.2 KB   in db
+  pck00011.tpc                             123.4 KB   in db
+  juice_sc_crema_5_1_a3_v01.bc              78.9 MB   missing
+  ...
+
+  Total: 42 | In DB: 38 | Missing: 4 | Download: 312.5 MB
+
+Download 4 missing kernels (312.5 MB)? [y/N]:
+```
+
+If you confirm, the missing kernels are downloaded into your configured kernel storage directory (preserving the remote subdirectory structure like `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
+
+You can skip the prompt with `yes=True`:
+
+```python
+db.acquire_metakernel(url, mission="JUICE", yes=True)
+```
+
+Or specify a custom download directory:
+
+```python
+db.acquire_metakernel(url, download_dir="/data/spice/juice", mission="JUICE")
+```
+
 
 ## Resolving a single kernel
 
@@ -236,25 +327,24 @@ A typical session for a multi-mission researcher:
 from spice_kernel_db import KernelDB
 
 with KernelDB() as db:
-    # 1. Register everything you have
+    # 1. Register everything you already have
     db.scan_directory("/data/spice/generic_kernels", mission="generic")
     db.scan_directory("/data/spice/JUICE/kernels")
     db.scan_directory("/data/spice/MRO/kernels")
 
-    # 2. Check what you need for a specific metakernel
-    result = db.check_metakernel("juice_cruise.tm", mission="JUICE")
-    # → download anything in result["missing"]
+    # 2. Acquire missing kernels for a new metakernel
+    db.acquire_metakernel(
+        "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_cruise.tm",
+        mission="JUICE",
+    )
 
-    # 3. Re-scan after downloading
-    db.scan_directory("/data/spice/JUICE/kernels")
-
-    # 4. Rewrite the metakernel for local use
+    # 3. Rewrite the metakernel for local use
     db.rewrite_metakernel(
         "juice_cruise.tm",
         output="juice_local.tm",
         mission="JUICE",
     )
 
-    # 5. Optionally deduplicate to save space
+    # 4. Optionally deduplicate to save space
     db.deduplicate_with_symlinks(dry_run=False)
 ```

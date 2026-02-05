@@ -8,9 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from spice_kernel_db import KernelDB, parse_metakernel
+from spice_kernel_db.config import Config, load_config, save_config
 from spice_kernel_db.hashing import classify_kernel, guess_mission, sha256_file
-from spice_kernel_db.parser import write_metakernel
+from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
+from spice_kernel_db.remote import resolve_kernel_urls
 
 
 # ---------------------------------------------------------------------------
@@ -463,3 +467,189 @@ class TestDedupWithSymlinks:
         assert juice_lsk.is_symlink()
         # But it should still be readable
         assert juice_lsk.read_text() == "FAKE LSK naif0012"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: config module
+# ---------------------------------------------------------------------------
+
+class TestConfig:
+    def test_save_and_load(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / "config"
+        config_file = config_dir / "config.toml"
+        monkeypatch.setattr("spice_kernel_db.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("spice_kernel_db.config.CONFIG_FILE", config_file)
+
+        cfg = Config(db_path="/tmp/test.duckdb", kernel_dir="/tmp/kernels")
+        save_config(cfg)
+        assert config_file.is_file()
+
+        loaded = load_config()
+        assert loaded is not None
+        assert loaded.db_path == "/tmp/test.duckdb"
+        assert loaded.kernel_dir == "/tmp/kernels"
+
+    def test_load_missing_returns_none(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "nonexistent" / "config.toml"
+        monkeypatch.setattr("spice_kernel_db.config.CONFIG_FILE", config_file)
+        assert load_config() is None
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: parse_metakernel_text
+# ---------------------------------------------------------------------------
+
+class TestParseMetakernelText:
+    SAMPLE_MK = textwrap.dedent("""\
+        KPL/MK
+
+        Test metakernel from URL
+
+        \\begindata
+
+          PATH_VALUES  = ( '..' )
+          PATH_SYMBOLS = ( 'KERNELS' )
+
+          KERNELS_TO_LOAD = (
+
+            '$KERNELS/lsk/naif0012.tls'
+            '$KERNELS/spk/de432s.bsp'
+
+          )
+
+        \\begintext
+    """)
+
+    def test_parse_from_text(self):
+        parsed = parse_metakernel_text(
+            self.SAMPLE_MK, "https://example.com/mk/test.tm"
+        )
+        assert parsed.path_values == [".."]
+        assert parsed.path_symbols == ["KERNELS"]
+        assert len(parsed.kernels) == 2
+        assert "$KERNELS/lsk/naif0012.tls" in parsed.kernels
+
+    def test_kernel_filenames_from_text(self):
+        parsed = parse_metakernel_text(self.SAMPLE_MK, "test.tm")
+        assert parsed.kernel_filenames() == ["naif0012.tls", "de432s.bsp"]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: resolve_kernel_urls
+# ---------------------------------------------------------------------------
+
+class TestResolveKernelUrls:
+    def test_basic_resolution(self):
+        text = textwrap.dedent("""\
+            KPL/MK
+
+            \\begindata
+
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+
+              KERNELS_TO_LOAD = (
+                '$KERNELS/lsk/naif0012.tls'
+                '$KERNELS/spk/de432s.bsp'
+              )
+
+            \\begintext
+        """)
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        parsed = parse_metakernel_text(text, mk_url)
+        urls = resolve_kernel_urls(mk_url, parsed)
+
+        assert len(urls) == 2
+        assert urls[0] == "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/lsk/naif0012.tls"
+        assert urls[1] == "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/spk/de432s.bsp"
+
+    def test_multiple_path_symbols(self):
+        text = textwrap.dedent("""\
+            KPL/MK
+
+            \\begindata
+
+              PATH_VALUES  = ( '/data/generic' '/data/mission' )
+              PATH_SYMBOLS = ( 'GENERIC' 'MISSION' )
+
+              KERNELS_TO_LOAD = (
+                '$GENERIC/lsk/naif0012.tls'
+                '$MISSION/ck/mission.bc'
+              )
+
+            \\begintext
+        """)
+        mk_url = "https://example.com/mk/test.tm"
+        parsed = parse_metakernel_text(text, mk_url)
+        urls = resolve_kernel_urls(mk_url, parsed)
+
+        assert len(urls) == 2
+        assert "generic/lsk/naif0012.tls" in urls[0]
+        assert "mission/ck/mission.bc" in urls[1]
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: acquire_metakernel
+# ---------------------------------------------------------------------------
+
+class TestAcquireMetakernel:
+    REMOTE_MK_TEXT = textwrap.dedent("""\
+        KPL/MK
+
+        Test remote metakernel
+
+        \\begindata
+
+          PATH_VALUES  = ( '..' )
+          PATH_SYMBOLS = ( 'KERNELS' )
+
+          KERNELS_TO_LOAD = (
+
+            '$KERNELS/lsk/naif0012.tls'
+            '$KERNELS/spk/new_kernel.bsp'
+
+          )
+
+        \\begintext
+    """)
+
+    def test_acquire_shows_table(self, populated_db, tmp_path, capsys):
+        """acquire_metakernel prints a table even when we skip download."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+
+        def mock_urlopen(req_or_url):
+            """Mock urlopen that returns metakernel text or HEAD sizes."""
+            mock_resp = MagicMock()
+
+            if isinstance(req_or_url, str):
+                url = req_or_url
+            else:
+                url = req_or_url.full_url if hasattr(req_or_url, 'full_url') else str(req_or_url)
+
+            if url.endswith(".tm"):
+                mock_resp.read.return_value = self.REMOTE_MK_TEXT.encode()
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                return mock_resp
+
+            # HEAD request for sizes
+            mock_resp.headers = {"Content-Length": "1024"}
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            return mock_resp
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            result = populated_db.acquire_metakernel(
+                mk_url,
+                download_dir=tmp_path / "downloads",
+                mission="JUICE",
+                yes=False,
+            )
+
+        captured = capsys.readouterr()
+        assert "naif0012.tls" in captured.out
+        assert "new_kernel.bsp" in captured.out
+        # naif0012.tls should be "in db" since populated_db has it
+        assert "in db" in captured.out
+        assert "missing" in captured.out

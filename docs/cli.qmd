@@ -3,7 +3,7 @@ title: "CLI Reference"
 subtitle: "Command-line interface"
 ---
 
-All commands share a `--db` option for specifying the database path (default: `~/.spice_kernels.duckdb`).
+On first run, the tool prompts for configuration (database path and kernel storage directory). These are saved to `~/.config/spice-kernel-db/config.toml`. All commands share a `--db` option to override the configured database path.
 
 ## `scan`
 
@@ -146,3 +146,37 @@ spice-kernel-db dedup --execute
 ```
 
 The canonical copy (the file that symlinks point to) is chosen with a preference for files in the `generic` mission.
+
+
+## `acquire`
+
+Fetch a remote metakernel, show which kernels are needed, and download missing ones.
+
+```bash
+spice-kernel-db acquire <url> [--download-dir DIR] [--mission NAME] [-y]
+```
+
+| Option | Description |
+|--------|-------------|
+| `url` | URL to a remote `.tm` metakernel |
+| `--download-dir` | Override default kernel storage directory |
+| `--mission` | Override auto-detected mission name |
+| `-y, --yes` | Skip confirmation prompt |
+
+```bash
+# Interactive (shows table, prompts before downloading)
+spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm
+
+# Auto-confirm download
+spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm -y
+
+# Custom download directory
+spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm \
+    --download-dir /data/spice/juice
+
+# Override mission name
+spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm \
+    --mission JUICE
+```
+
+The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.

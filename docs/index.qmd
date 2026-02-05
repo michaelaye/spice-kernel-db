@@ -11,7 +11,7 @@ subtitle: "Content-addressed SPICE kernel database for deduplication and metaker
 
 2. **Metakernels don't work with your local file layout.** A mission's `.tm` file expects all kernels under a specific directory tree. But your local setup is different — files are scattered across mission archives, generic kernel directories, and maybe a shared NAS.
 
-This tool uses **SHA-256 content hashing** to identify duplicate files regardless of filename, provides **mission-aware kernel resolution** so you always know where a file came from, and rewrites metakernels with **minimal edits** — only `PATH_VALUES` is changed, preserving full trust in the original kernel list.
+This tool uses **SHA-256 content hashing** to identify duplicate files regardless of filename, provides **mission-aware kernel resolution** so you always know where a file came from, can **acquire missing kernels** directly from remote NAIF servers, and rewrites metakernels with **minimal edits** — only `PATH_VALUES` is changed, preserving full trust in the original kernel list.
 
 ## Installation
 
@@ -29,6 +29,16 @@ pip install -e ".[dev]"
 
 ## Quick taste
 
+```bash
+# First run prompts for configuration
+spice-kernel-db stats
+
+# Acquire kernels for a remote metakernel
+spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm
+```
+
+Or from Python:
+
 ```python
 from spice_kernel_db import KernelDB
 
@@ -41,6 +51,12 @@ db.scan_directory("/data/spice/MRO/kernels")
 
 # What's duplicated?
 db.report_duplicates()
+
+# Acquire missing kernels from a remote metakernel
+db.acquire_metakernel(
+    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm",
+    mission="JUICE",
+)
 
 # Rewrite a JUICE metakernel for local use
 db.rewrite_metakernel(
