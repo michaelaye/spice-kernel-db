@@ -3,6 +3,9 @@ name: Deploy Quarto site to GitHub Pages
 on:
   push:
     branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/publish.yml'
   workflow_dispatch:
 
 permissions:
