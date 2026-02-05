@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spice-kernel-db"
+version = "0.1.0"
+description = "Content-addressed SPICE kernel database for deduplication and metakernel rewriting across missions"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Michael" },
+]
+keywords = ["spice", "naif", "kernels", "planetary-science", "deduplication"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "duckdb>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-tmp-files>=0.0.2",
+]
+
+[project.scripts]
+spice-kernel-db = "spice_kernel_db.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/michaelaye/spice-kernel-db"
+Repository = "https://github.com/michaelaye/spice-kernel-db"
+Issues = "https://github.com/michaelaye/spice-kernel-db/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spice_kernel_db"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
