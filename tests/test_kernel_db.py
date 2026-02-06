@@ -772,6 +772,35 @@ class TestMetakernelListingInfo:
         assert "in db" in captured.out
         assert "missing" in captured.out
 
+    def test_list_metakernels_identical_content(self, populated_db, tmp_path, capsys):
+        """list_metakernels flags metakernels with identical kernel lists."""
+        self._acquire_test_mk(populated_db, tmp_path)
+
+        # Manually insert a second metakernel with the same kernel entries
+        mk_path_2 = str(tmp_path / "downloads" / "JUICE" / "mk" / "test_v2.tm")
+        populated_db.con.execute("""
+            INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at)
+            VALUES (?, 'JUICE', 'https://example.com/test_v2.tm', 'test_v2.tm', CURRENT_TIMESTAMP)
+        """, [mk_path_2])
+        # Copy the same entries from the first metakernel
+        populated_db.con.execute("""
+            INSERT INTO metakernel_entries (mk_path, entry_index, raw_entry, filename)
+            SELECT ?, entry_index, raw_entry, filename
+            FROM metakernel_entries
+            WHERE mk_path != ?
+        """, [mk_path_2, mk_path_2])
+
+        results = populated_db.list_metakernels()
+        assert len(results) == 2
+
+        # One should be flagged as identical to the other
+        identical = [r for r in results if r["identical_to"] is not None]
+        assert len(identical) == 1
+        assert identical[0]["identical_to"] in ("test.tm", "test_v2.tm")
+
+        captured = capsys.readouterr()
+        assert "identical to" in captured.out
+
     def test_info_metakernel_not_found(self, populated_db, capsys):
         """info_metakernel returns None for unknown name."""
         result = populated_db.info_metakernel("nonexistent.tm")

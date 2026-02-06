@@ -773,6 +773,32 @@ class KernelDB:
             print("No tracked metakernels.")
             return results
 
+        # Compute content fingerprints to detect identical metakernels
+        import hashlib
+        fingerprints: dict[str, str] = {}  # mk_path -> fingerprint
+        for r in results:
+            entry_rows = self.con.execute("""
+                SELECT filename FROM metakernel_entries
+                WHERE mk_path = ? ORDER BY filename
+            """, [r["mk_path"]]).fetchall()
+            key = "\n".join(row[0] for row in entry_rows)
+            fingerprints[r["mk_path"]] = hashlib.md5(key.encode()).hexdigest()
+
+        # Group by fingerprint: map fingerprint -> list of filenames
+        from collections import defaultdict
+        fp_groups: dict[str, list[str]] = defaultdict(list)
+        for r in results:
+            fp_groups[fingerprints[r["mk_path"]]].append(r["filename"])
+
+        # For each result, find its duplicate reference (first in group)
+        for r in results:
+            fp = fingerprints[r["mk_path"]]
+            group = fp_groups[fp]
+            if len(group) > 1 and r["filename"] != group[0]:
+                r["identical_to"] = group[0]
+            else:
+                r["identical_to"] = None
+
         # Print summary table
         name_w = max(len(r["filename"]) for r in results)
         name_w = max(name_w, 12)
@@ -792,6 +818,8 @@ class KernelDB:
                 f"  {r['mission']:<{mis_w}}  {r['filename']:<{name_w}}"
                 f"  {r['n_kernels']:>7}  {source_short}"
             )
+            if r["identical_to"]:
+                print(f"  {'':<{mis_w}}  ↳ identical to {r['identical_to']}")
         print()
         return results
 
