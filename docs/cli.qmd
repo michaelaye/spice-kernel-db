@@ -185,12 +185,12 @@ spice-kernel-db metakernels juice_crema_5_1.tm
 When no `name` is given, prints a summary table with kernel counts and availability. When a `name` is given, shows per-kernel status with type, size, and whether each kernel is in the database or missing.
 
 
-## `acquire`
+## `get`
 
 Fetch a remote metakernel, show which kernels are needed, and download missing ones.
 
 ```bash
-spice-kernel-db acquire <url> [--download-dir DIR] [--mission NAME] [-y]
+spice-kernel-db get <url> [--download-dir DIR] [--mission NAME] [-y]
 ```
 
 | Option | Description |
@@ -202,19 +202,19 @@ spice-kernel-db acquire <url> [--download-dir DIR] [--mission NAME] [-y]
 
 ```bash
 # By filename (after browsing a mission at least once)
-spice-kernel-db acquire juice_ops.tm
+spice-kernel-db get juice_ops.tm
 
 # By filename with explicit mission (when multiple missions are known)
-spice-kernel-db acquire juice_ops.tm --mission JUICE
+spice-kernel-db get juice_ops.tm --mission JUICE
 
 # By full URL
-spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
+spice-kernel-db get https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
 
 # Auto-confirm download
-spice-kernel-db acquire juice_ops.tm -y
+spice-kernel-db get juice_ops.tm -y
 ```
 
-When a filename is given instead of a URL, the tool looks up the mk/ directory URL from previously acquired metakernels. If multiple missions are known, use `--mission` to disambiguate.
+When a filename is given instead of a URL, the tool looks up the mk/ directory URL from the `missions` table (configured via `mission add`). Mission names support case-insensitive prefix matching (e.g. `--mission bepi` matches `BEPICOLOMBO`). If multiple missions are known, use `--mission` to disambiguate.
 
 The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
 
@@ -234,17 +234,18 @@ spice-kernel-db browse [url] [--mission NAME]
 | `--show-versioned` | Show versioned snapshots under each metakernel |
 
 ```bash
-# List all known mk/ directories (derived from previously acquired metakernels)
+# List all known mk/ directories (from missions table and previously acquired metakernels)
 spice-kernel-db browse
 
-# Browse by mission name (looks up the URL from previous acquisitions)
+# Browse by mission name (prefix matching, case-insensitive)
 spice-kernel-db browse JUICE
+spice-kernel-db browse bepi    # matches BEPICOLOMBO
 
 # Browse by full URL
 spice-kernel-db browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
 ```
 
-**Without a URL**, lists all remote `mk/` directories known from previous `acquire` commands, along with how many metakernels have been acquired from each:
+**Without a URL**, lists all remote `mk/` directories known from the `missions` table and previous `get` commands, along with how many metakernels have been fetched from each:
 
 ```
 Known remote metakernel directories:
@@ -278,6 +279,62 @@ With `--show-versioned`, versioned snapshots are listed under each base metakern
   juice_ops.tm                                 2025-11-27 09:30    12K  yes
     snapshot: juice_ops_v230_20221128_001.tm   2022-11-28 10:00     8K
     snapshot: juice_ops_v461_20251127_001.tm   2025-11-27 09:30    12K
+```
+
+
+## `mission`
+
+Configure missions for filename-based acquisition and browsing. Mission names are matched case-insensitively and support prefix matching — e.g. `bepi` matches `BEPICOLOMBO`, `ju` matches `JUICE` (as long as the prefix is unambiguous).
+
+### `mission add`
+
+Interactively set up a new mission. The command guides you through:
+
+1. Choose a server: `[1] NASA  [2] ESA`
+2. View available missions from that server
+3. Select one by number or name
+4. Configure deduplication: `Enable deduplication for this mission? [Y/n]:`
+5. Store in database
+
+```bash
+spice-kernel-db mission add
+```
+
+After setup, the command prints next steps for acquiring metakernels.
+
+### `mission list`
+
+Show all configured missions with their server, deduplication status, and mk/ directory URL.
+
+```bash
+spice-kernel-db mission list
+```
+
+Example output:
+
+```
+Configured missions:
+
+  Mission  Server  Dedup  mk/ URL
+  ───────  ──────  ─────  ──────────────────────────────
+  JUICE    ESA     yes    https://spiftp.esac.esa.int/data/SPICE/JUICE/kernels/mk/
+  MRO      NASA    no     https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/
+```
+
+### `mission remove`
+
+Remove a configured mission from the database.
+
+```bash
+spice-kernel-db mission remove <name>
+```
+
+| Option | Description |
+|--------|-------------|
+| `name` | Mission name to remove |
+
+```bash
+spice-kernel-db mission remove MRO
 ```
 
 

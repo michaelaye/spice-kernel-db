@@ -58,14 +58,25 @@ def guess_mission(filepath: str) -> str:
     """Best-effort mission name from path components.
 
     Heuristic: look for a directory named before 'kernels/' that isn't
-    a generic infrastructure name, then fall back to filename patterns.
+    a generic infrastructure name, then fall back to kernel-type directory
+    patterns, then to filename patterns.
     """
+    _KERNEL_TYPE_DIRS = {"ck", "spk", "pck", "fk", "ik", "lsk", "sclk", "dsk", "mk"}
     parts = Path(filepath).parts
     # Pattern: .../MISSION/kernels/...
     for i, p in enumerate(parts):
         if p.lower() == "kernels" and i > 0:
             candidate = parts[i - 1]
             if candidate.lower() not in ("naif", "pub", "data", "spice"):
+                return candidate
+
+    # Pattern: .../MISSION/<kernel_type>/file (no intermediate kernels/ dir)
+    for i, p in enumerate(parts):
+        if p.lower() in _KERNEL_TYPE_DIRS and i > 0:
+            candidate = parts[i - 1]
+            if candidate.lower() not in (
+                "naif", "pub", "data", "spice", "kernels",
+            ) and "generic" not in candidate.lower():
                 return candidate
 
     # Fallback: known mission names in filename

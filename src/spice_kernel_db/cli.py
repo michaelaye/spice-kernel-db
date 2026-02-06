@@ -12,6 +12,7 @@ from spice_kernel_db.config import (
     show_config,
 )
 from spice_kernel_db.db import KernelDB
+from spice_kernel_db.remote import SPICE_SERVERS, list_remote_missions
 
 
 def main(argv: list[str] | None = None):
@@ -19,7 +20,7 @@ def main(argv: list[str] | None = None):
 
     parser = argparse.ArgumentParser(
         prog="spice-kernel-db",
-        description="SPICE kernel deduplication database and metakernel rewriter",
+        description="Browse, get, and manage SPICE kernels and metakernels",
     )
     parser.add_argument(
         "--db", default=config.db_path,
@@ -97,21 +98,21 @@ def main(argv: list[str] | None = None):
     )
     p_mk.add_argument("--mission", help="Filter by mission name")
 
-    # --- acquire ---
-    p_acquire = sub.add_parser(
-        "acquire",
+    # --- get ---
+    p_get = sub.add_parser(
+        "get",
         help="Download missing kernels for a remote metakernel",
     )
-    p_acquire.add_argument(
+    p_get.add_argument(
         "url",
         help="URL to a remote .tm metakernel, or just a filename (e.g. juice_ops.tm)",
     )
-    p_acquire.add_argument(
+    p_get.add_argument(
         "--download-dir", default=config.kernel_dir,
         help=f"Directory for downloaded kernels (default: {config.kernel_dir})",
     )
-    p_acquire.add_argument("--mission", help="Override auto-detected mission name")
-    p_acquire.add_argument(
+    p_get.add_argument("--mission", help="Override auto-detected mission name")
+    p_get.add_argument(
         "-y", "--yes", action="store_true",
         help="Skip confirmation prompt",
     )
@@ -130,6 +131,17 @@ def main(argv: list[str] | None = None):
         "--show-versioned", action="store_true",
         help="Show versioned snapshots under each metakernel",
     )
+
+    # --- mission ---
+    p_mission = sub.add_parser(
+        "mission",
+        help="Manage configured missions",
+    )
+    mission_sub = p_mission.add_subparsers(dest="mission_command")
+    mission_sub.add_parser("add", help="Add a new mission (interactive)")
+    mission_sub.add_parser("list", help="List configured missions")
+    p_mission_rm = mission_sub.add_parser("remove", help="Remove a mission")
+    p_mission_rm.add_argument("name", help="Mission name to remove")
 
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update configuration")
@@ -184,11 +196,14 @@ def main(argv: list[str] | None = None):
     try:
         if args.command == "scan":
             archive_dir = config.kernel_dir if args.archive else None
-            db.scan_directory(
+            count, missions_found = db.scan_directory(
                 args.directory,
                 mission=args.mission,
                 verbose=args.verbose,
                 archive_dir=archive_dir,
+            )
+            _configure_new_missions(
+                db, missions_found, Path(args.directory).expanduser().resolve(),
             )
             db.stats()
 
@@ -229,35 +244,18 @@ def main(argv: list[str] | None = None):
             else:
                 db.list_metakernels(mission=args.mission)
 
-        elif args.command == "acquire":
+        elif args.command == "get":
             url = args.url
             if not url.startswith("http"):
-                # Treat as a filename — resolve to full URL via known dirs
-                known = db.list_known_mk_dirs(quiet=True)
-                if args.mission:
-                    known = [
-                        d for d in known
-                        if d["mission"].lower() == args.mission.lower()
-                    ]
-                if not known:
-                    mission_hint = f" for mission '{args.mission}'" if args.mission else ""
-                    print(
-                        f"No known mk/ directory{mission_hint}. "
-                        f"Use a full URL or browse a mission first.",
-                        file=sys.stderr,
-                    )
+                # Treat as a filename — resolve mission mk_dir_url
+                mk_dir_url, mission_name = _resolve_mission_mk_dir(
+                    db, args.mission,
+                )
+                if not mk_dir_url:
                     return
-                if len(known) > 1:
-                    missions = ", ".join(d["mission"] for d in known)
-                    print(
-                        f"Multiple missions known: {missions}. "
-                        f"Use --mission to specify which one.",
-                        file=sys.stderr,
-                    )
-                    return
-                url = known[0]["mk_dir_url"] + url
-                args.mission = args.mission or known[0]["mission"]
-            db.acquire_metakernel(
+                url = mk_dir_url + url
+                args.mission = args.mission or mission_name
+            db.get_metakernel(
                 url,
                 download_dir=args.download_dir,
                 mission=args.mission,
@@ -269,26 +267,240 @@ def main(argv: list[str] | None = None):
                 url = args.url
                 # If not a URL, treat as a mission name
                 if not url.startswith("http"):
-                    known = db.list_known_mk_dirs(quiet=True)
-                    match = [
-                        d for d in known
-                        if d["mission"].lower() == url.lower()
-                    ]
-                    if not match:
+                    m = db.get_mission(url)
+                    if not m:
                         print(
-                            f"No known mk/ directory for mission '{url}'.",
+                            f"No configured mission '{url}'.\n"
+                            f"Use 'spice-kernel-db mission add' to configure it.",
                             file=sys.stderr,
                         )
                         return
-                    url = match[0]["mk_dir_url"]
-                    args.mission = args.mission or match[0]["mission"]
+                    url = m["mk_dir_url"]
+                    args.mission = args.mission or m["name"]
                 db.browse_remote_metakernels(
                     url,
                     mission=args.mission,
                     show_versioned=args.show_versioned,
                 )
             else:
-                db.list_known_mk_dirs()
+                # No args — list configured missions
+                missions = db.list_missions()
+                if not missions:
+                    print("No configured missions.")
+                    print("Use 'spice-kernel-db mission add' to set one up.")
+                    return
+                print("\nConfigured missions:\n")
+                for m in missions:
+                    print(f"  {m['name']}  {m['mk_dir_url']}")
+
+        elif args.command == "mission":
+            _handle_mission(db, args)
 
     finally:
         db.close()
+
+
+def _read_spice_server_marker(directory: Path) -> dict[str, str] | None:
+    """Read a .spice-server marker file from a directory.
+
+    Returns a dict with 'server_url' and 'mk_dir_url' keys, or None.
+    """
+    marker = directory / ".spice-server"
+    if not marker.is_file():
+        return None
+    data: dict[str, str] = {}
+    for line in marker.read_text().splitlines():
+        if "=" in line:
+            key, _, val = line.partition("=")
+            data[key.strip()] = val.strip()
+    if "server_url" in data and "mk_dir_url" in data:
+        return data
+    return None
+
+
+def _configure_new_missions(
+    db: KernelDB, missions_found: set[str], scan_root: Path,
+) -> None:
+    """Configure missions found during scan that aren't in the DB yet.
+
+    Checks for .spice-server marker files first, prompts user as fallback.
+    """
+    skip_names = {"generic", "unknown"}
+    server_names = list(SPICE_SERVERS.keys())
+
+    for name in sorted(missions_found):
+        if name.lower() in skip_names:
+            continue
+        if db.get_mission(name):
+            continue
+
+        # Look for .spice-server marker in the mission directory
+        # Check both <root>/<mission>/ and <root>/<mission>/kernels/
+        marker = None
+        for candidate in [scan_root / name, scan_root / name / "kernels"]:
+            marker = _read_spice_server_marker(candidate)
+            if marker:
+                break
+
+        if marker:
+            mk_dir_url = marker["mk_dir_url"]
+            server_url = marker["server_url"]
+            server_label = "custom"
+            for label, url in SPICE_SERVERS.items():
+                if server_url == url:
+                    server_label = label
+                    break
+            db.add_mission(name, server_url, mk_dir_url)
+            print(f"  Configured {name} from .spice-server ({server_label}).")
+            continue
+
+        # No marker — prompt user
+        print(f"\n  {name} is not yet configured for remote access.")
+        for i, sname in enumerate(server_names, 1):
+            print(f"    [{i}] {sname}  ({SPICE_SERVERS[sname]})")
+        print(f"    [{len(server_names) + 1}] Skip")
+        while True:
+            choice = input(f"  Select [1-{len(server_names) + 1}]: ").strip()
+            if choice.isdigit():
+                idx = int(choice)
+                if 1 <= idx <= len(server_names):
+                    server_label = server_names[idx - 1]
+                    server_url = SPICE_SERVERS[server_label]
+                    mk_dir_url = f"{server_url}{name}/kernels/mk/"
+                    db.add_mission(name, server_url, mk_dir_url)
+                    print(f"  Configured {name} ({server_label}).")
+                    break
+                elif idx == len(server_names) + 1:
+                    break
+            print("  Invalid choice.")
+
+
+def _resolve_mission_mk_dir(
+    db: KernelDB, mission_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve a mission name to an mk/ directory URL.
+
+    Looks up the missions table. Returns (mk_dir_url, mission_name)
+    or (None, None) on failure.
+    """
+    if mission_name:
+        m = db.get_mission(mission_name)
+        if m:
+            return m["mk_dir_url"], m["name"]
+
+    # No mission specified — check if exactly one is configured
+    missions = db.list_missions()
+    if len(missions) == 1:
+        m = missions[0]
+        return m["mk_dir_url"], m["name"]
+
+    if not missions:
+        print(
+            "No missions configured. "
+            "Use 'spice-kernel-db mission add' first.",
+            file=sys.stderr,
+        )
+    else:
+        names = ", ".join(m["name"] for m in missions)
+        print(
+            f"Multiple missions configured: {names}. "
+            f"Use --mission to specify which one.",
+            file=sys.stderr,
+        )
+    return None, None
+
+
+def _handle_mission(db: KernelDB, args):
+    """Handle the 'mission' subcommand group."""
+    if args.mission_command == "list":
+        missions = db.list_missions()
+        if not missions:
+            print("No configured missions.")
+            print("Use 'spice-kernel-db mission add' to set one up.")
+            return
+        name_w = max(len(m["name"]) for m in missions)
+        name_w = max(name_w, 7)
+        print("\nConfigured missions:\n")
+        print(f"  {'Mission':<{name_w}}  {'Server':<6}  {'Dedup':<5}  mk/ URL")
+        print(f"  {'─' * name_w}  {'─' * 6}  {'─' * 5}  {'─' * 30}")
+        for m in missions:
+            dedup_str = "yes" if m["dedup"] else "no"
+            print(
+                f"  {m['name']:<{name_w}}  {m['server_label']:<6}"
+                f"  {dedup_str:<5}  {m['mk_dir_url']}"
+            )
+        print()
+
+    elif args.mission_command == "remove":
+        if db.remove_mission(args.name):
+            print(f"Mission '{args.name}' removed.")
+        else:
+            print(f"Mission '{args.name}' not found.", file=sys.stderr)
+
+    elif args.mission_command == "add":
+        _mission_add_interactive(db)
+
+    else:
+        print("Usage: spice-kernel-db mission {add,list,remove}")
+
+
+def _mission_add_interactive(db: KernelDB):
+    """Interactive mission setup: choose server → pick mission → configure."""
+    # 1. Choose server
+    server_names = list(SPICE_SERVERS.keys())
+    print("\nAvailable SPICE archive servers:\n")
+    for i, name in enumerate(server_names, 1):
+        print(f"  [{i}] {name}  ({SPICE_SERVERS[name]})")
+    print()
+    while True:
+        choice = input(f"Select server [1-{len(server_names)}]: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(server_names):
+            server_label = server_names[int(choice) - 1]
+            break
+        print("Invalid choice.")
+    server_url = SPICE_SERVERS[server_label]
+
+    # 2. List missions
+    print(f"\nFetching missions from {server_label}...")
+    missions = list_remote_missions(server_url)
+    if not missions:
+        print("No missions found.", file=sys.stderr)
+        return
+
+    print(f"\nAvailable missions ({len(missions)}):\n")
+    for i, name in enumerate(missions, 1):
+        print(f"  [{i:>3}] {name}")
+    print()
+    while True:
+        choice = input(f"Select mission [1-{len(missions)}] or type name: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(missions):
+            mission_name = missions[int(choice) - 1]
+            break
+        elif choice in missions:
+            mission_name = choice
+            break
+        # Case-insensitive match
+        matches = [m for m in missions if m.lower() == choice.lower()]
+        if matches:
+            mission_name = matches[0]
+            break
+        print("Invalid choice.")
+
+    # 3. Compute mk/ directory URL
+    mk_dir_url = f"{server_url}{mission_name}/kernels/mk/"
+
+    # 4. Dedup preference
+    dedup_answer = input(
+        f"\nEnable deduplication for {mission_name}? [Y/n]: "
+    ).strip().lower()
+    dedup = dedup_answer not in ("n", "no")
+
+    # 5. Store
+    db.add_mission(mission_name, server_url, mk_dir_url, dedup)
+    dedup_str = "enabled" if dedup else "disabled"
+    print(f"\nMission '{mission_name}' ({server_label}) configured.")
+    print(f"  Deduplication: {dedup_str}")
+    print(f"  mk/ directory: {mk_dir_url}")
+    print(f"\nNext steps:")
+    print(f"  spice-kernel-db browse {mission_name}")
+    print(f"  spice-kernel-db get <metakernel>.tm --mission {mission_name}")

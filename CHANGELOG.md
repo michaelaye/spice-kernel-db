@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-02-06
+
+### Added
+
+- Multi-server support: `mission add` interactive setup for NASA NAIF and ESA SPICE servers
+- `mission list` and `mission remove` commands for managing configured missions
+- Per-mission deduplication control via `missions` table `dedup` column
+- Case-insensitive prefix matching for mission names (e.g. `bepi` matches `BEPICOLOMBO`)
+- `.spice-server` marker files written during `get` for automatic mission detection on scan
+- `scan` now auto-detects unconfigured missions and prompts for server selection
+- `scan` indexes `.tm` files into `metakernel_registry` automatically
+- Symlinks for "in db" kernels after `get` so metakernels work immediately
+- Skip already-downloaded files during `get` (size-based comparison)
+- Byte-level download progress bar with `tqdm` for detailed feedback
+- ESA SPICE server HTML parsing (table-based Apache directory listings)
+- Mission auto-detection from `MISSION/<kernel_type>/` directory layout (no `kernels/` required)
+- Hero SVG redesigned as three-panel Browse → Get → Use workflow
+
+### Changed
+
+- Renamed `acquire` CLI command to `get` (shorter, less ambiguous)
+- Renamed `acquire_metakernel()` API to `get_metakernel()`
+- `get_metakernel()` resolves abbreviated mission names to canonical form before storing
+- `scan_directory()` returns `(count, missions_found)` tuple
+- Removed backward-compatibility code (`list_known_mk_dirs`, fallback lookups)
+- `--show-versioned` hint updated to explain versioned snapshot metakernels
+- Metakernel auto-adaptation is now the default (not optional rewrite step)
+- Test suite expanded from 62 to 89 tests
+
+### Fixed
+
+- ESA server directory listings now parsed correctly (both NASA and ESA HTML formats)
+- ESA `.tm` file listings parsed correctly (table-based format)
+- Mission detection for directories without `kernels/` subdirectory (e.g. `BEPICOLOMBO/ck/`)
+
 ## [0.4.0] - 2026-02-06
 
 ### Added
@@ -91,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.5.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.1.0...v0.2.0

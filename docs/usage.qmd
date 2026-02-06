@@ -51,7 +51,7 @@ path = "~/.local/share/spice-kernel-db/kernels.duckdb"
 kernel_dir = "~/Dropbox/spice-kernels"
 ```
 
-After setting up a new machine, rebuild the index with `spice-kernel-db scan ~/Dropbox/spice-kernels`. The `acquire` command downloads into the shared Dropbox folder, and kernels sync to other machines automatically.
+After setting up a new machine, rebuild the index with `spice-kernel-db scan ~/Dropbox/spice-kernels`. The `get` command downloads into the shared Dropbox folder, and kernels sync to other machines automatically.
 
 ### Python API
 
@@ -63,39 +63,495 @@ db = KernelDB()  # uses the configured database path
 db = KernelDB("/path/to/custom.duckdb")
 ```
 
-## Scanning kernel directories
+## Setting up a mission
 
-Register your local kernel trees. The tool recursively finds all files with known SPICE kernel extensions (`.tls`, `.tpc`, `.bsp`, `.bc`, `.tf`, `.ti`, `.tsc`, `.bds`, `.tm`).
+The primary workflow begins with mission configuration. This tells the tool which SPICE server to use, which mission you're working with, and whether you want deduplication enabled for that mission.
+
+### Interactive mission setup
+
+```bash
+spice-kernel-db mission add
+```
+
+The interactive dialog walks you through:
+
+1. **Choose a server**: NASA NAIF or ESA SPICE
+
+```
+Available SPICE archive servers:
+
+  [1] NASA NAIF  (https://naif.jpl.nasa.gov/pub/naif/)
+  [2] ESA SPICE  (https://spiftp.esac.esa.int/data/SPICE/)
+
+Select server [1-2]:
+```
+
+2. **Pick a mission**: The tool fetches the list of available missions from the selected server
+
+```
+Fetching missions from NASA NAIF...
+
+Available missions (157):
+
+  [  1] CASSINI
+  [  2] CLEMENTINE
+  ...
+  [ 45] JUICE
+  [ 46] JUNO
+  ...
+  [157] VOYAGER2
+
+Select mission [1-157] or type name:
+```
+
+3. **Configure deduplication**: Choose whether this mission's kernels can be deduplicated with symlinks
+
+```
+Enable deduplication for JUICE? [Y/n]:
+```
+
+After confirmation, the mission is registered:
+
+```
+Mission 'JUICE' (NASA NAIF) configured.
+  Deduplication: enabled
+  mk/ directory: https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
+
+Next steps:
+  spice-kernel-db browse JUICE
+  spice-kernel-db get <metakernel>.tm --mission JUICE
+```
+
+Mission names are matched case-insensitively and support prefix matching, so you can type `browse ju` instead of `browse JUICE`, or `get juice_ops.tm --mission bepi` to match `BEPICOLOMBO`.
+
+### Python API
+
+```python
+from spice_kernel_db import KernelDB
+
+db = KernelDB()
+
+# Missions are stored with their server and mk/ directory URLs
+db.add_mission(
+    name="JUICE",
+    server_url="https://naif.jpl.nasa.gov/pub/naif/",
+    mk_dir_url="https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
+    dedup=True,
+)
+```
+
+### Listing configured missions
+
+```bash
+spice-kernel-db mission list
+```
+
+```
+Configured missions:
+
+  Mission  Server  Dedup  mk/ URL
+  ───────  ──────  ─────  ──────────────────────────────
+  JUICE    NASA    yes    https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
+  MRO      NASA    yes    https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/
+  ROSETTA  ESA     no     https://spiftp.esac.esa.int/data/SPICE/ROSETTA/kernels/mk/
+```
+
+### Removing a mission
+
+```bash
+spice-kernel-db mission remove JUICE
+```
+
+This removes the mission configuration from the database. It doesn't delete any downloaded kernel files.
+
+## Browsing remote metakernels
+
+Once you've configured a mission, you can browse the available metakernels on the remote server:
+
+```bash
+spice-kernel-db browse JUICE
+```
+
+The tool fetches the listing of `.tm` files from the mission's `mk/` directory and groups them by base name (ignoring version tags like `_v461_20251127_001`):
+
+```
+Remote metakernels: JUICE (https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/)
+
+  Metakernel              Versions  Latest      Status
+  ──────────────────────  ────────  ──────────  ──────
+  juice_crema_5_1.tm            12  2024-11-27  local
+  juice_ops.tm                   8  2024-12-03  remote
+  juice_sci.tm                   5  2024-10-15  local
+  juice_struct.tm                1  2024-01-10  remote
+
+  4 unique metakernels | 26 total files | 2 acquired locally
+```
+
+- **Versions**: How many versioned snapshots exist (including the current version)
+- **Latest**: Date of the most recent version
+- **Status**: `local` means you've acquired at least one version of this metakernel; `remote` means it's only on the server
+
+### Showing versioned snapshots
+
+Use `--show-versioned` to see all versioned files:
+
+```bash
+spice-kernel-db browse JUICE --show-versioned
+```
+
+```
+Remote metakernels: JUICE (https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/)
+
+  Metakernel                              Latest      Status
+  ──────────────────────────────────────  ──────────  ──────
+  juice_crema_5_1.tm                      2024-11-27  local
+    juice_crema_5_1_v460_20241015_001.tm  2024-10-15  remote
+    juice_crema_5_1_v461_20241127_001.tm  2024-11-27  remote
+    (10 more versions...)
+  juice_ops.tm                            2024-12-03  remote
+    juice_ops_v42_20241130_001.tm         2024-11-30  remote
+    juice_ops_v43_20241203_001.tm         2024-12-03  remote
+    (6 more versions...)
+  ...
+```
+
+### Python API
+
+```python
+db.browse_remote_metakernels(
+    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
+    mission="JUICE",
+    show_versioned=True,
+)
+```
+
+## Acquiring a metakernel
+
+This is the main workflow: point the tool at a remote metakernel and it automatically downloads all missing kernels, creates symlinks for kernels you already have, and makes the metakernel ready to use immediately.
+
+### Using a metakernel filename
+
+If you've configured the mission, you can use just the filename:
+
+```bash
+spice-kernel-db get juice_ops.tm
+```
+
+The tool:
+
+1. Resolves the mission from your configured missions table
+2. Constructs the full URL using the stored `mk_dir_url`
+3. Fetches and parses the `.tm` file
+4. Resolves all kernel entries to full URLs
+5. Checks which kernels are already in your local database
+6. Queries file sizes for all kernels (parallel HTTP HEAD requests)
+7. Displays a summary table:
+
+```
+Fetching https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm ...
+
+Metakernel: juice_ops.tm (42 kernels)
+
+  Kernel                                    Size       Status
+  ────────────────────────────────────────  ─────────  ────────
+  naif0012.tls                                 5.2 KB  in db
+  pck00011.tpc                               123.4 KB  in db
+  de432s.bsp                                  31.2 MB  in db
+  juice_sc_ops_v01.bc                         78.9 MB  missing
+  juice_sa_ops_v01.bc                         12.3 MB  missing
+  juice_orb_ops_v01.bsp                      156.7 MB  missing
+  juice_step_240501.tsc                        1.2 KB  missing
+  ...
+
+  Total: 42 | In DB: 38 | Missing: 4 | Download: 248.9 MB
+
+Download 4 missing kernels (248.9 MB)? [y/N]:
+```
+
+If you confirm:
+
+- Missing kernels are downloaded into your configured kernel storage directory
+- The remote subdirectory structure is preserved (`lsk/`, `spk/`, `ck/`, etc.)
+- Downloaded files are automatically registered in the database
+- For kernels already in the database, symlinks are created so the metakernel works immediately
+- The `.tm` file itself is saved locally and indexed
+
+After acquisition, the metakernel is ready to use:
+
+```python
+import spiceypy as spice
+
+spice.furnsh("~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm")
+# All kernels load via local paths or symlinks
+```
+
+### Using a full URL
+
+You can also provide a full URL (useful for one-off downloads or missions you haven't configured):
+
+```bash
+spice-kernel-db get https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/mro_v16.tm --mission MRO
+```
+
+### Skipping the confirmation prompt
+
+```bash
+spice-kernel-db get juice_ops.tm -y
+```
+
+### Python API
+
+```python
+db.get_metakernel(
+    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm",
+    mission="JUICE",
+    yes=True,  # skip prompt
+)
+```
+
+Or with a custom download directory:
+
+```python
+db.get_metakernel(
+    url,
+    download_dir="/data/spice/juice",
+    mission="JUICE",
+)
+```
+
+## Listing tracked metakernels
+
+### List all fetched metakernels
+
+```bash
+spice-kernel-db metakernels
+```
+
+```
+Tracked metakernels:
+
+  Mission  Filename                     Acquired     Source URL
+  ───────  ───────────────────────────  ───────────  ──────────────────────────
+  JUICE    juice_ops.tm                 2024-12-03   https://naif.jpl.nasa...
+  JUICE    juice_crema_5_1.tm           2024-11-27   https://naif.jpl.nasa...
+  MRO      mro_v16.tm                   2024-10-12   https://naif.jpl.nasa...
+```
+
+### Show details for a specific metakernel
+
+```bash
+spice-kernel-db metakernels juice_ops.tm
+```
+
+```
+Metakernel: juice_ops.tm
+  Mission:       JUICE
+  Local path:    ~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm
+  Source URL:    https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
+  Acquired:      2024-12-03 14:23:11
+  Kernels:       42
+```
+
+### Filter by mission
+
+```bash
+spice-kernel-db metakernels --mission JUICE
+```
+
+### Python API
+
+```python
+# List all
+db.list_metakernels()
+
+# Filter by mission
+db.list_metakernels(mission="JUICE")
+
+# Show info for a specific metakernel
+db.info_metakernel("juice_ops.tm")
+```
+
+## Rewriting for local use
+
+If you've already downloaded kernels from other sources (e.g., bulk downloads, manual copies), you can use `rewrite` to create a local metakernel that works with your existing files.
+
+This is the core symlink-tree workflow. The tool creates:
+
+1. **A symlink tree** mirroring the original directory structure
+2. **A rewritten `.tm` file** with only `PATH_VALUES` changed
+
+### Basic rewrite
+
+```bash
+spice-kernel-db rewrite /data/spice/JUICE/kernels/mk/juice_crema_5_1.tm \
+  -o /data/spice/local/juice_crema_5_1.tm \
+  --mission JUICE
+```
+
+This produces:
+
+**Symlink tree** at `/data/spice/local/kernels/`:
+
+```
+/data/spice/local/kernels/
+├── ck/
+│   └── juice_sc_default_v01.bc  →  /data/spice/JUICE/kernels/ck/juice_sc_default_v01.bc
+├── lsk/
+│   └── naif0012.tls             →  ~/.local/share/spice-kernel-db/kernels/lsk/naif0012.tls
+├── spk/
+│   └── jup365.bsp               →  /data/generic_kernels/spk/satellites/jup365.bsp
+└── ...
+```
+
+**Rewritten `.tm` file** with minimal edits:
+
+```diff
+-  PATH_VALUES  = ( '..' )
++  PATH_VALUES  = ( '/data/spice/local/kernels' )
+```
+
+The `KERNELS_TO_LOAD` list is untouched. The header comments are preserved. You can `diff` the files to confirm.
+
+### Custom symlink location
+
+By default, symlinks are created in `kernels/` next to the output file. Use `--link-root` to change this:
+
+```bash
+spice-kernel-db rewrite juice_crema_5_1.tm \
+  -o ~/work/juice.tm \
+  --link-root ~/work/my_kernels
+```
+
+### Python API
+
+```python
+out_path, warnings = db.rewrite_metakernel(
+    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
+    output="/data/spice/local/juice_crema_5_1.tm",
+    mission="JUICE",
+    link_root="/data/spice/local/kernels",  # optional
+)
+
+# Use the rewritten metakernel
+import spiceypy as spice
+spice.furnsh(out_path)
+```
+
+### How the symlink tree works
+
+The tool:
+
+1. Parses the original metakernel to extract `KERNELS_TO_LOAD` entries
+2. For each kernel entry (e.g., `$KERNELS/lsk/naif0012.tls`):
+   - Resolves the filename (`naif0012.tls`)
+   - Queries the local database for the file (preferring the specified mission)
+   - Creates a symlink at the expected relative path pointing to the actual file location
+3. Rewrites the metakernel with `PATH_VALUES` pointing to the symlink root
+
+This preserves the original metakernel structure while bridging the gap between where files "should be" and where they actually live on disk. SPICE doesn't care that symlinks are used — it just follows them.
+
+## Resolving single kernels
+
+To find where a specific kernel lives on disk:
+
+```bash
+spice-kernel-db resolve naif0012.tls --mission JUICE
+```
+
+```
+/data/spice/JUICE/kernels/lsk/naif0012.tls
+```
+
+If the kernel isn't found in the preferred mission, the tool searches other missions:
+
+```bash
+spice-kernel-db resolve mro_sc_2024.bc --mission JUICE
+```
+
+```
+/data/spice/MRO/kernels/ck/mro_sc_2024.bc
+  ⚠ mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]
+```
+
+### Python API
+
+```python
+path, warnings = db.resolve_kernel("naif0012.tls", preferred_mission="JUICE")
+print(path)
+# /data/spice/JUICE/kernels/lsk/naif0012.tls
+
+path, warnings = db.resolve_kernel("mro_sc_2024.bc", preferred_mission="JUICE")
+print(path)
+# /data/spice/MRO/kernels/ck/mro_sc_2024.bc
+print(warnings)
+# ['mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]']
+```
+
+## Scanning existing kernel directories
+
+If you have kernel files from other sources (manual downloads, old archives), you can register them in the database:
+
+```bash
+spice-kernel-db scan /data/spice/generic_kernels --mission generic
+```
+
+The tool recursively finds all files with known SPICE kernel extensions (`.tls`, `.tpc`, `.bsp`, `.bc`, `.tf`, `.ti`, `.tsc`, `.bds`, `.tm`) and registers them:
+
+```
+Scanning /data/spice/generic_kernels...
+Registered 847 kernel files.
+
+Database statistics:
+  Unique kernels:   847
+  Total locations:  847
+  Unique content:   4.23 GB
+  Missions:         generic
+```
+
+You can re-scan directories at any time. Existing files are updated (not duplicated) based on their SHA-256 hash and path.
+
+### Auto-detecting mission names
+
+The tool tries to guess the mission from the directory path:
+
+```bash
+spice-kernel-db scan /data/spice/JUICE/kernels
+```
+
+This automatically detects `mission="JUICE"` and registers files under that mission.
+
+### Archiving while scanning
+
+The `--archive` flag moves scanned files to your configured kernel storage directory and leaves symlinks in place:
+
+```bash
+spice-kernel-db scan /data/downloads/kernels --archive --mission JUICE
+```
+
+This consolidates kernels from multiple sources into a central location without breaking existing references.
+
+### Python API
 
 ```python
 # Scan with explicit mission labels
 db.scan_directory("/data/spice/generic_kernels", mission="generic")
 db.scan_directory("/data/spice/JUICE/kernels", mission="JUICE")
-db.scan_directory("/data/spice/MRO/kernels", mission="MRO")
 
 # Or let the tool guess the mission from the path
 db.scan_directory("/data/spice/JUICE/kernels")  # auto-detects "JUICE"
 ```
 
-Each scan prints a summary:
+## Statistics
 
-```
-Scanned /data/spice/generic_kernels: 847 kernel files registered.
-Scanned /data/spice/JUICE/kernels: 312 kernel files registered.
-Scanned /data/spice/MRO/kernels: 1243 kernel files registered.
-```
+Check database statistics at any time:
 
-You can re-scan directories at any time. Existing files are updated (not duplicated) based on their hash and path.
-
-## Checking database stats
-
-```python
-db.stats()
+```bash
+spice-kernel-db stats
 ```
 
 ```
 ==================================================
-SPICE Kernel Database: /home/user/.spice_kernels.duckdb
+SPICE Kernel Database: ~/.local/share/spice-kernel-db/kernels.duckdb
 ==================================================
   Unique kernels:   1847
   Total locations:  2402
@@ -107,15 +563,43 @@ SPICE Kernel Database: /home/user/.spice_kernels.duckdb
     spk       423 files    8234.1 MB
     ck        892 files    3102.5 MB
     pck        34 files     456.2 MB
+    lsk        12 files       0.2 MB
     ...
 ```
 
 The gap between "unique kernels" and "total locations" tells you how much duplication exists.
 
-## Finding duplicates
+### Python API
 
 ```python
-dups = db.report_duplicates()
+db.stats()
+```
+
+## Finding and removing duplicates
+
+Deduplication is **optional** and controlled per mission. The tool identifies identical kernel files across missions using SHA-256 hashing and can replace duplicates with symlinks.
+
+### Per-mission deduplication control
+
+When you configure a mission with `mission add`, you choose whether deduplication is enabled:
+
+```
+Enable deduplication for JUICE? [Y/n]:
+```
+
+- **Dedup enabled** (`dedup=True`): Files in this mission can be replaced with symlinks during deduplication
+- **Dedup disabled** (`dedup=False`): Files in this mission are **protected** and will never be touched
+
+This gives you fine-grained control. For example:
+
+- Enable dedup for `generic_kernels` (reference files, safe to symlink)
+- Enable dedup for `JUICE` (active mission, willing to consolidate)
+- Disable dedup for `MRO` (legacy archive, want to preserve original file structure)
+
+### Viewing duplicates
+
+```bash
+spice-kernel-db duplicates
 ```
 
 ```
@@ -135,177 +619,52 @@ Total wasted space: 2847.3 MB
   ...
 ```
 
-Notice how `jup365.bsp` and `jup365_19900101_20500101.bsp` are correctly identified as the same file despite different names.
+Notice how `jup365.bsp` and `jup365_19900101_20500101.bsp` are correctly identified as the same file despite different names — the tool uses SHA-256 content hashing.
 
-## Checking a metakernel
+### Preview deduplication (dry run)
 
-Before rewriting, you can check which kernels from a `.tm` file are already available locally and which need to be downloaded:
-
-```python
-result = db.check_metakernel(
-    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
-    mission="JUICE",
-)
-```
-
-```
-Metakernel: /data/spice/JUICE/kernels/mk/juice_crema_5_1.tm
-  Mission:        JUICE
-  Found locally:  38/42
-  Missing:        4
-  Missing files:
-    $KERNELS/ck/juice_sc_crema_5_1_a3_v01.bc
-    $KERNELS/ck/juice_sa_crema_5_1_a3_v01.bc
-    $KERNELS/spk/juice_orb_crema_5_1_a3_v01.bsp
-    $KERNELS/sclk/juice_step_240501.tsc
-  Warnings:
-    ⚠ naif0012.tls: not found in [JUICE] registry, using copy from [generic]
-```
-
-The output tells you:
-
-- **38 out of 42 kernels** are already available locally
-- **4 kernels** still need to be downloaded
-- **1 warning**: `naif0012.tls` was found, but not in the JUICE tree — it's coming from the generic kernels
-
-## Acquiring kernels from a remote metakernel
-
-Instead of manually downloading missing kernels, you can point the tool at a remote metakernel URL and let it figure out what's needed:
-
-```python
-result = db.acquire_metakernel(
-    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm",
-    mission="JUICE",
-)
-```
-
-The tool:
-
-1. Fetches and parses the remote `.tm` file
-2. Resolves each kernel entry to a full URL (using `PATH_VALUES` relative to the metakernel location)
-3. Checks which kernels are already in your local database
-4. Queries file sizes for all kernels via parallel HTTP HEAD requests
-5. Displays a summary table:
-
-```
-Metakernel: juice_crema_5_1.tm (42 kernels)
-
-  Kernel                                    Size       Status
-  ─────────────────────────────────────── ────────── ────────
-  naif0012.tls                               5.2 KB   in db
-  pck00011.tpc                             123.4 KB   in db
-  juice_sc_crema_5_1_a3_v01.bc              78.9 MB   missing
-  ...
-
-  Total: 42 | In DB: 38 | Missing: 4 | Download: 312.5 MB
-
-Download 4 missing kernels (312.5 MB)? [y/N]:
-```
-
-If you confirm, the missing kernels are downloaded into your configured kernel storage directory (preserving the remote subdirectory structure like `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
-
-You can skip the prompt with `yes=True`:
-
-```python
-db.acquire_metakernel(url, mission="JUICE", yes=True)
-```
-
-Or specify a custom download directory:
-
-```python
-db.acquire_metakernel(url, download_dir="/data/spice/juice", mission="JUICE")
-```
-
-
-## Resolving a single kernel
-
-To find where a specific kernel lives on disk:
-
-```python
-path, warnings = db.resolve_kernel("naif0012.tls", preferred_mission="JUICE")
-print(path)
-# /data/spice/JUICE/kernels/lsk/naif0012.tls
-
-path, warnings = db.resolve_kernel("mro_sc_2024.bc", preferred_mission="JUICE")
-print(path)
-# /data/spice/MRO/kernels/ck/mro_sc_2024.bc
-print(warnings)
-# ['mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]']
-```
-
-## Rewriting a metakernel
-
-This is the core workflow. The tool creates a symlink tree and a rewritten `.tm` file:
-
-```python
-out_path, warnings = db.rewrite_metakernel(
-    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
-    output="/data/spice/local/juice_crema_5_1.tm",
-    mission="JUICE",
-    link_root="/data/spice/local/kernels",  # optional, defaults to kernels/ next to output
-)
-```
-
-This produces:
-
-1. **A symlink tree** at `/data/spice/local/kernels/` mirroring the original layout:
-
-    ```
-    /data/spice/local/kernels/
-    ├── ck/
-    │   └── juice_sc_default_v01.bc  →  /data/spice/JUICE/kernels/ck/juice_sc_default_v01.bc
-    ├── lsk/
-    │   └── naif0012.tls             →  /data/spice/JUICE/kernels/lsk/naif0012.tls
-    ├── spk/
-    │   └── jup365_19900101_20500101.bsp → /data/spice/generic_kernels/spk/satellites/jup365.bsp
-    └── ...
-    ```
-
-2. **A rewritten `.tm` file** that differs from the original in exactly one line:
-
-    ```diff
-    -  PATH_VALUES  = ( '..' )
-    +  PATH_VALUES  = ( '/data/spice/local/kernels' )
-    ```
-
-    The `KERNELS_TO_LOAD` list is untouched. The header comments are preserved. You can `diff` the files to confirm.
-
-You can then use the rewritten metakernel with `spiceypy` (or any SPICE toolkit):
-
-```python
-import spiceypy as spice
-
-spice.furnsh("/data/spice/local/juice_crema_5_1.tm")
-# All kernels load via the symlinks — SPICE doesn't care that they're symlinks
-```
-
-## Reclaiming disk space with deduplication
-
-If you want to replace duplicate files with symlinks:
-
-```python
-# Preview first (dry run)
-db.deduplicate_with_symlinks(dry_run=True)
+```bash
+spice-kernel-db dedup
 ```
 
 ```
   WOULD replace /data/spice/JUICE/kernels/lsk/naif0012.tls
     -> symlink to /data/spice/generic_kernels/lsk/naif0012.tls
-  WOULD replace /data/spice/MRO/kernels/lsk/naif0012.tls
-    -> symlink to /data/spice/generic_kernels/lsk/naif0012.tls
-  ...
+  WOULD replace /data/spice/JUICE/kernels/spk/de432s.bsp
+    -> symlink to /data/spice/generic_kernels/spk/de432s.bsp
+
+  PROTECTED: [MRO] has dedup=False, 43 duplicate files preserved
 
 Would save: 2847.3 MB
 ```
 
-When you're satisfied:
+Files from missions with `dedup=False` are **never replaced**, even if duplicates exist elsewhere.
+
+### Execute deduplication
+
+When you're satisfied with the preview:
+
+```bash
+spice-kernel-db dedup --execute
+```
+
+After deduplication, all paths still work — they're just symlinks now. The database remains accurate. Metakernels continue to function normally since SPICE follows symlinks transparently.
+
+### Python API
 
 ```python
+# Preview first (dry run)
+db.deduplicate_with_symlinks(dry_run=True)
+
+# Execute
 db.deduplicate_with_symlinks(dry_run=False)
 ```
 
-After deduplication, all paths still work — they're just symlinks now. The database remains accurate.
+### Python API
 
+```python
+dups = db.report_duplicates()
+```
 
 ## Using the context manager
 
@@ -318,33 +677,118 @@ with KernelDB() as db:
 # connection is closed automatically
 ```
 
-
 ## Typical workflow
 
 A typical session for a multi-mission researcher:
+
+### 1. Set up missions
+
+```bash
+spice-kernel-db mission add
+# Choose NASA NAIF → JUICE → Enable deduplication
+
+spice-kernel-db mission add
+# Choose NASA NAIF → MRO → Disable deduplication (legacy archive)
+```
+
+### 2. Browse available metakernels
+
+```bash
+spice-kernel-db browse JUICE
+```
+
+### 3. Acquire a metakernel
+
+```bash
+spice-kernel-db get juice_ops.tm
+```
+
+This downloads missing kernels, creates symlinks for kernels you already have, and makes the metakernel ready to use immediately.
+
+### 4. Use with spiceypy
+
+```python
+import spiceypy as spice
+
+spice.furnsh("~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm")
+
+# Now compute ephemerides, transformations, etc.
+et = spice.utc2et("2024-12-03T00:00:00")
+pos, lt = spice.spkpos("JUICE", et, "J2000", "NONE", "EARTH")
+```
+
+### 5. Optionally deduplicate
+
+If you've acquired kernels from multiple missions and want to save space:
+
+```bash
+spice-kernel-db dedup          # preview
+spice-kernel-db dedup --execute  # execute
+```
+
+Missions with `dedup=False` are protected and their files are never touched.
+
+### Python API example
 
 ```python
 from spice_kernel_db import KernelDB
 
 with KernelDB() as db:
-    # 1. Register everything you already have
+    # 1. Configure missions
+    db.add_mission(
+        "JUICE",
+        "https://naif.jpl.nasa.gov/pub/naif/",
+        "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
+        dedup=True,
+    )
+
+    # 2. Browse remote metakernels
+    db.browse_remote_metakernels(
+        "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
+        mission="JUICE",
+    )
+
+    # 3. Get a metakernel
+    db.get_metakernel(
+        "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm",
+        mission="JUICE",
+    )
+
+    # 4. Optionally scan existing local kernels
     db.scan_directory("/data/spice/generic_kernels", mission="generic")
-    db.scan_directory("/data/spice/JUICE/kernels")
-    db.scan_directory("/data/spice/MRO/kernels")
 
-    # 2. Acquire missing kernels for a new metakernel
-    db.acquire_metakernel(
-        "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_cruise.tm",
-        mission="JUICE",
-    )
-
-    # 3. Rewrite the metakernel for local use
-    db.rewrite_metakernel(
-        "juice_cruise.tm",
-        output="juice_local.tm",
-        mission="JUICE",
-    )
-
-    # 4. Optionally deduplicate to save space
+    # 5. Optionally deduplicate to save space
     db.deduplicate_with_symlinks(dry_run=False)
 ```
+
+## Advanced: Multi-machine Dropbox setup
+
+For researchers working across multiple machines, sharing kernel files via Dropbox while keeping databases local:
+
+**Config on all machines** (`~/.config/spice-kernel-db/config.toml`):
+
+```toml
+[database]
+path = "~/.local/share/spice-kernel-db/kernels.duckdb"  # local
+
+[storage]
+kernel_dir = "~/Dropbox/spice-kernels"  # shared
+```
+
+**Initial setup on machine 1**:
+
+```bash
+spice-kernel-db mission add  # configure JUICE
+spice-kernel-db get juice_ops.tm
+# Kernels download to ~/Dropbox/spice-kernels/ and start syncing
+```
+
+**Setup on machine 2** (after Dropbox sync completes):
+
+```bash
+spice-kernel-db mission add  # configure JUICE again (local database)
+spice-kernel-db scan ~/Dropbox/spice-kernels
+# Rebuilds the local database index from synced kernels
+```
+
+Both machines now share the kernel files but maintain independent database indices. When you `get` on one machine, the kernels sync to the other automatically.

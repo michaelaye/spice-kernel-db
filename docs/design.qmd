@@ -35,6 +35,13 @@ erDiagram
         VARCHAR filename
         TIMESTAMP acquired_at
     }
+    missions {
+        VARCHAR name PK
+        VARCHAR server_url
+        VARCHAR mk_dir_url
+        BOOLEAN dedup
+        TIMESTAMP added_at
+    }
     kernels ||--o{ locations : "one hash → many locations"
     metakernel_registry ||--o{ metakernel_entries : "one .tm → many entries"
 ```
@@ -196,6 +203,83 @@ link_root/spk/jup365_19900101_20500101.bsp  →  /data/generic_kernels/spk/satel
 The symlink is *named* what the metakernel expects, and *points to* where the content actually lives. SPICE follows symlinks transparently, so it loads the right data.
 
 
+## Remote acquisition architecture
+
+The tool supports downloading kernels from remote SPICE servers, starting with NASA NAIF and ESA SPICE. Both servers use Apache `mod_autoindex` for directory listing, which the tool parses to discover available metakernels and their dependencies.
+
+### Multi-server support
+
+Mission configurations are stored in the `missions` table with:
+
+- `name`: Mission identifier (e.g., `JUICE`, `MRO`)
+- `server_url`: Base server URL (e.g., `https://spice.esac.esa.int/`)
+- `mk_dir_url`: Directory containing mission metakernels (e.g., `data/SPICE/JUICE/kernels/mk/`)
+- `dedup`: Whether to deduplicate downloaded kernels (defaults to `True` for backwards compatibility)
+- `added_at`: Timestamp of mission registration
+
+This decouples the tool from hardcoded server assumptions and allows users to configure any number of SPICE servers with similar directory structures.
+
+### URL resolution for kernel downloads
+
+When fetching a remote metakernel, the tool must translate relative `PATH_VALUES` entries into absolute download URLs. The resolution algorithm:
+
+1. Parse the metakernel to extract `PATH_VALUES` and `KERNELS_TO_LOAD`
+2. For each `PATH_VALUES` entry, resolve it **relative to the metakernel's own URL** (not the server root)
+3. For each kernel entry, expand path symbols and construct the full download URL
+4. Record the kernel's source URL in the database for traceability
+
+For example, if the metakernel is at:
+```
+https://spice.esac.esa.int/data/SPICE/JUICE/kernels/mk/juice_ops.tm
+```
+
+And contains:
+```
+PATH_VALUES  = ( '../..' )
+KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif0012.tls' )
+```
+
+The kernel download URL becomes:
+```
+https://spice.esac.esa.int/data/SPICE/JUICE/kernels/lsk/naif0012.tls
+```
+
+This mirrors how SPICE itself would resolve paths if the metakernel were used in place on the server.
+
+### Parallel downloads
+
+Kernel downloads are performed in parallel using `tqdm.contrib.concurrent.thread_map()`, with progress bars for both individual file progress and overall batch progress. Each download:
+
+- Computes SHA-256 during streaming to disk
+- Checks the database for existing copies with the same hash (deduplication)
+- Records the download URL as `source_url` in the `locations` table
+- Validates file integrity against Content-Length headers when available
+
+### Auto-linking for immediate use
+
+After downloading all kernels referenced by a metakernel, the tool creates symlinks in a directory adjacent to the downloaded metakernel that mirror the original server's directory structure. This allows the metakernel to work **immediately without rewriting**:
+
+```
+downloaded/
+├── juice_ops.tm
+└── juice_ops_links/
+    ├── lsk/ → ../../<actual_location>/lsk/
+    ├── pck/ → ../../<actual_location>/pck/
+    └── spk/ → ../../<actual_location>/spk/
+```
+
+The metakernel's `PATH_VALUES` is rewritten to point to `juice_ops_links/`, preserving the original kernel list untouched.
+
+### Registry tracking
+
+All acquired metakernels are registered in the database:
+
+- `metakernel_registry`: Stores the metakernel path, mission, source URL, and acquisition timestamp
+- `metakernel_entries`: Stores each `KERNELS_TO_LOAD` entry with its index and parsed filename
+
+This allows the tool to track what has been downloaded, detect updates on the remote server, and provide an audit trail for reproducibility.
+
+
 ## Deduplication strategy
 
 For users who want to reclaim disk space, the tool can replace duplicate files with symlinks to a single canonical copy.
@@ -205,6 +289,12 @@ The canonical copy is selected with a preference for the `generic_kernels` tree,
 - Generic kernels are the "source of truth" for shared files
 - They're typically the first place you'd download from
 - Mission-specific copies should be replaceable without loss of information
+
+### Per-mission deduplication control
+
+Missions can opt out of deduplication via the `missions` table's `dedup` column. When set to `False`, kernels from that mission will never be replaced with symlinks during deduplication, even if identical copies exist elsewhere.
+
+This is useful for missions where preserving the exact on-disk layout is critical (e.g., for archival purposes or when symlinks might break external tools). Missions not registered in the `missions` table default to `dedup=True` for backwards compatibility.
 
 The `deduplicate_with_symlinks()` method supports a `dry_run` mode (the default) so you can see exactly what would change before committing. After deduplication, all original paths still work — they're just symlinks now — and the database remains accurate because the hash and location information hasn't changed.
 

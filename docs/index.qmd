@@ -1,19 +1,17 @@
 ---
 title: "spice-kernel-db"
-subtitle: "Content-addressed SPICE kernel database for deduplication and metakernel rewriting across planetary missions"
+subtitle: "SPICE kernel management tool with multi-server support, one-command acquisition, and optional deduplication"
 ---
 
-![](images/hero.svg){fig-alt="Diagram showing SPICE kernel files (SPK, CK, LSK) flowing through SHA-256 hashing into a DuckDB content-addressed database, with outputs for deduplication, mission-aware resolution, and metakernel rewriting."}
+[![](images/hero.svg){fig-alt="Three-panel diagram showing the browse-get-use workflow: browsing NASA NAIF and ESA SPICE servers for metakernels, downloading kernels in parallel, and using the ready metakernel locally with spiceypy."}](images/hero.svg)
 
 ## What is this?
 
-`spice-kernel-db` is a Python tool that solves two practical problems for anyone working with NAIF SPICE kernels across multiple planetary missions:
+`spice-kernel-db` is a tool for getting and managing NAIF SPICE kernels across planetary missions. The primary workflow is: **set up a mission, browse remote metakernels, and get everything you need with one command**.
 
-1. **You're storing the same kernel files multiple times.** Generic kernels like `naif0012.tls`, `pck00011.tpc`, and `de432s.bsp` are duplicated across every mission archive you download. With missions like JUICE, MRO, Cassini, and others, those gigabytes add up.
+The tool supports multiple SPICE servers (NASA NAIF and ESA SPICE), downloads kernels in parallel, automatically creates symlinks organized by mission, and generates ready-to-use metakernels. You can browse what's available on remote servers before downloading, and the acquisition process handles all dependencies automatically.
 
-2. **Metakernels don't work with your local file layout.** A mission's `.tm` file expects all kernels under a specific directory tree. But your local setup is different — files are scattered across mission archives, generic kernel directories, and maybe a shared NAS.
-
-This tool uses **SHA-256 content hashing** to identify duplicate files regardless of filename, provides **mission-aware kernel resolution** so you always know where a file came from, can **acquire missing kernels** directly from remote NAIF servers, and rewrites metakernels with **minimal edits** — only `PATH_VALUES` is changed, preserving full trust in the original kernel list.
+After acquisition, the metakernel is immediately usable — existing kernels already in the database are automatically linked into the download tree so all relative paths resolve correctly. Optional content-addressed deduplication (using SHA-256 hashing) can further reduce storage when working with multiple missions.
 
 ## Installation
 
@@ -32,40 +30,20 @@ pip install -e ".[dev]"
 ## Quick taste
 
 ```bash
-# First run prompts for configuration
-spice-kernel-db stats
+# First run: configure storage path (or re-run with --setup)
+spice-kernel-db config
 
-# Acquire kernels for a remote metakernel
-spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm
-```
+# Add a mission (interactive dialog chooses server and base URL)
+spice-kernel-db mission add
 
-Or from Python:
+# Browse available remote metakernels
+spice-kernel-db browse JUICE
 
-```python
-from spice_kernel_db import KernelDB
+# Get kernels from a remote metakernel (parallel downloads, auto-symlink, ready to use)
+spice-kernel-db get https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm
 
-db = KernelDB()
-
-# Register all your kernel trees
-db.scan_directory("/data/spice/generic_kernels", mission="generic")
-db.scan_directory("/data/spice/JUICE/kernels")
-db.scan_directory("/data/spice/MRO/kernels")
-
-# What's duplicated?
-db.report_duplicates()
-
-# Acquire missing kernels from a remote metakernel
-db.acquire_metakernel(
-    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm",
-    mission="JUICE",
-)
-
-# Rewrite a JUICE metakernel for local use
-db.rewrite_metakernel(
-    "/data/spice/JUICE/kernels/mk/juice_crema_5_1.tm",
-    output="juice_local.tm",
-    mission="JUICE",
-)
+# Use the locally rewritten metakernel with spiceypy
+spiceypy.furnsh("/your/storage/path/symlinks/JUICE/juice_crema_5_1.tm")
 ```
 
 See the [Usage Guide](usage.qmd) for the full walkthrough.

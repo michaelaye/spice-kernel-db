@@ -28,6 +28,47 @@ with KernelDB() as db:
 
 ---
 
+### Mission management
+
+#### `add_mission`
+
+```python
+db.add_mission(
+    name: str,
+    server_url: str,
+    mk_dir_url: str,
+    dedup: bool = True,
+) -> None
+```
+
+Register a mission. If it already exists, replaces the existing entry.
+
+#### `list_missions`
+
+```python
+db.list_missions() -> list[dict]
+```
+
+List all configured missions. Returns dicts with keys: `name`, `server_url`, `server_label`, `mk_dir_url`, `dedup`, `added_at`.
+
+#### `remove_mission`
+
+```python
+db.remove_mission(name: str) -> bool
+```
+
+Remove a mission. Returns True if found and removed, False if not found.
+
+#### `get_mission`
+
+```python
+db.get_mission(name: str) -> dict | None
+```
+
+Look up a mission by name (case-insensitive). Returns dict with same keys as `list_missions`, or None.
+
+---
+
 ### Scanning
 
 #### `scan_directory`
@@ -147,10 +188,10 @@ Returns `(output_path, warnings)`.
 
 See [Minimal metakernel edits](design.qmd#minimal-edits) for the design rationale.
 
-#### `acquire_metakernel`
+#### `get_metakernel`
 
 ```python
-db.acquire_metakernel(
+db.get_metakernel(
     url: str,
     download_dir: str | Path | None = None,
     mission: str | None = None,
@@ -167,6 +208,7 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 5. Displays a summary table with kernel names, sizes, and status (`in db` / `missing`)
 6. Prompts for confirmation (unless `yes=True`)
 7. Downloads missing kernels, preserving subdirectory structure, and registers them
+8. Creates symlinks for kernels already in the database so the metakernel works immediately
 
 `download_dir` defaults to the configured `kernel_dir` from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
 
@@ -213,16 +255,6 @@ Scan a remote NAIF `mk/` directory and show available metakernels. Groups entrie
 
 Prints a summary table and returns a list of dicts with keys: `base_name`, `n_versions`, `latest_date`, `is_local`, `filenames`.
 
-#### `list_known_mk_dirs`
-
-```python
-db.list_known_mk_dirs() -> list[dict]
-```
-
-List known remote `mk/` directory URLs, derived from previously acquired metakernels in the `metakernel_registry`. Each entry shows the mission name, directory URL, and how many metakernels have been acquired from it.
-
-Returns a list of dicts with keys: `mission`, `mk_dir_url`, `n_acquired`.
-
 ---
 
 ### Deduplication
@@ -245,7 +277,7 @@ db.deduplicate_plan() -> list[dict]
 
 Generate a deduplication plan without executing it.
 
-For each set of identical files, selects a canonical copy (preferring `generic` mission) and lists the rest as removable.
+For each set of identical files, selects a canonical copy (preferring `generic` mission) and lists the rest as removable. Respects per-mission dedup settings from the `missions` table.
 
 Returns a list of dicts with keys: `filename`, `size_bytes`, `keep`, `remove`.
 
@@ -368,6 +400,23 @@ resolve_kernel_urls(mk_url: str, parsed: ParsedMetakernel) -> list[str]
 ```
 
 Resolve each `KERNELS_TO_LOAD` entry in a parsed metakernel to a full URL, using `PATH_VALUES` relative to the metakernel's own URL.
+
+### `list_remote_missions`
+
+```python
+from spice_kernel_db.remote import list_remote_missions
+list_remote_missions(server_url: str) -> list[str]
+```
+
+List available mission directories from a SPICE archive server (NASA NAIF or ESA SPICE). Parses the Apache directory listing.
+
+### `SPICE_SERVERS`
+
+```python
+from spice_kernel_db.remote import SPICE_SERVERS
+```
+
+Dict mapping server labels to URLs: `{"NASA": "https://naif.jpl.nasa.gov/pub/naif/", "ESA": "https://spiftp.esac.esa.int/data/SPICE/"}`.
 
 ### `list_remote_metakernels`
 

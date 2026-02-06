@@ -5,22 +5,41 @@ from __future__ import annotations
 import re
 import shutil
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
+from tqdm import tqdm
 from tqdm.contrib.concurrent import thread_map
 
 from spice_kernel_db.parser import ParsedMetakernel
 
+# Known SPICE archive servers
+SPICE_SERVERS: dict[str, str] = {
+    "NASA": "https://naif.jpl.nasa.gov/pub/naif/",
+    "ESA": "https://spiftp.esac.esa.int/data/SPICE/",
+}
+
+# Regex for Apache mod_autoindex directory entries (trailing /)
+# Handles both plain-text (NASA) and table-based (ESA) formats.
+_DIR_ENTRY_RE = re.compile(
+    r'<a href="([^"]+/)">[^<]+</a>'
+    r".+?"
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
+)
+
 # Regex for NAIF versioned metakernel snapshots: _v461_20251127_001.tm
 _VERSION_TAG_RE = re.compile(r"(_v\d+_\d{8}_\d{3})\.tm$")
 
-# Regex for Apache mod_autoindex directory listing entries
+# Regex for Apache mod_autoindex .tm file entries.
+# Handles both plain-text (NASA) and table-based (ESA) formats.
 _DIR_LISTING_RE = re.compile(
-    r'<a href="([^"]+\.tm)">[^<]+</a>\s+'
-    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s+"
-    r"(\S+)"
+    r'<a href="([^"]+\.tm)">[^<]+</a>'
+    r".+?"
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
+    r".+?"
+    r"(\d[\d.]*[KMGT]?)"
 )
 
 
@@ -79,6 +98,34 @@ def list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]:
 
     results.sort(key=lambda r: (r.base_name, r.filename))
     return results
+
+
+def list_remote_missions(server_url: str) -> list[str]:
+    """List available mission directories from a SPICE archive server.
+
+    Parses the Apache directory listing at *server_url* and returns
+    mission directory names (e.g. ``['CASSINI', 'JUICE', 'MRO']``).
+
+    Directories that don't look like missions (e.g. ``toolkit/``,
+    ``cosmographia/``, ``misc/``) are included — the caller can
+    filter if needed.
+    """
+    if not server_url.endswith("/"):
+        server_url += "/"
+
+    with urllib.request.urlopen(server_url) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    missions: list[str] = []
+    for m in _DIR_ENTRY_RE.finditer(html):
+        dirname = m.group(1).rstrip("/")
+        # Skip parent directory link and hidden dirs
+        if dirname in (".", "..") or dirname.startswith("."):
+            continue
+        missions.append(dirname)
+
+    missions.sort()
+    return missions
 
 
 def fetch_metakernel(url: str) -> str:
@@ -150,55 +197,75 @@ def query_remote_sizes(
     return {url: size for url, size in results}
 
 
-def download_kernel(url: str, dest: Path) -> Path:
+def download_kernel(
+    url: str, dest: Path, *, progress: tqdm | None = None,
+) -> Path:
     """Download a single kernel file to *dest*.
 
-    Creates parent directories as needed. Returns *dest*.
+    Creates parent directories as needed. If *progress* is given,
+    updates it with bytes written. Returns *dest*.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(url) as resp:
         with open(dest, "wb") as f:
-            shutil.copyfileobj(resp, f)
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                if progress is not None:
+                    progress.update(len(chunk))
     return dest
-
-
-def _download_task(
-    task: tuple[str, Path, str],
-) -> tuple[str, Path | None, str | None]:
-    """Download a single kernel, returning (filename, dest_or_None, error_or_None)."""
-    url, dest, filename = task
-    try:
-        download_kernel(url, dest)
-        return filename, dest, None
-    except Exception as e:
-        return filename, None, str(e)
 
 
 def download_kernels_parallel(
     tasks: list[tuple[str, Path, str]],
     *,
     max_workers: int = 8,
+    total_bytes: int | None = None,
 ) -> tuple[list[Path], list[str]]:
-    """Download multiple kernels in parallel with a progress bar.
+    """Download multiple kernels in parallel with a byte-level progress bar.
 
     Args:
         tasks: List of (url, dest_path, filename) tuples.
         max_workers: Maximum concurrent downloads.
+        total_bytes: Total expected bytes (for progress bar). If None,
+            the bar counts files instead of bytes.
 
     Returns:
         (downloaded_paths, warnings)
     """
-    results = thread_map(
-        _download_task, tasks, max_workers=max_workers,
-        desc="Downloading", unit="file",
-    )
+    if total_bytes and total_bytes > 0:
+        progress = tqdm(
+            total=total_bytes, desc="Downloading", unit="B",
+            unit_scale=True, unit_divisor=1024,
+        )
+    else:
+        progress = tqdm(
+            total=len(tasks), desc="Downloading", unit="file",
+        )
+
+    def _do(task: tuple[str, Path, str]) -> tuple[str, Path | None, str | None]:
+        url, dest, filename = task
+        try:
+            download_kernel(url, dest, progress=progress if total_bytes else None)
+            if not total_bytes:
+                progress.update(1)
+            return filename, dest, None
+        except Exception as e:
+            return filename, None, str(e)
 
     downloaded: list[Path] = []
     warnings: list[str] = []
-    for fname, dest, error in results:
-        if error is None:
-            downloaded.append(dest)
-        else:
-            warnings.append(f"{fname}: {error}")
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_do, t): t for t in tasks}
+        for future in as_completed(futures):
+            fname, dest, error = future.result()
+            if error is None:
+                downloaded.append(dest)
+            else:
+                warnings.append(f"{fname}: {error}")
+
+    progress.close()
 
     return downloaded, warnings

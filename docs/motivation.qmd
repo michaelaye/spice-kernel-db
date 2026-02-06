@@ -5,46 +5,37 @@ subtitle: "Why this tool exists"
 
 ## The SPICE kernel ecosystem
 
-The NAIF SPICE system provides the fundamental infrastructure for computing observation geometry in planetary science. Each mission distributes its kernels through NAIF's servers:
+The NAIF SPICE system provides the fundamental infrastructure for computing observation geometry in planetary science. Each mission distributes its kernels through servers at NASA (NAIF) and ESA:
 
 - **Generic kernels** at `naif.jpl.nasa.gov/pub/naif/generic_kernels/` — leapseconds, planetary constants, planetary ephemerides, satellite ephemerides
-- **Mission-specific kernels** at `naif.jpl.nasa.gov/pub/naif/<MISSION>/kernels/` — spacecraft orientation (CK), trajectory (SPK), instrument parameters (IK), frame definitions (FK), spacecraft clocks (SCLK)
+- **Mission-specific kernels** at `naif.jpl.nasa.gov/pub/naif/<MISSION>/kernels/` (NASA) or `spiftp.esac.esa.int/data/SPICE/<MISSION>/kernels/` (ESA) — spacecraft orientation (CK), trajectory (SPK), instrument parameters (IK), frame definitions (FK), spacecraft clocks (SCLK)
 
 Each mission archive is self-contained. A mission like JUICE or MRO ships a complete kernel set that includes not only its own mission-specific kernels but also copies of whatever generic kernels its metakernels need. This makes the archives portable — you can download one mission's tree and have everything needed to compute geometry for that mission.
 
-The design is practical and sound. But when you work with *multiple* missions, it creates two concrete problems.
+The design is practical and sound. But working with SPICE in practice reveals three concrete problems.
 
-## Problem 1: Duplicated files across missions
 
-Generic kernels are duplicated everywhere. Consider these files:
+## Problem 1: Getting kernels is tedious
 
-| Kernel | What it is | Who ships it |
-|--------|-----------|--------------|
-| `naif0012.tls` | Leapseconds | Every mission |
-| `pck00011.tpc` | IAU rotation models | Every mission |
-| `de432s.bsp` | Planetary ephemeris (31 MB) | Most missions |
-| `jup365.bsp` | Jupiter satellite ephemeris (323 MB) | JUICE, Juno, Clipper, ... |
-| `gm_de431.tpc` | GM values | Most missions |
+The primary friction in using SPICE is **kernel acquisition**. You need to:
 
-If you maintain local copies of JUICE, MRO, Cassini, Juno, and MESSENGER kernels, `de432s.bsp` alone is stored five times — 155 MB of identical bytes. For `jup365.bsp`, which JUICE ships as `jup365_19900101_20500101.bsp` (same content, different name), the waste is even larger.
+1. **Navigate Apache directory listings** on NAIF or ESA servers to find the right mission archive
+2. **Identify which metakernel** to use — missions may ship dozens of `.tm` files for different phases or instrument configurations
+3. **Download dozens of kernel files manually** — a single metakernel may reference 20-50 files spread across subdirectories
+4. **Arrange them in the correct directory structure** — the metakernel expects specific paths relative to its location
+5. **Repeat for every metakernel version** — as missions release updates, you need to figure out what's changed and re-download
 
-Across a real multi-mission setup, hundreds of megabytes to several gigabytes are wasted on identical content.
+This is error-prone and time-consuming. For researchers who need kernels from multiple missions, it becomes a significant barrier to getting work done.
 
-### The filename alias problem
+`spice-kernel-db` automates this entire process. You specify a metakernel URL (local or remote), and the tool:
 
-The duplication isn't always obvious. NAIF's `generic_kernels` tree has:
+- Fetches the metakernel
+- Parses it to extract the list of required kernels
+- Downloads each kernel from the server
+- Stores them in a content-addressed database
+- Creates a local symlink tree that satisfies the metakernel's expected layout
 
-```
-generic_kernels/spk/satellites/jup365.bsp
-```
-
-But JUICE ships the same file as:
-
-```
-JUICE/kernels/spk/jup365_19900101_20500101.bsp
-```
-
-The content is byte-for-byte identical — but the filenames differ. A naive filename-based deduplication tool would miss this entirely. You need content-based identity (i.e., hashing) to catch it.
+Instead of manually downloading and organizing 40 files, you run one command. See the [`get` command](cli.qmd#get) for details.
 
 
 ## Problem 2: Metakernels don't match your local layout
@@ -109,9 +100,44 @@ This works if you've mirrored the exact NAIF archive structure locally. But what
 You could manually copy files around to match the expected layout. Or you could edit the metakernel's `KERNELS_TO_LOAD` list to point to absolute paths. But editing the kernel list is risky — the metakernel is a carefully assembled description of which kernels, in which order, produce correct geometry for a given mission scenario. Changing it introduces a chance of error and breaks the direct traceability to the mission's official release.
 
 
+## Problem 3: Multi-mission users store duplicate files
+
+When you work with *multiple* missions, generic kernels are duplicated everywhere. Consider these files:
+
+| Kernel | What it is | Who ships it |
+|--------|-----------|--------------|
+| `naif0012.tls` | Leapseconds | Every mission |
+| `pck00011.tpc` | IAU rotation models | Every mission |
+| `de432s.bsp` | Planetary ephemeris (31 MB) | Most missions |
+| `jup365.bsp` | Jupiter satellite ephemeris (323 MB) | JUICE, Juno, Clipper, ... |
+| `gm_de431.tpc` | GM values | Most missions |
+
+If you maintain local copies of JUICE, MRO, Cassini, Juno, and MESSENGER kernels, `de432s.bsp` alone is stored five times — 155 MB of identical bytes. For `jup365.bsp`, which JUICE ships as `jup365_19900101_20500101.bsp` (same content, different name), the waste is even larger.
+
+Across a real multi-mission setup, hundreds of megabytes to several gigabytes are wasted on identical content.
+
+### The filename alias problem
+
+The duplication isn't always obvious. NAIF's `generic_kernels` tree has:
+
+```
+generic_kernels/spk/satellites/jup365.bsp
+```
+
+But JUICE ships the same file as:
+
+```
+JUICE/kernels/spk/jup365_19900101_20500101.bsp
+```
+
+The content is byte-for-byte identical — but the filenames differ. A naive filename-based deduplication tool would miss this entirely. You need content-based identity (i.e., hashing) to catch it.
+
+`spice-kernel-db` handles this automatically through content-addressed storage. Duplicates are detected regardless of filename, and you can optionally reclaim disk space by replacing copies with symlinks.
+
+
 ## The approach: content-addressed identity + symlink indirection
 
-`spice-kernel-db` addresses both problems with two key ideas.
+`spice-kernel-db` addresses all three problems with two key ideas.
 
 ### Content identity via SHA-256
 

@@ -1,177 +1,204 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
   <defs>
-    <!-- Background gradient -->
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#0d1b2a"/>
       <stop offset="100%" stop-color="#1b2838"/>
     </linearGradient>
-    <!-- Accent gradient for the database -->
-    <linearGradient id="dbGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#f0a500"/>
-      <stop offset="100%" stop-color="#d4800e"/>
+    <linearGradient id="panelGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#152238"/>
+      <stop offset="100%" stop-color="#0f1a2e"/>
     </linearGradient>
-    <!-- Hash glow -->
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <!-- Subtle orbit ring -->
     <linearGradient id="orbitGrad" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" stop-color="#3a86ff" stop-opacity="0"/>
-      <stop offset="30%" stop-color="#3a86ff" stop-opacity="0.3"/>
-      <stop offset="70%" stop-color="#3a86ff" stop-opacity="0.3"/>
+      <stop offset="50%" stop-color="#3a86ff" stop-opacity="0.15"/>
       <stop offset="100%" stop-color="#3a86ff" stop-opacity="0"/>
     </linearGradient>
-    <!-- Kernel file gradient -->
-    <linearGradient id="kernelGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#415a77"/>
-      <stop offset="100%" stop-color="#2b3e50"/>
-    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#81b29a"/>
+    </marker>
   </defs>
 
   <!-- Background -->
-  <rect width="800" height="320" rx="12" fill="url(#bg)"/>
+  <rect width="800" height="340" rx="12" fill="url(#bg)"/>
 
-  <!-- Decorative orbit ellipses -->
-  <ellipse cx="520" cy="160" rx="220" ry="120" fill="none" stroke="url(#orbitGrad)" stroke-width="1" stroke-dasharray="6 4"/>
-  <ellipse cx="520" cy="160" rx="170" ry="90" fill="none" stroke="url(#orbitGrad)" stroke-width="0.8" stroke-dasharray="4 6" transform="rotate(-12 520 160)"/>
+  <!-- Subtle orbit rings (decorative) -->
+  <ellipse cx="400" cy="170" rx="360" ry="140" fill="none" stroke="url(#orbitGrad)" stroke-width="0.8" stroke-dasharray="6 4"/>
+  <ellipse cx="400" cy="170" rx="280" ry="100" fill="none" stroke="url(#orbitGrad)" stroke-width="0.6" stroke-dasharray="4 6" transform="rotate(-8 400 170)"/>
 
-  <!-- Small planet dots on orbits -->
-  <circle cx="710" cy="100" r="4" fill="#8ecae6" opacity="0.7"/>
-  <circle cx="340" cy="210" r="3" fill="#e07a5f" opacity="0.6"/>
-  <circle cx="620" cy="55" r="3.5" fill="#81b29a" opacity="0.6"/>
+  <!-- Planet dots -->
+  <circle cx="90" cy="40" r="3" fill="#8ecae6" opacity="0.5"/>
+  <circle cx="720" cy="30" r="2.5" fill="#e07a5f" opacity="0.4"/>
+  <circle cx="400" cy="18" r="2" fill="#81b29a" opacity="0.4"/>
 
-  <!-- === LEFT SIDE: Kernel files === -->
+  <!-- ============================================ -->
+  <!-- STAGE 1: BROWSE (left panel)                 -->
+  <!-- ============================================ -->
+  <g transform="translate(25, 38)">
+    <!-- Panel frame -->
+    <rect width="220" height="260" rx="8" fill="url(#panelGrad)" stroke="#2d4a6f" stroke-width="1.2"/>
 
-  <!-- SPK file -->
-  <g transform="translate(60, 50)">
-    <rect width="90" height="56" rx="6" fill="url(#kernelGrad)" stroke="#5e81ac" stroke-width="1.2"/>
-    <rect width="90" height="18" rx="6" fill="#5e81ac" opacity="0.5"/>
-    <rect y="6" width="90" height="12" fill="#5e81ac" opacity="0.5"/>
-    <text x="45" y="13" text-anchor="middle" fill="#d8dee9" font-size="10" font-weight="600">.bsp</text>
-    <text x="45" y="38" text-anchor="middle" fill="#8fbcbb" font-size="9" font-weight="500">SPK</text>
-    <text x="45" y="50" text-anchor="middle" fill="#6b7f97" font-size="7">ephemeris</text>
+    <!-- Title bar -->
+    <rect width="220" height="28" rx="8" fill="#1e3450"/>
+    <rect y="14" width="220" height="14" fill="#1e3450"/>
+    <!-- Window dots -->
+    <circle cx="16" cy="14" r="4" fill="#e07a5f" opacity="0.7"/>
+    <circle cx="30" cy="14" r="4" fill="#f0a500" opacity="0.7"/>
+    <circle cx="44" cy="14" r="4" fill="#81b29a" opacity="0.7"/>
+    <text x="110" y="18" text-anchor="middle" fill="#6b8bad" font-size="9">remote servers</text>
+
+    <!-- NASA NAIF server -->
+    <text x="14" y="50" fill="#5e81ac" font-size="9" font-weight="600">NASA NAIF</text>
+    <g fill="#4a6a8a" font-size="8" font-family="monospace">
+      <text x="18" y="66">CASSINI/</text>
+      <text x="18" y="79">JUICE/</text>
+      <text x="18" y="92">MARS2020/</text>
+      <text x="18" y="105">EUROPA-CLIPPER/</text>
+    </g>
+
+    <!-- Divider -->
+    <line x1="14" y1="115" x2="206" y2="115" stroke="#2d4a6f" stroke-width="0.8"/>
+
+    <!-- ESA SPICE server -->
+    <text x="14" y="132" fill="#5e81ac" font-size="9" font-weight="600">ESA SPICE</text>
+    <g fill="#4a6a8a" font-size="8" font-family="monospace">
+      <text x="18" y="148">BEPICOLOMBO/</text>
+      <text x="18" y="161">JUICE/</text>
+      <text x="18" y="174">ROSETTA/</text>
+    </g>
+
+    <!-- Divider -->
+    <line x1="14" y1="184" x2="206" y2="184" stroke="#2d4a6f" stroke-width="0.8"/>
+
+    <!-- Browse output -->
+    <text x="14" y="200" fill="#81b29a" font-size="8" font-weight="600">$ browse JUICE</text>
+    <g fill="#88c0d0" font-size="7.5" font-family="monospace">
+      <text x="18" y="215">juice_crema_5_1.tm</text>
+      <text x="18" y="228">juice_ops.tm</text>
+      <text x="18" y="241">juice_plan.tm</text>
+    </g>
   </g>
 
-  <!-- CK file -->
-  <g transform="translate(60, 125)">
-    <rect width="90" height="56" rx="6" fill="url(#kernelGrad)" stroke="#a3be8c" stroke-width="1.2"/>
-    <rect width="90" height="18" rx="6" fill="#a3be8c" opacity="0.4"/>
-    <rect y="6" width="90" height="12" fill="#a3be8c" opacity="0.4"/>
-    <text x="45" y="13" text-anchor="middle" fill="#d8dee9" font-size="10" font-weight="600">.bc</text>
-    <text x="45" y="38" text-anchor="middle" fill="#a3be8c" font-size="9" font-weight="500">CK</text>
-    <text x="45" y="50" text-anchor="middle" fill="#6b7f97" font-size="7">pointing</text>
+  <!-- Stage label -->
+  <text x="135" y="316" text-anchor="middle" fill="#5e81ac" font-size="10" font-weight="600" letter-spacing="1">BROWSE</text>
+
+  <!-- ============================================ -->
+  <!-- ARROWS: Browse → Acquire                     -->
+  <!-- ============================================ -->
+  <g transform="translate(255, 110)">
+    <!-- Parallel download streams -->
+    <g stroke="#81b29a" stroke-width="1.5" fill="none" opacity="0.6">
+      <path d="M0,30 C20,30 25,15 50,15" marker-end="url(#arrow)"/>
+      <path d="M0,58 L50,58" marker-end="url(#arrow)"/>
+      <path d="M0,86 C20,86 25,100 50,100" marker-end="url(#arrow)"/>
+    </g>
+    <!-- Small kernel icons on streams -->
+    <rect x="18" y="24" width="14" height="10" rx="2" fill="#415a77" stroke="#5e81ac" stroke-width="0.8" opacity="0.8"/>
+    <rect x="15" y="52" width="14" height="10" rx="2" fill="#415a77" stroke="#a3be8c" stroke-width="0.8" opacity="0.8"/>
+    <rect x="18" y="90" width="14" height="10" rx="2" fill="#415a77" stroke="#b48ead" stroke-width="0.8" opacity="0.8"/>
   </g>
 
-  <!-- LSK file -->
-  <g transform="translate(60, 200)">
-    <rect width="90" height="56" rx="6" fill="url(#kernelGrad)" stroke="#b48ead" stroke-width="1.2"/>
-    <rect width="90" height="18" rx="6" fill="#b48ead" opacity="0.4"/>
-    <rect y="6" width="90" height="12" fill="#b48ead" opacity="0.4"/>
-    <text x="45" y="13" text-anchor="middle" fill="#d8dee9" font-size="10" font-weight="600">.tls</text>
-    <text x="45" y="38" text-anchor="middle" fill="#b48ead" font-size="9" font-weight="500">LSK</text>
-    <text x="45" y="50" text-anchor="middle" fill="#6b7f97" font-size="7">leap seconds</text>
+  <!-- ============================================ -->
+  <!-- STAGE 2: ACQUIRE (center panel)              -->
+  <!-- ============================================ -->
+  <g transform="translate(310, 38)">
+    <rect width="180" height="260" rx="8" fill="url(#panelGrad)" stroke="#2d6a4f" stroke-width="1.2"/>
+
+    <!-- Title bar -->
+    <rect width="180" height="28" rx="8" fill="#1a3a2a"/>
+    <rect y="14" width="180" height="14" fill="#1a3a2a"/>
+    <text x="90" y="18" text-anchor="middle" fill="#6b917e" font-size="9">get</text>
+
+    <!-- Command -->
+    <text x="12" y="50" fill="#81b29a" font-size="8" font-weight="600" font-family="monospace">$ get juice_ops.tm</text>
+
+    <!-- Progress output -->
+    <g fill="#6b917e" font-size="7.5" font-family="monospace">
+      <text x="12" y="72">Parsing metakernel...</text>
+      <text x="12" y="86">Found 42 kernels</text>
+      <text x="12" y="100">  34 already in DB</text>
+      <text x="12" y="114">   8 to download</text>
+    </g>
+
+    <!-- Progress bars -->
+    <g transform="translate(12, 128)">
+      <rect width="156" height="8" rx="4" fill="#0d1b2a"/>
+      <rect width="156" height="8" rx="4" fill="#81b29a" opacity="0.8"/>
+      <text x="78" y="7" text-anchor="middle" fill="#0d1b2a" font-size="6" font-weight="600">8/8 complete</text>
+    </g>
+
+    <!-- Download detail lines -->
+    <g fill="#4a8a6a" font-size="7" font-family="monospace">
+      <text x="12" y="155">naif0012.tls</text>
+      <text x="140" y="155" fill="#81b29a">done</text>
+      <text x="12" y="167">de432s.bsp</text>
+      <text x="140" y="167" fill="#81b29a">done</text>
+      <text x="12" y="179">juice_sc_v01.bc</text>
+      <text x="140" y="179" fill="#81b29a">done</text>
+      <text x="12" y="191">pck00011.tpc</text>
+      <text x="140" y="191" fill="#81b29a">done</text>
+    </g>
+
+    <!-- Linked output -->
+    <g fill="#6b917e" font-size="7.5" font-family="monospace">
+      <text x="12" y="212">Linked 34 existing kernels</text>
+      <text x="12" y="226">into download tree.</text>
+    </g>
+
+    <!-- Ready message -->
+    <text x="12" y="248" fill="#81b29a" font-size="8" font-weight="600">Metakernel ready!</text>
   </g>
 
-  <!-- FK file -->
-  <g transform="translate(25, 270)">
-    <rect width="72" height="36" rx="5" fill="url(#kernelGrad)" stroke="#d08770" stroke-width="1" opacity="0.7"/>
-    <text x="36" y="15" text-anchor="middle" fill="#d8dee9" font-size="9" font-weight="600">.tf</text>
-    <text x="36" y="28" text-anchor="middle" fill="#d08770" font-size="8">FK</text>
+  <!-- Stage label -->
+  <text x="400" y="316" text-anchor="middle" fill="#81b29a" font-size="10" font-weight="600" letter-spacing="1">ACQUIRE</text>
+
+  <!-- ============================================ -->
+  <!-- ARROWS: Acquire → Use                        -->
+  <!-- ============================================ -->
+  <g transform="translate(498, 110)">
+    <g stroke="#81b29a" stroke-width="1.5" fill="none" opacity="0.6">
+      <path d="M0,58 L50,58" marker-end="url(#arrow)"/>
+    </g>
   </g>
 
-  <!-- PCK file -->
-  <g transform="translate(110, 270)">
-    <rect width="72" height="36" rx="5" fill="url(#kernelGrad)" stroke="#ebcb8b" stroke-width="1" opacity="0.7"/>
-    <text x="36" y="15" text-anchor="middle" fill="#d8dee9" font-size="9" font-weight="600">.tpc</text>
-    <text x="36" y="28" text-anchor="middle" fill="#ebcb8b" font-size="8">PCK</text>
+  <!-- ============================================ -->
+  <!-- STAGE 3: USE (right panel)                   -->
+  <!-- ============================================ -->
+  <g transform="translate(555, 38)">
+    <rect width="220" height="260" rx="8" fill="url(#panelGrad)" stroke="#5a4a2f" stroke-width="1.2"/>
+
+    <!-- Title bar -->
+    <rect width="220" height="28" rx="8" fill="#2a2418"/>
+    <rect y="14" width="220" height="14" fill="#2a2418"/>
+    <text x="110" y="18" text-anchor="middle" fill="#a08a5a" font-size="9">local storage</text>
+
+    <!-- File tree -->
+    <g font-size="8" font-family="monospace">
+      <text x="14" y="46" fill="#f0a500" font-weight="600">JUICE/</text>
+      <text x="28" y="57" fill="#6b8bad">mk/</text>
+      <text x="44" y="68" fill="#88c0d0">juice_ops.tm</text>
+      <text x="28" y="80" fill="#6b8bad">spk/</text>
+      <text x="44" y="91" fill="#7a94ad">de432s.bsp</text>
+      <text x="44" y="102" fill="#7a94ad">juice_struct_v01.bsp</text>
+      <text x="28" y="114" fill="#6b8bad">ck/</text>
+      <text x="44" y="125" fill="#7a94ad">juice_sc_v01.bc</text>
+      <text x="28" y="137" fill="#6b8bad">lsk/</text>
+      <text x="44" y="148" fill="#7a94ad">naif0012.tls</text>
+      <text x="28" y="160" fill="#6b8bad">fk/ pck/ ...</text>
+    </g>
+
+    <!-- Divider -->
+    <line x1="14" y1="170" x2="206" y2="170" stroke="#2d4a6f" stroke-width="0.8"/>
+
+    <!-- Python usage -->
+    <text x="14" y="184" fill="#b48ead" font-size="8" font-weight="600">python</text>
+    <g font-size="7.5" font-family="monospace">
+      <text x="14" y="197" fill="#88c0d0">spice.furnsh(</text>
+      <text x="14" y="210" fill="#a3be8c">  "JUICE/mk/juice_ops.tm"</text>
+      <text x="14" y="223" fill="#88c0d0">)</text>
+    </g>
   </g>
 
-  <!-- === ARROWS: kernels → SHA-256 === -->
-  <g stroke="#4a90a4" stroke-width="1.5" fill="none" opacity="0.6">
-    <path d="M155,78 C200,78 210,130 240,130" marker-end="url(#arrow)"/>
-    <path d="M155,153 L240,153"/>
-    <path d="M155,228 C200,228 210,175 240,175" marker-end="url(#arrow)"/>
-  </g>
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4a90a4"/>
-    </marker>
-  </defs>
-
-  <!-- === CENTER: SHA-256 hash funnel === -->
-  <g transform="translate(245, 115)">
-    <rect width="120" height="70" rx="10" fill="#1a2744" stroke="#4a90a4" stroke-width="1.5"/>
-    <text x="60" y="22" text-anchor="middle" fill="#4a90a4" font-size="10" font-weight="600">SHA-256</text>
-    <text x="60" y="40" text-anchor="middle" fill="#88c0d0" font-size="8" font-family="monospace">a3f7c2...</text>
-    <text x="60" y="52" text-anchor="middle" fill="#88c0d0" font-size="8" font-family="monospace">e91b04...</text>
-    <text x="60" y="64" text-anchor="middle" fill="#6b7f97" font-size="8" font-family="monospace">b2d8f1...</text>
-  </g>
-
-  <!-- === ARROW: hash → database === -->
-  <g stroke="#f0a500" stroke-width="2" fill="none" opacity="0.7">
-    <path d="M370,150 L430,150" marker-end="url(#arrow2)"/>
-  </g>
-  <defs>
-    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f0a500"/>
-    </marker>
-  </defs>
-
-  <!-- === RIGHT SIDE: Database cylinder === -->
-  <g transform="translate(440, 70)">
-    <!-- Cylinder body -->
-    <rect x="0" y="20" width="130" height="130" rx="4" fill="#1a2744" stroke="url(#dbGrad)" stroke-width="2"/>
-    <!-- Cylinder top ellipse -->
-    <ellipse cx="65" cy="22" rx="65" ry="18" fill="#1a2744" stroke="url(#dbGrad)" stroke-width="2"/>
-    <!-- Cylinder bottom ellipse -->
-    <ellipse cx="65" cy="150" rx="65" ry="18" fill="none" stroke="url(#dbGrad)" stroke-width="2"/>
-    <!-- Internal shelf lines -->
-    <ellipse cx="65" cy="65" rx="58" ry="10" fill="none" stroke="#f0a500" stroke-width="0.7" opacity="0.3"/>
-    <ellipse cx="65" cy="108" rx="58" ry="10" fill="none" stroke="#f0a500" stroke-width="0.7" opacity="0.3"/>
-
-    <!-- DB icon label — above top ellipse -->
-    <text x="65" y="0" text-anchor="middle" fill="#f0a500" font-size="9" font-weight="600" letter-spacing="1">DuckDB</text>
-
-    <!-- Table labels inside -->
-    <text x="65" y="48" text-anchor="middle" fill="#d8dee9" font-size="9" font-weight="500">kernels</text>
-    <text x="65" y="82" text-anchor="middle" fill="#a8b5c4" font-size="9">locations</text>
-    <text x="65" y="96" text-anchor="middle" fill="#a8b5c4" font-size="9">metakernels</text>
-    <text x="65" y="130" text-anchor="middle" fill="#6b7f97" font-size="8">content-addressed</text>
-  </g>
-
-  <!-- === Dedup indicator === -->
-  <g transform="translate(600, 85)">
-    <rect width="140" height="55" rx="8" fill="#1a2744" stroke="#81b29a" stroke-width="1.2"/>
-    <text x="70" y="20" text-anchor="middle" fill="#81b29a" font-size="10" font-weight="600">deduplicated</text>
-    <text x="70" y="36" text-anchor="middle" fill="#6b917e" font-size="9">3 missions</text>
-    <text x="70" y="48" text-anchor="middle" fill="#6b917e" font-size="9">1 copy each</text>
-  </g>
-
-  <!-- Mission-aware resolution indicator -->
-  <g transform="translate(600, 165)">
-    <rect width="140" height="55" rx="8" fill="#1a2744" stroke="#e07a5f" stroke-width="1.2"/>
-    <text x="70" y="20" text-anchor="middle" fill="#e07a5f" font-size="10" font-weight="600">mission-aware</text>
-    <text x="70" y="36" text-anchor="middle" fill="#a0685a" font-size="9">JUICE &gt; generic</text>
-    <text x="70" y="48" text-anchor="middle" fill="#a0685a" font-size="9">fallback + warn</text>
-  </g>
-
-  <!-- Metakernel rewrite indicator -->
-  <g transform="translate(600, 245)">
-    <rect width="140" height="55" rx="8" fill="#1a2744" stroke="#88c0d0" stroke-width="1.2"/>
-    <text x="70" y="20" text-anchor="middle" fill="#88c0d0" font-size="10" font-weight="600">mk rewrite</text>
-    <text x="70" y="36" text-anchor="middle" fill="#6b97a4" font-size="9">minimal edits</text>
-    <text x="70" y="48" text-anchor="middle" fill="#6b97a4" font-size="9">symlink trees</text>
-  </g>
-
-  <!-- Connectors from DB to features -->
-  <g stroke="#4a5568" stroke-width="1" fill="none" opacity="0.5">
-    <line x1="572" y1="115" x2="600" y2="112"/>
-    <line x1="572" y1="155" x2="600" y2="192"/>
-    <line x1="572" y1="175" x2="600" y2="272"/>
-  </g>
+  <!-- Stage label -->
+  <text x="665" y="316" text-anchor="middle" fill="#f0a500" font-size="10" font-weight="600" letter-spacing="1">USE</text>
 
 </svg>

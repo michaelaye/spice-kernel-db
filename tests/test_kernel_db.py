@@ -17,7 +17,10 @@ from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
 from spice_kernel_db.remote import (
     RemoteMetakernel,
     list_remote_metakernels,
+    list_remote_missions,
     resolve_kernel_urls,
+    SPICE_SERVERS,
+    _DIR_ENTRY_RE,
     _VERSION_TAG_RE,
 )
 
@@ -289,6 +292,15 @@ class TestDBScan:
             juice_loc_hashes.update(r[0] for r in rows)
 
         assert generic_hashes & juice_loc_hashes  # intersection non-empty
+
+    def test_scan_returns_missions_found(self, db, tmp_path):
+        """scan_directory returns (count, missions_found) tuple."""
+        # Create a small directory with one kernel per mission
+        (tmp_path / "TESTMISSION" / "kernels" / "lsk").mkdir(parents=True)
+        (tmp_path / "TESTMISSION" / "kernels" / "lsk" / "test.tls").write_text("data")
+        count, missions = db.scan_directory(tmp_path)
+        assert count == 1
+        assert "TESTMISSION" in missions
 
 
 class TestResolveKernel:
@@ -594,10 +606,10 @@ class TestResolveKernelUrls:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests: acquire_metakernel
+# Integration tests: get_metakernel
 # ---------------------------------------------------------------------------
 
-class TestAcquireMetakernel:
+class TestGetMetakernel:
     REMOTE_MK_TEXT = textwrap.dedent("""\
         KPL/MK
 
@@ -639,13 +651,13 @@ class TestAcquireMetakernel:
         mock_resp.__exit__ = MagicMock(return_value=False)
         return mock_resp
 
-    def test_acquire_shows_table(self, populated_db, tmp_path, capsys):
-        """acquire_metakernel prints a table even when we skip download."""
+    def test_get_shows_table(self, populated_db, tmp_path, capsys):
+        """get_metakernel prints a table even when we skip download."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("builtins.input", return_value="n"):
-            result = populated_db.acquire_metakernel(
+            result = populated_db.get_metakernel(
                 mk_url,
                 download_dir=tmp_path / "downloads",
                 mission="JUICE",
@@ -659,14 +671,14 @@ class TestAcquireMetakernel:
         assert "in db" in captured.out
         assert "missing" in captured.out
 
-    def test_acquire_saves_tm_file(self, populated_db, tmp_path):
-        """acquire_metakernel saves the .tm file to disk."""
+    def test_get_saves_tm_file(self, populated_db, tmp_path):
+        """get_metakernel saves the .tm file to disk."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("builtins.input", return_value="n"):
-            populated_db.acquire_metakernel(
+            populated_db.get_metakernel(
                 mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
             )
 
@@ -674,40 +686,92 @@ class TestAcquireMetakernel:
         assert mk_file.is_file()
         assert "KERNELS_TO_LOAD" in mk_file.read_text()
 
-    def test_acquire_registers_in_metakernel_registry(self, populated_db, tmp_path):
-        """acquire_metakernel registers the .tm in metakernel_registry."""
+    def test_get_registers_in_metakernel_registry(self, populated_db, tmp_path):
+        """get_metakernel registers the .tm in metakernel_registry."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("builtins.input", return_value="n"):
-            populated_db.acquire_metakernel(
+            populated_db.get_metakernel(
                 mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
             )
 
         row = populated_db.con.execute(
-            "SELECT mission, source_url, filename FROM metakernel_registry"
+            "SELECT mission, source_url, filename FROM metakernel_registry WHERE filename = 'test.tm'"
         ).fetchone()
         assert row is not None
         assert row[0] == "JUICE"
         assert row[1] == mk_url
         assert row[2] == "test.tm"
 
-    def test_acquire_indexes_metakernel_entries(self, populated_db, tmp_path):
-        """acquire_metakernel populates metakernel_entries."""
+    def test_get_indexes_metakernel_entries(self, populated_db, tmp_path):
+        """get_metakernel populates metakernel_entries."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("builtins.input", return_value="n"):
-            populated_db.acquire_metakernel(
+            populated_db.get_metakernel(
                 mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
             )
 
+        mk_dest = str(dl_dir / "JUICE" / "mk" / "test.tm")
         count = populated_db.con.execute(
-            "SELECT COUNT(*) FROM metakernel_entries"
+            "SELECT COUNT(*) FROM metakernel_entries WHERE mk_path = ?",
+            [mk_dest],
         ).fetchone()[0]
         assert count == 2  # naif0012.tls + new_kernel.bsp
+
+    def test_get_links_existing_kernels(self, populated_db, tmp_path):
+        """get creates symlinks for 'in db' kernels so the mk works locally."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        # naif0012.tls is "in db" — should have a symlink at the expected path
+        linked = dl_dir / "JUICE" / "lsk" / "naif0012.tls"
+        assert linked.is_symlink()
+        assert linked.resolve().is_file()
+        assert linked.read_text() == "FAKE LSK naif0012"
+
+    def test_get_links_printed(self, populated_db, tmp_path, capsys):
+        """get prints the number of linked kernels and 'ready' message."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        captured = capsys.readouterr()
+        assert "Linked" in captured.out
+        assert "Metakernel ready" in captured.out
+
+    def test_get_writes_spice_server_marker(self, populated_db, tmp_path):
+        """get_metakernel writes a .spice-server marker file."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        marker = dl_dir / "JUICE" / ".spice-server"
+        assert marker.is_file()
+        content = marker.read_text()
+        assert "server_url=" in content
+        assert "mk_dir_url=" in content
+        assert "naif.jpl.nasa.gov" in content
 
 
 # ---------------------------------------------------------------------------
@@ -715,30 +779,32 @@ class TestAcquireMetakernel:
 # ---------------------------------------------------------------------------
 
 class TestMetakernelListingInfo:
-    REMOTE_MK_TEXT = TestAcquireMetakernel.REMOTE_MK_TEXT
+    REMOTE_MK_TEXT = TestGetMetakernel.REMOTE_MK_TEXT
 
     def _mock_urlopen(self, req_or_url):
-        return TestAcquireMetakernel._mock_urlopen(self, req_or_url)
+        return TestGetMetakernel._mock_urlopen(self, req_or_url)
 
-    def _acquire_test_mk(self, db, tmp_path):
-        """Helper: acquire a test metakernel into the DB."""
+    def _get_test_mk(self, db, tmp_path):
+        """Helper: get a test metakernel into the DB."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("builtins.input", return_value="n"):
-            db.acquire_metakernel(
+            db.get_metakernel(
                 mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
             )
         return dl_dir
 
     def test_list_metakernels(self, populated_db, tmp_path, capsys):
         """list_metakernels returns tracked metakernels."""
-        self._acquire_test_mk(populated_db, tmp_path)
+        self._get_test_mk(populated_db, tmp_path)
         results = populated_db.list_metakernels()
-        assert len(results) == 1
-        assert results[0]["filename"] == "test.tm"
-        assert results[0]["mission"] == "JUICE"
-        assert results[0]["n_kernels"] == 2
+        # Scan indexes the fixture's .tm too, so there are 2
+        assert len(results) >= 1
+        got = [r for r in results if r["filename"] == "test.tm"]
+        assert len(got) == 1
+        assert got[0]["mission"] == "JUICE"
+        assert got[0]["n_kernels"] == 2
 
         captured = capsys.readouterr()
         assert "test.tm" in captured.out
@@ -746,15 +812,15 @@ class TestMetakernelListingInfo:
 
     def test_list_metakernels_filter_by_mission(self, populated_db, tmp_path):
         """list_metakernels filters by mission."""
-        self._acquire_test_mk(populated_db, tmp_path)
+        self._get_test_mk(populated_db, tmp_path)
         results = populated_db.list_metakernels(mission="JUICE")
-        assert len(results) == 1
+        assert len(results) >= 1
         results = populated_db.list_metakernels(mission="MRO")
         assert len(results) == 0
 
     def test_info_metakernel(self, populated_db, tmp_path, capsys):
         """info_metakernel shows detailed per-kernel info."""
-        self._acquire_test_mk(populated_db, tmp_path)
+        self._get_test_mk(populated_db, tmp_path)
         result = populated_db.info_metakernel("test.tm")
         assert result is not None
         assert result["filename"] == "test.tm"
@@ -774,27 +840,30 @@ class TestMetakernelListingInfo:
 
     def test_list_metakernels_identical_content(self, populated_db, tmp_path, capsys):
         """list_metakernels flags metakernels with identical kernel lists."""
-        self._acquire_test_mk(populated_db, tmp_path)
+        dl_dir = self._get_test_mk(populated_db, tmp_path)
 
-        # Manually insert a second metakernel with the same kernel entries
+        # Manually insert a second metakernel with the same kernel entries as test.tm
+        mk_path_1 = str(dl_dir / "JUICE" / "mk" / "test.tm")
         mk_path_2 = str(tmp_path / "downloads" / "JUICE" / "mk" / "test_v2.tm")
         populated_db.con.execute("""
             INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at)
             VALUES (?, 'JUICE', 'https://example.com/test_v2.tm', 'test_v2.tm', CURRENT_TIMESTAMP)
         """, [mk_path_2])
-        # Copy the same entries from the first metakernel
+        # Copy entries only from the test.tm metakernel
         populated_db.con.execute("""
             INSERT INTO metakernel_entries (mk_path, entry_index, raw_entry, filename)
             SELECT ?, entry_index, raw_entry, filename
             FROM metakernel_entries
-            WHERE mk_path != ?
-        """, [mk_path_2, mk_path_2])
+            WHERE mk_path = ?
+        """, [mk_path_2, mk_path_1])
 
         results = populated_db.list_metakernels()
-        assert len(results) == 2
+        # At least test.tm and test_v2.tm (scan may also index fixture's .tm)
+        test_results = [r for r in results if r["filename"] in ("test.tm", "test_v2.tm")]
+        assert len(test_results) == 2
 
         # One should be flagged as identical to the other
-        identical = [r for r in results if r["identical_to"] is not None]
+        identical = [r for r in test_results if r["identical_to"] is not None]
         assert len(identical) == 1
         assert identical[0]["identical_to"] in ("test.tm", "test_v2.tm")
 
@@ -1109,41 +1178,286 @@ class TestBrowseRemoteMetakernels:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests: list_known_mk_dirs
+# Unit tests: directory entry regex
 # ---------------------------------------------------------------------------
 
-class TestListKnownMkDirs:
-    def test_empty_registry(self, db, capsys):
-        """No acquired MKs → informative message."""
-        results = db.list_known_mk_dirs()
-        assert results == []
-        captured = capsys.readouterr()
-        assert "no known" in captured.out.lower()
+class TestDirEntryRegex:
+    def test_matches_directory_entry(self):
+        line = '<a href="JUICE/">JUICE/</a>                     2026-01-15 10:00    -'
+        m = _DIR_ENTRY_RE.search(line)
+        assert m is not None
+        assert m.group(1) == "JUICE/"
+        assert m.group(2) == "2026-01-15 10:00"
 
-    def test_with_entries(self, db, capsys):
-        """Acquired MKs → correct dirs and counts."""
-        db.con.execute("""
-            INSERT INTO metakernel_registry VALUES
-            (?, ?, ?, ?, current_timestamp)
-        """, ["/tmp/a.tm", "JUICE", "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm", "juice_ops.tm"])
-        db.con.execute("""
-            INSERT INTO metakernel_registry VALUES
-            (?, ?, ?, ?, current_timestamp)
-        """, ["/tmp/b.tm", "JUICE", "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_plan.tm", "juice_plan.tm"])
-        db.con.execute("""
-            INSERT INTO metakernel_registry VALUES
-            (?, ?, ?, ?, current_timestamp)
-        """, ["/tmp/c.tm", "MRO", "https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/mro_ops.tm", "mro_ops.tm"])
+    def test_matches_esa_table_format(self):
+        line = '<tr><td valign="top"><img src="/icons/folder.gif" alt="[DIR]"></td><td><a href="BEPICOLOMBO/">BEPICOLOMBO/</a></td><td align="right">2021-10-15 12:50  </td><td align="right">  - </td><td>&nbsp;</td></tr>'
+        m = _DIR_ENTRY_RE.search(line)
+        assert m is not None
+        assert m.group(1) == "BEPICOLOMBO/"
+        assert m.group(2) == "2021-10-15 12:50"
 
-        results = db.list_known_mk_dirs()
-        assert len(results) == 2
+    def test_does_not_match_file(self):
+        line = '<a href="aareadme.txt">aareadme.txt</a>          2025-06-03 08:00   12K'
+        m = _DIR_ENTRY_RE.search(line)
+        assert m is None
 
-        by_mission = {r["mission"]: r for r in results}
-        assert by_mission["JUICE"]["n_acquired"] == 2
-        assert "JUICE/kernels/mk/" in by_mission["JUICE"]["mk_dir_url"]
-        assert by_mission["MRO"]["n_acquired"] == 1
+    def test_does_not_match_tm_file(self):
+        line = '<a href="juice_ops.tm">juice_ops.tm</a>          2025-11-27 09:30   12K'
+        m = _DIR_ENTRY_RE.search(line)
+        assert m is None
 
-        captured = capsys.readouterr()
-        assert "JUICE" in captured.out
-        assert "MRO" in captured.out
-        assert "browse <url>" in captured.out
+
+# ---------------------------------------------------------------------------
+# Unit tests: list_remote_missions (HTML parsing)
+# ---------------------------------------------------------------------------
+
+class TestListRemoteMissions:
+    SAMPLE_DIR_HTML = textwrap.dedent("""\
+        <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+        <html><head><title>Index of /pub/naif</title></head>
+        <body><h1>Index of /pub/naif</h1>
+        <pre><img src="/icons/blank.gif"> <a href="?C=N;O=D">Name</a>
+        <hr><img src="/icons/back.gif"> <a href="/pub/">Parent Directory</a>
+        <img src="/icons/folder.gif"> <a href="CASSINI/">CASSINI/</a>             2025-06-10 08:00    -
+        <img src="/icons/folder.gif"> <a href="JUICE/">JUICE/</a>               2026-01-15 10:00    -
+        <img src="/icons/folder.gif"> <a href="MRO/">MRO/</a>                 2025-12-01 09:00    -
+        <img src="/icons/folder.gif"> <a href="toolkit/">toolkit/</a>             2025-11-01 07:00    -
+        <img src="/icons/unknown.gif"> <a href="aareadme.txt">aareadme.txt</a>  2025-01-01 00:00   2K
+        <hr></pre></body></html>
+    """)
+
+    def test_parses_mission_dirs(self):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = self.SAMPLE_DIR_HTML.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            missions = list_remote_missions("https://naif.jpl.nasa.gov/pub/naif/")
+
+        # Should find directories (not files)
+        assert "CASSINI" in missions
+        assert "JUICE" in missions
+        assert "MRO" in missions
+        assert "toolkit" in missions
+        # Should NOT include files
+        assert "aareadme.txt" not in missions
+
+    def test_sorted_alphabetically(self):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = self.SAMPLE_DIR_HTML.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            missions = list_remote_missions("https://example.com/")
+
+        assert missions == sorted(missions)
+
+    def test_skips_parent_dir(self):
+        html = '<a href="../">../</a>  2025-01-01 00:00    -\n'
+        html += '<a href="JUICE/">JUICE/</a>  2025-01-01 00:00    -\n'
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = html.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            missions = list_remote_missions("https://example.com/")
+
+        assert ".." not in missions
+        assert "JUICE" in missions
+
+    def test_parses_esa_table_format(self):
+        esa_html = textwrap.dedent("""\
+            <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+            <html><head><title>Index of /data/SPICE</title></head>
+            <body><h1>Index of /data/SPICE</h1>
+            <table>
+            <tr><td><a href="/data/">Parent Directory</a></td><td>&nbsp;</td><td align="right">  - </td></tr>
+            <tr><td><a href="BEPICOLOMBO/">BEPICOLOMBO/</a></td><td align="right">2021-10-15 12:50  </td><td align="right">  - </td></tr>
+            <tr><td><a href="JUICE/">JUICE/</a></td><td align="right">2023-07-07 12:54  </td><td align="right">  - </td></tr>
+            <tr><td><a href="ROSETTA/">ROSETTA/</a></td><td align="right">2020-03-01 09:00  </td><td align="right">  - </td></tr>
+            </table></body></html>
+        """)
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = esa_html.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            missions = list_remote_missions("https://spiftp.esac.esa.int/data/SPICE/")
+
+        assert "BEPICOLOMBO" in missions
+        assert "JUICE" in missions
+        assert "ROSETTA" in missions
+        assert len(missions) == 3
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: mission management
+# ---------------------------------------------------------------------------
+
+class TestMissionManagement:
+    NASA_URL = "https://naif.jpl.nasa.gov/pub/naif/"
+    ESA_URL = "https://spiftp.esac.esa.int/data/SPICE/"
+
+    def test_add_and_get_mission(self, db):
+        db.add_mission(
+            "JUICE", self.ESA_URL,
+            "https://spiftp.esac.esa.int/data/SPICE/JUICE/kernels/mk/",
+            dedup=True,
+        )
+        m = db.get_mission("JUICE")
+        assert m is not None
+        assert m["name"] == "JUICE"
+        assert m["server_url"] == self.ESA_URL
+        assert m["server_label"] == "ESA"
+        assert m["dedup"] is True
+        assert "JUICE/kernels/mk/" in m["mk_dir_url"]
+
+    def test_get_mission_case_insensitive(self, db):
+        db.add_mission("JUICE", self.ESA_URL, "https://example.com/mk/", True)
+        assert db.get_mission("juice") is not None
+        assert db.get_mission("Juice") is not None
+
+    def test_get_mission_not_found(self, db):
+        assert db.get_mission("NONEXISTENT") is None
+
+    def test_list_missions(self, db):
+        db.add_mission("JUICE", self.ESA_URL, "https://example.com/JUICE/mk/", True)
+        db.add_mission("MRO", self.NASA_URL, "https://example.com/MRO/mk/", False)
+
+        missions = db.list_missions()
+        assert len(missions) == 2
+
+        by_name = {m["name"]: m for m in missions}
+        assert by_name["JUICE"]["server_label"] == "ESA"
+        assert by_name["JUICE"]["dedup"] is True
+        assert by_name["MRO"]["server_label"] == "NASA"
+        assert by_name["MRO"]["dedup"] is False
+
+    def test_list_missions_empty(self, db):
+        assert db.list_missions() == []
+
+    def test_remove_mission(self, db):
+        db.add_mission("JUICE", self.ESA_URL, "https://example.com/mk/", True)
+        assert db.remove_mission("JUICE") is True
+        assert db.get_mission("JUICE") is None
+
+    def test_remove_nonexistent_mission(self, db):
+        assert db.remove_mission("NONEXISTENT") is False
+
+    def test_add_mission_replaces_existing(self, db):
+        db.add_mission("JUICE", self.ESA_URL, "https://old.com/mk/", True)
+        db.add_mission("JUICE", self.NASA_URL, "https://new.com/mk/", False)
+
+        m = db.get_mission("JUICE")
+        assert m["server_url"] == self.NASA_URL
+        assert m["dedup"] is False
+        assert m["mk_dir_url"] == "https://new.com/mk/"
+
+    def test_custom_server_label(self, db):
+        db.add_mission(
+            "CUSTOM", "https://my-server.example.com/spice/",
+            "https://my-server.example.com/spice/CUSTOM/mk/", True,
+        )
+        m = db.get_mission("CUSTOM")
+        assert m["server_label"] == "custom"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: per-mission deduplication
+# ---------------------------------------------------------------------------
+
+class TestPerMissionDedup:
+    def test_dedup_respects_disabled_mission(self, populated_db, tmp_spice_tree):
+        """Files in a no-dedup mission should NOT be removed."""
+        # Mark JUICE as dedup=False
+        populated_db.add_mission(
+            "JUICE", SPICE_SERVERS["ESA"],
+            "https://example.com/JUICE/mk/", dedup=False,
+        )
+
+        plan = populated_db.deduplicate_plan()
+
+        # No plan entry should remove a JUICE path
+        for item in plan:
+            for rm_path in item["remove"]:
+                assert "JUICE" not in rm_path, (
+                    f"JUICE file should not be removed when dedup=False: {rm_path}"
+                )
+
+    def test_dedup_includes_enabled_mission(self, populated_db, tmp_spice_tree):
+        """Files in a dedup-enabled mission CAN be removed."""
+        # Mark MRO as dedup=True (default), JUICE as dedup=True
+        populated_db.add_mission(
+            "JUICE", SPICE_SERVERS["ESA"],
+            "https://example.com/JUICE/mk/", dedup=True,
+        )
+        populated_db.add_mission(
+            "MRO", SPICE_SERVERS["NASA"],
+            "https://example.com/MRO/mk/", dedup=True,
+        )
+
+        plan = populated_db.deduplicate_plan()
+        # With all missions dedup-enabled, plan should have entries
+        assert len(plan) > 0
+
+    def test_dedup_default_is_enabled(self, populated_db, tmp_spice_tree):
+        """Missions not in the missions table default to dedup=True."""
+        # No missions configured at all
+        plan_default = populated_db.deduplicate_plan()
+
+        # Should be the same as having all dedup enabled
+        assert len(plan_default) > 0
+        # naif0012.tls is duplicated across generic, JUICE, MRO
+        filenames = {item["filename"] for item in plan_default}
+        assert "naif0012.tls" in filenames
+
+    def test_dedup_mixed_settings(self, populated_db, tmp_spice_tree):
+        """With mixed settings, only dedup-enabled files are removed."""
+        # JUICE dedup off, MRO not configured (defaults to on)
+        populated_db.add_mission(
+            "JUICE", SPICE_SERVERS["ESA"],
+            "https://example.com/JUICE/mk/", dedup=False,
+        )
+
+        plan = populated_db.deduplicate_plan()
+
+        # Collect all removed paths
+        removed_paths = []
+        for item in plan:
+            removed_paths.extend(item["remove"])
+
+        # JUICE paths should never appear in removals
+        juice_removed = [p for p in removed_paths if "JUICE" in p]
+        assert len(juice_removed) == 0
+
+        # MRO paths CAN appear in removals (dedup defaults to True)
+        # naif0012.tls exists in generic, JUICE, and MRO
+        # With JUICE protected, the plan should still remove MRO copies
+        mro_removed = [p for p in removed_paths if "MRO" in p]
+        assert len(mro_removed) > 0
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: SPICE_SERVERS constant
+# ---------------------------------------------------------------------------
+
+class TestSpiceServers:
+    def test_has_nasa_and_esa(self):
+        assert "NASA" in SPICE_SERVERS
+        assert "ESA" in SPICE_SERVERS
+
+    def test_urls_end_with_slash(self):
+        for label, url in SPICE_SERVERS.items():
+            assert url.endswith("/"), f"{label} URL should end with /"
+
+    def test_urls_are_https(self):
+        for label, url in SPICE_SERVERS.items():
+            assert url.startswith("https://"), f"{label} URL should be HTTPS"

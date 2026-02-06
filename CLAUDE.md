@@ -36,7 +36,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 
 | Module | Role |
 |--------|------|
-| `db.py` | `KernelDB` class — all DB operations, scanning, resolution, metakernel rewriting, acquire, browse |
+| `db.py` | `KernelDB` class — all DB operations, scanning, resolution, metakernel rewriting, get, browse |
 | `parser.py` | `ParsedMetakernel` dataclass; parse/write `.tm` files; symbol resolution |
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission()` (path heuristic) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with tqdm |

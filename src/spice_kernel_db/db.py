@@ -35,10 +35,12 @@ from spice_kernel_db.parser import (
     write_metakernel,
 )
 from spice_kernel_db.remote import (
+    SPICE_SERVERS,
     download_kernel,
     download_kernels_parallel,
     fetch_metakernel,
     list_remote_metakernels,
+    list_remote_missions,
     query_remote_sizes,
     resolve_kernel_urls,
 )
@@ -111,6 +113,108 @@ class KernelDB:
                 acquired_at  TIMESTAMP DEFAULT current_timestamp
             )
         """)
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS missions (
+                name         VARCHAR PRIMARY KEY,
+                server_url   VARCHAR,
+                mk_dir_url   VARCHAR,
+                dedup        BOOLEAN DEFAULT TRUE,
+                added_at     TIMESTAMP DEFAULT current_timestamp
+            )
+        """)
+
+    # ------------------------------------------------------------------
+    # Mission management
+    # ------------------------------------------------------------------
+
+    def add_mission(
+        self,
+        name: str,
+        server_url: str,
+        mk_dir_url: str,
+        dedup: bool = True,
+    ) -> None:
+        """Register a mission in the database.
+
+        Args:
+            name: Mission name (e.g. "JUICE").
+            server_url: Root server URL (e.g. NASA or ESA).
+            mk_dir_url: Full URL to the mission's mk/ directory.
+            dedup: Whether deduplication is enabled for this mission.
+        """
+        self.con.execute("""
+            INSERT OR REPLACE INTO missions (name, server_url, mk_dir_url, dedup)
+            VALUES (?, ?, ?, ?)
+        """, [name, server_url, mk_dir_url, dedup])
+
+    def list_missions(self) -> list[dict]:
+        """List all configured missions."""
+        rows = self.con.execute("""
+            SELECT name, server_url, mk_dir_url, dedup, added_at
+            FROM missions ORDER BY name
+        """).fetchall()
+        results = []
+        for name, server_url, mk_dir_url, dedup, added_at in rows:
+            # Determine server label
+            server_label = "custom"
+            for label, url in SPICE_SERVERS.items():
+                if server_url == url:
+                    server_label = label
+                    break
+            results.append({
+                "name": name,
+                "server_url": server_url,
+                "server_label": server_label,
+                "mk_dir_url": mk_dir_url,
+                "dedup": dedup,
+                "added_at": added_at,
+            })
+        return results
+
+    def remove_mission(self, name: str) -> bool:
+        """Remove a mission from the database. Returns True if found."""
+        count = self.con.execute(
+            "SELECT COUNT(*) FROM missions WHERE name = ?", [name]
+        ).fetchone()[0]
+        if count == 0:
+            return False
+        self.con.execute("DELETE FROM missions WHERE name = ?", [name])
+        return True
+
+    def get_mission(self, name: str) -> dict | None:
+        """Look up a mission by name (case-insensitive, prefix-matchable).
+
+        Tries exact match first, then case-insensitive prefix match.
+        Returns None if no match or if the prefix is ambiguous.
+        """
+        row = self.con.execute("""
+            SELECT name, server_url, mk_dir_url, dedup, added_at
+            FROM missions WHERE LOWER(name) = LOWER(?)
+        """, [name]).fetchone()
+        if not row:
+            # Try prefix match
+            rows = self.con.execute("""
+                SELECT name, server_url, mk_dir_url, dedup, added_at
+                FROM missions WHERE LOWER(name) LIKE LOWER(?) || '%'
+            """, [name]).fetchall()
+            if len(rows) == 1:
+                row = rows[0]
+        if not row:
+            return None
+        name, server_url, mk_dir_url, dedup, added_at = row
+        server_label = "custom"
+        for label, url in SPICE_SERVERS.items():
+            if server_url == url:
+                server_label = label
+                break
+        return {
+            "name": name,
+            "server_url": server_url,
+            "server_label": server_label,
+            "mk_dir_url": mk_dir_url,
+            "dedup": dedup,
+            "added_at": added_at,
+        }
 
     # ------------------------------------------------------------------
     # Scanning
@@ -191,32 +295,53 @@ class KernelDB:
         extensions: set[str] | None = None,
         verbose: bool = False,
         archive_dir: str | Path | None = None,
-    ) -> int:
+    ) -> tuple[int, set[str]]:
         """Recursively scan a directory tree and register all kernel files.
 
         If ``archive_dir`` is set, files are moved into the archive and
         symlinks are left at the original locations.
 
-        Returns the number of files registered.
+        Returns ``(count, missions_found)`` — the number of files registered
+        and the set of mission names detected during the scan.
         """
         if extensions is None:
             extensions = KERNEL_EXTENSIONS
 
         root = Path(root).expanduser().resolve()
         count = 0
+        missions_found: set[str] = set()
+        mk_files: list[tuple[Path, str]] = []  # (path, mission)
         for p in sorted(root.rglob("*")):
             if p.is_file() and p.suffix.lower() in extensions:
                 try:
+                    m = mission or guess_mission(str(p))
                     self.register_file(
-                        p, mission=mission, archive_dir=archive_dir,
+                        p, mission=m, archive_dir=archive_dir,
                     )
                     count += 1
+                    missions_found.add(m)
                     if verbose:
                         print(f"  registered: {p.name}")
+                    if p.suffix.lower() == ".tm":
+                        mk_files.append((p, m))
                 except Exception as e:
                     logger.warning("Could not register %s: %s", p, e)
+
+        # Index metakernels into the registry
+        for mk_path, m in mk_files:
+            try:
+                self.index_metakernel(mk_path)
+                self.con.execute("""
+                    INSERT OR REPLACE INTO metakernel_registry
+                    VALUES (?, ?, NULL, ?, current_timestamp)
+                """, [str(mk_path), m, mk_path.name])
+            except Exception as e:
+                logger.warning("Could not index metakernel %s: %s", mk_path, e)
+
         print(f"Scanned {root}: {count} kernel files registered.")
-        return count
+        if mk_files:
+            print(f"  Indexed {len(mk_files)} metakernels.")
+        return count, missions_found
 
     # ------------------------------------------------------------------
     # Lookup (mission-aware)
@@ -589,7 +714,37 @@ class KernelDB:
     # Acquire (remote metakernel)
     # ------------------------------------------------------------------
 
-    def acquire_metakernel(
+    def _link_existing_kernels(
+        self,
+        indices: list[int],
+        filenames: list[str],
+        relpaths: list[str],
+        download_dir: Path,
+        mission: str,
+    ) -> int:
+        """Create symlinks for kernels already in the DB.
+
+        For each kernel index in *indices*, resolve its local path and
+        create a symlink at ``download_dir / mission / relpath`` so the
+        metakernel's relative paths work without rewriting.
+
+        Returns the number of symlinks created.
+        """
+        n_linked = 0
+        for i in indices:
+            expected = download_dir / mission / relpaths[i]
+            if expected.exists() or expected.is_symlink():
+                continue
+            local, _ = self.resolve_kernel(
+                filenames[i], preferred_mission=mission,
+            )
+            if local and Path(local).is_file():
+                expected.parent.mkdir(parents=True, exist_ok=True)
+                expected.symlink_to(Path(local).resolve())
+                n_linked += 1
+        return n_linked
+
+    def get_metakernel(
         self,
         url: str,
         download_dir: str | Path | None = None,
@@ -619,6 +774,10 @@ class KernelDB:
         parsed = parse_metakernel_text(text, url)
         if mission is None:
             mission = guess_mission(url)
+        # Resolve to canonical mission name from DB (e.g. "juice" → "JUICE")
+        m = self.get_mission(mission)
+        if m:
+            mission = m["name"]
 
         # 1b. Save .tm file to disk and register
         mk_filename = url.rsplit("/", 1)[-1]
@@ -630,6 +789,22 @@ class KernelDB:
             INSERT OR REPLACE INTO metakernel_registry
             VALUES (?, ?, ?, ?, current_timestamp)
         """, [str(mk_dest), mission, url, mk_filename])
+
+        # 1c. Write .spice-server marker for scan auto-detection
+        mk_dir_url = url.rsplit("/", 1)[0] + "/"
+        server_url = ""
+        if m:
+            server_url = m["server_url"]
+        else:
+            for label, surl in SPICE_SERVERS.items():
+                if url.startswith(surl):
+                    server_url = surl
+                    break
+        marker = download_dir / mission / ".spice-server"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            f"server_url={server_url}\nmk_dir_url={mk_dir_url}\n"
+        )
 
         # 2. Resolve kernel URLs
         kernel_urls = resolve_kernel_urls(url, parsed)
@@ -677,6 +852,12 @@ class KernelDB:
 
         if n_missing == 0:
             print("\n  All kernels already in database.")
+            n_linked = self._link_existing_kernels(
+                found_indices, filenames, relpaths, download_dir, mission,
+            )
+            if n_linked:
+                print(f"  Linked {n_linked} existing kernels into download tree.")
+            print(f"\n  Metakernel ready: {mk_dest}")
             return {
                 "found": found_indices,
                 "missing": [],
@@ -692,6 +873,12 @@ class KernelDB:
             ).strip().lower()
             if answer not in ("y", "yes"):
                 print("Aborted.")
+                n_linked = self._link_existing_kernels(
+                    found_indices, filenames, relpaths, download_dir, mission,
+                )
+                if n_linked:
+                    print(f"  Linked {n_linked} existing kernels into download tree.")
+                print(f"\n  Metakernel ready: {mk_dest}")
                 return {
                     "found": found_indices,
                     "missing": missing_indices,
@@ -699,30 +886,50 @@ class KernelDB:
                     "warnings": [],
                 }
 
-        # 7. Download in parallel and register
+        # 7. Build download list, skipping files already on disk with correct size
         tasks = []
         task_info: dict[str, str] = {}  # filename -> source_url
+        already_on_disk: list[Path] = []
         for i in missing_indices:
             kurl = kernel_urls[i]
             relpath = relpaths[i]
             dest = download_dir / mission / relpath
             fname = filenames[i]
+            remote_size = sizes.get(kurl)
+            if dest.is_file() and remote_size and dest.stat().st_size == remote_size:
+                already_on_disk.append(dest)
+                task_info[fname] = kurl
+                continue
             tasks.append((kurl, dest, fname))
             task_info[fname] = kurl
 
-        dl_paths, warnings = download_kernels_parallel(tasks)
+        if already_on_disk:
+            print(f"\n  Skipped: {len(already_on_disk)} already downloaded")
+            download_bytes -= sum(f.stat().st_size for f in already_on_disk)
 
-        # Register downloaded files
+        dl_paths, warnings = download_kernels_parallel(
+            tasks, total_bytes=download_bytes,
+        )
+
+        # Register all files (downloaded + already on disk)
         downloaded: list[str] = []
-        for dest in dl_paths:
+        for dest in [*already_on_disk, *dl_paths]:
             kurl = task_info[dest.name]
             self.register_file(dest, mission=mission, source_url=kurl)
             downloaded.append(str(dest))
 
-        print(f"\n  Downloaded: {len(downloaded)}/{n_missing}")
+        print(f"\n  Downloaded: {len(dl_paths)}/{n_missing}")
         if warnings:
             for w in warnings:
                 print(f"  ⚠ {w}")
+
+        # 8. Create symlinks for "in db" kernels so the metakernel works locally
+        n_linked = self._link_existing_kernels(
+            found_indices, filenames, relpaths, download_dir, mission,
+        )
+        if n_linked:
+            print(f"  Linked {n_linked} existing kernels into download tree.")
+        print(f"\n  Metakernel ready: {mk_dest}")
 
         return {
             "found": found_indices,
@@ -1048,63 +1255,7 @@ class KernelDB:
             f" | {n_local} locally acquired"
         )
         if not show_versioned and n_files > n_unique:
-            print("  Use --show-versioned to see individual snapshots.")
-        print()
-
-        return results
-
-    def list_known_mk_dirs(self, *, quiet: bool = False) -> list[dict]:
-        """List known remote mk/ directory URLs from previously acquired MKs.
-
-        Derives directory URLs from ``metakernel_registry.source_url``
-        by stripping the filename component.
-
-        Args:
-            quiet: If True, suppress printed output (useful for lookups).
-        """
-        rows = self.con.execute("""
-            SELECT mission, source_url, COUNT(*) AS n
-            FROM metakernel_registry
-            WHERE source_url IS NOT NULL AND source_url != ''
-            GROUP BY mission, source_url
-        """).fetchall()
-
-        # Group by (mission, mk_dir_url) — strip filename from source_url
-        from collections import defaultdict
-        dirs: dict[tuple[str, str], int] = defaultdict(int)
-        for mission, source_url, count in rows:
-            # "https://.../mk/juice_ops.tm" → "https://.../mk/"
-            mk_dir = source_url.rsplit("/", 1)[0] + "/"
-            dirs[(mission, mk_dir)] += count
-
-        results = [
-            {"mission": m, "mk_dir_url": url, "n_acquired": n}
-            for (m, url), n in sorted(dirs.items())
-        ]
-
-        if quiet:
-            return results
-
-        if not results:
-            print("No known remote metakernel directories.")
-            print("Use 'spice-kernel-db acquire <url>' to fetch a metakernel first.")
-            return results
-
-        mis_w = max(len(r["mission"]) for r in results)
-        mis_w = max(mis_w, 7)
-        url_w = max(len(r["mk_dir_url"]) for r in results)
-        url_w = max(url_w, 3)
-
-        print("\nKnown remote metakernel directories:\n")
-        print(f"  {'Mission':<{mis_w}}  {'URL':<{url_w}}  {'Acquired':>8}")
-        print(f"  {'─' * mis_w}  {'─' * url_w}  {'─' * 8}")
-        for r in results:
-            print(
-                f"  {r['mission']:<{mis_w}}  {r['mk_dir_url']:<{url_w}}"
-                f"  {r['n_acquired']:>8}"
-            )
-        print("\nUse 'spice-kernel-db browse <url>' or 'browse <mission>' to scan a directory.")
-        print("Add --show-versioned to see individual versioned snapshots.")
+            print("  Use --show-versioned to also show the identical but versioned snapshot metakernels.")
         print()
 
         return results
@@ -1166,14 +1317,24 @@ class KernelDB:
     # ------------------------------------------------------------------
 
     def deduplicate_plan(self) -> list[dict]:
-        """Generate a deduplication plan.
+        """Generate a deduplication plan respecting per-mission settings.
 
         For each set of identical files (same hash, multiple locations),
         pick one canonical location (preferring generic_kernels) and list
-        the rest as removable.
+        the rest as removable — but only for missions with dedup enabled.
+
+        Missions not in the ``missions`` table default to dedup=True.
 
         Returns list of: {filename, size_bytes, keep, remove: [paths]}
         """
+        # Get missions with dedup explicitly disabled
+        no_dedup = {
+            r[0].lower()
+            for r in self.con.execute(
+                "SELECT name FROM missions WHERE dedup = FALSE"
+            ).fetchall()
+        }
+
         rows = self.con.execute("""
             SELECT k.sha256, k.filename, k.size_bytes,
                    LIST(l.abs_path ORDER BY l.abs_path) AS paths,
@@ -1194,13 +1355,18 @@ class KernelDB:
                 if m.lower() == "generic":
                     keep = p
                     break
-            remove = [p for p in paths if p != keep]
-            plan.append({
-                "filename": r[1],
-                "size_bytes": r[2],
-                "keep": keep,
-                "remove": remove,
-            })
+            # Only remove files from dedup-enabled missions
+            remove = [
+                p for p, m in zip(paths, missions)
+                if p != keep and m.lower() not in no_dedup
+            ]
+            if remove:
+                plan.append({
+                    "filename": r[1],
+                    "size_bytes": r[2],
+                    "keep": keep,
+                    "remove": remove,
+                })
         return plan
 
     def deduplicate_with_symlinks(self, dry_run: bool = True) -> list[dict]:
