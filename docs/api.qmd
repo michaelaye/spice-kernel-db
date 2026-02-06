@@ -186,9 +186,9 @@ Parse a metakernel and store its entries in the `metakernel_entries` table for f
 db.list_metakernels(mission: str | None = None) -> list[dict]
 ```
 
-List all tracked metakernels, optionally filtered by mission. Each entry includes the number of kernel entries and how many are available in the database.
+List all tracked metakernels, optionally filtered by mission. Each entry includes the number of kernel entries.
 
-Prints a summary table and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, `n_available`.
+Prints a summary table and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`.
 
 #### `info_metakernel`
 
@@ -199,6 +199,29 @@ db.info_metakernel(name: str) -> dict | None
 Show detailed info about a tracked metakernel, looked up by filename. Displays per-kernel status (`in db` / `missing`) with kernel type and size.
 
 Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `kernels`, `n_kernels`, `n_in_db`, `n_missing`. Returns `None` if not found.
+
+#### `browse_remote_metakernels`
+
+```python
+db.browse_remote_metakernels(
+    mk_dir_url: str,
+    mission: str | None = None,
+) -> list[dict]
+```
+
+Scan a remote NAIF `mk/` directory and show available metakernels. Groups entries by base name (stripping version tags like `_v461_20251127_001`), counts versioned snapshots, and checks which base metakernels have been locally acquired.
+
+Prints a summary table and returns a list of dicts with keys: `base_name`, `n_versions`, `latest_date`, `is_local`, `filenames`.
+
+#### `list_known_mk_dirs`
+
+```python
+db.list_known_mk_dirs() -> list[dict]
+```
+
+List known remote `mk/` directory URLs, derived from previously acquired metakernels in the `metakernel_registry`. Each entry shows the mission name, directory URL, and how many metakernels have been acquired from it.
+
+Returns a list of dicts with keys: `mission`, `mk_dir_url`, `n_acquired`.
 
 ---
 
@@ -345,3 +368,28 @@ resolve_kernel_urls(mk_url: str, parsed: ParsedMetakernel) -> list[str]
 ```
 
 Resolve each `KERNELS_TO_LOAD` entry in a parsed metakernel to a full URL, using `PATH_VALUES` relative to the metakernel's own URL.
+
+### `list_remote_metakernels`
+
+```python
+from spice_kernel_db import list_remote_metakernels
+```
+
+```python
+list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]
+```
+
+Parse an Apache directory listing at *mk_dir_url* and extract `.tm` metakernel entries. For each file, computes a `base_name` by stripping NAIF version tags (e.g. `_v461_20251127_001`). Returns a list sorted by `(base_name, filename)`.
+
+### `RemoteMetakernel`
+
+Dataclass with attributes:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `filename` | `str` | Original filename from the directory listing |
+| `url` | `str` | Full URL to the file |
+| `date` | `str` | Last modified date from the listing |
+| `size` | `str` | Size string from the listing (e.g. `"12K"`) |
+| `base_name` | `str` | Filename with version tag stripped |
+| `version_tag` | `str \| None` | Version tag (e.g. `"v461_20251127_001"`) or `None` |

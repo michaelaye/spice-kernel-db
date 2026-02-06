@@ -38,6 +38,7 @@ from spice_kernel_db.remote import (
     download_kernel,
     download_kernels_parallel,
     fetch_metakernel,
+    list_remote_metakernels,
     query_remote_sizes,
     resolve_kernel_urls,
 )
@@ -759,15 +760,6 @@ class KernelDB:
         results = []
         for r in rows:
             filename, mis, source_url, acquired_at, mk_path, n_kernels = r
-            # Count how many kernels are available in the DB
-            available = self.con.execute("""
-                SELECT COUNT(*) FROM metakernel_entries e
-                WHERE e.mk_path = ?
-                  AND EXISTS (
-                    SELECT 1 FROM kernels k
-                    WHERE k.filename = e.filename
-                  )
-            """, [mk_path]).fetchone()[0]
             results.append({
                 "filename": filename,
                 "mission": mis,
@@ -775,7 +767,6 @@ class KernelDB:
                 "acquired_at": acquired_at,
                 "mk_path": mk_path,
                 "n_kernels": n_kernels,
-                "n_available": available,
             })
 
         if not results:
@@ -789,19 +780,17 @@ class KernelDB:
         mis_w = max(mis_w, 7)
 
         print("\nTracked metakernels:\n")
-        print(f"  {'Mission':<{mis_w}}  {'Metakernel':<{name_w}}  {'Kernels':>7}  {'Available':>9}  Source")
-        print(f"  {'─' * mis_w}  {'─' * name_w}  {'─' * 7}  {'─' * 9}  {'─' * 20}")
+        print(f"  {'Mission':<{mis_w}}  {'Metakernel':<{name_w}}  {'Kernels':>7}  Source")
+        print(f"  {'─' * mis_w}  {'─' * name_w}  {'─' * 7}  {'─' * 20}")
         for r in results:
-            avail_str = f"{r['n_available']}/{r['n_kernels']}"
             source = r["source_url"] or ""
-            # Shorten source URL to host
             if "://" in source:
                 source_short = source.split("://", 1)[1].split("/", 1)[0]
             else:
                 source_short = source
             print(
                 f"  {r['mission']:<{mis_w}}  {r['filename']:<{name_w}}"
-                f"  {r['n_kernels']:>7}  {avail_str:>9}  {source_short}"
+                f"  {r['n_kernels']:>7}  {source_short}"
             )
         print()
         return results
@@ -831,16 +820,25 @@ class KernelDB:
             ORDER BY entry_index
         """, [mk_path]).fetchall()
 
-        # For each entry, check if in kernels table
+        # For each entry, check availability using resolve_kernel
         kernel_info = []
         n_in_db = 0
         for _, raw_entry, entry_fname in entries:
-            k_row = self.con.execute("""
-                SELECT kernel_type, size_bytes FROM kernels
-                WHERE filename = ?
-            """, [entry_fname]).fetchone()
-            if k_row:
-                ktype, size_bytes = k_row
+            local, _ = self.resolve_kernel(
+                entry_fname, preferred_mission=mission,
+            )
+            if local and Path(local).is_file():
+                # Look up size from the resolved location
+                k_row = self.con.execute("""
+                    SELECT k.kernel_type, k.size_bytes FROM kernels k
+                    JOIN locations l ON k.sha256 = l.sha256
+                    WHERE l.abs_path = ?
+                """, [local]).fetchone()
+                if k_row:
+                    ktype, size_bytes = k_row
+                else:
+                    ktype = classify_kernel(entry_fname)
+                    size_bytes = None
                 status = "in db"
                 n_in_db += 1
             else:
@@ -890,6 +888,198 @@ class KernelDB:
             "n_in_db": n_in_db,
             "n_missing": n_missing,
         }
+
+    # ------------------------------------------------------------------
+    # Browse remote metakernels
+    # ------------------------------------------------------------------
+
+    def browse_remote_metakernels(
+        self,
+        mk_dir_url: str,
+        mission: str | None = None,
+        show_versioned: bool = False,
+    ) -> list[dict]:
+        """Scan a remote NAIF mk/ directory and show available metakernels.
+
+        Groups metakernels by base name (stripping version tags like
+        ``_v461_20251127_001``), counts versioned snapshots, and checks
+        which base metakernels have been locally acquired.
+
+        Args:
+            mk_dir_url: URL to a mission's ``mk/`` directory.
+            mission: Override auto-detected mission name.
+            show_versioned: If True, list versioned snapshots under each
+                base metakernel.
+
+        Returns:
+            List of dicts with keys: ``base_name``, ``n_versions``,
+            ``latest_date``, ``is_local``, ``filenames``.
+        """
+        entries = list_remote_metakernels(mk_dir_url)
+        if mission is None:
+            mission = guess_mission(mk_dir_url)
+
+        # Group by base_name
+        from collections import defaultdict
+        groups: dict[str, list] = defaultdict(list)
+        for entry in entries:
+            groups[entry.base_name].append(entry)
+
+        # Get locally acquired metakernel filenames for this mission
+        local_rows = self.con.execute(
+            "SELECT filename FROM metakernel_registry WHERE mission = ?",
+            [mission],
+        ).fetchall()
+        local_filenames = {r[0] for r in local_rows}
+
+        results: list[dict] = []
+        for base_name in sorted(groups):
+            group = groups[base_name]
+            latest_date = max(e.date for e in group)
+            # A base MK is "local" if any file in its group has been acquired
+            is_local = any(e.filename in local_filenames for e in group)
+            # Separate current (no version tag) from versioned snapshots
+            current = [e for e in group if e.version_tag is None]
+            versioned = sorted(
+                [e for e in group if e.version_tag is not None],
+                key=lambda e: e.filename,
+            )
+            results.append({
+                "base_name": base_name,
+                "n_versions": len(group),
+                "latest_date": latest_date,
+                "is_local": is_local,
+                "filenames": [e.filename for e in group],
+                "current": current,
+                "versioned": versioned,
+            })
+
+        # Print table
+        n_unique = len(results)
+        n_files = len(entries)
+        n_local = sum(1 for r in results if r["is_local"])
+
+        # Shorten URL for display
+        display_url = mk_dir_url
+        if len(display_url) > 60:
+            display_url = display_url[:57] + "..."
+
+        print(f"\nRemote metakernels: {mission} ({display_url})\n")
+
+        if not results:
+            print("  No .tm files found.")
+            return results
+
+        if show_versioned:
+            # Expanded view: show each file, versioned snapshots indented
+            all_display_names = []
+            for r in results:
+                for e in r["current"]:
+                    all_display_names.append(e.filename)
+                for e in r["versioned"]:
+                    all_display_names.append(f"  snapshot: {e.filename}")
+            name_w = max((len(n) for n in all_display_names), default=12)
+            name_w = max(name_w, 12)
+
+            print(f"  {'Metakernel':<{name_w}}  {'Date':<16}  {'Size':>5}  Local")
+            print(f"  {'─' * name_w}  {'─' * 16}  {'─' * 5}  {'─' * 5}")
+            for r in results:
+                local_str = "yes" if r["is_local"] else "no"
+                if r["current"]:
+                    e = r["current"][0]
+                    print(
+                        f"  {e.filename:<{name_w}}  {e.date:<16}"
+                        f"  {e.size:>5}  {local_str}"
+                    )
+                else:
+                    print(
+                        f"  {r['base_name']:<{name_w}}  {r['latest_date']:<16}"
+                        f"  {'':>5}  {local_str}"
+                    )
+                for e in r["versioned"]:
+                    label = f"  snapshot: {e.filename}"
+                    print(
+                        f"  {label:<{name_w}}  {e.date:<16}  {e.size:>5}"
+                    )
+        else:
+            # Compact view: one line per unique metakernel
+            name_w = max(len(r["base_name"]) for r in results)
+            name_w = max(name_w, 12)
+
+            print(f"  {'Metakernel':<{name_w}}  {'Versions':>8}  {'Latest':<16}  Local")
+            print(f"  {'─' * name_w}  {'─' * 8}  {'─' * 16}  {'─' * 5}")
+            for r in results:
+                local_str = "yes" if r["is_local"] else "no"
+                print(
+                    f"  {r['base_name']:<{name_w}}  {r['n_versions']:>8}"
+                    f"  {r['latest_date']:<16}  {local_str}"
+                )
+
+        print(
+            f"\n  Total: {n_unique} unique | {n_files} files"
+            f" | {n_local} locally acquired"
+        )
+        if not show_versioned and n_files > n_unique:
+            print("  Use --show-versioned to see individual snapshots.")
+        print()
+
+        return results
+
+    def list_known_mk_dirs(self, *, quiet: bool = False) -> list[dict]:
+        """List known remote mk/ directory URLs from previously acquired MKs.
+
+        Derives directory URLs from ``metakernel_registry.source_url``
+        by stripping the filename component.
+
+        Args:
+            quiet: If True, suppress printed output (useful for lookups).
+        """
+        rows = self.con.execute("""
+            SELECT mission, source_url, COUNT(*) AS n
+            FROM metakernel_registry
+            WHERE source_url IS NOT NULL AND source_url != ''
+            GROUP BY mission, source_url
+        """).fetchall()
+
+        # Group by (mission, mk_dir_url) — strip filename from source_url
+        from collections import defaultdict
+        dirs: dict[tuple[str, str], int] = defaultdict(int)
+        for mission, source_url, count in rows:
+            # "https://.../mk/juice_ops.tm" → "https://.../mk/"
+            mk_dir = source_url.rsplit("/", 1)[0] + "/"
+            dirs[(mission, mk_dir)] += count
+
+        results = [
+            {"mission": m, "mk_dir_url": url, "n_acquired": n}
+            for (m, url), n in sorted(dirs.items())
+        ]
+
+        if quiet:
+            return results
+
+        if not results:
+            print("No known remote metakernel directories.")
+            print("Use 'spice-kernel-db acquire <url>' to fetch a metakernel first.")
+            return results
+
+        mis_w = max(len(r["mission"]) for r in results)
+        mis_w = max(mis_w, 7)
+        url_w = max(len(r["mk_dir_url"]) for r in results)
+        url_w = max(url_w, 3)
+
+        print("\nKnown remote metakernel directories:\n")
+        print(f"  {'Mission':<{mis_w}}  {'URL':<{url_w}}  {'Acquired':>8}")
+        print(f"  {'─' * mis_w}  {'─' * url_w}  {'─' * 8}")
+        for r in results:
+            print(
+                f"  {r['mission']:<{mis_w}}  {r['mk_dir_url']:<{url_w}}"
+                f"  {r['n_acquired']:>8}"
+            )
+        print("\nUse 'spice-kernel-db browse <url>' or 'browse <mission>' to scan a directory.")
+        print("Add --show-versioned to see individual versioned snapshots.")
+        print()
+
+        return results
 
     # ------------------------------------------------------------------
     # Stats

@@ -195,28 +195,90 @@ spice-kernel-db acquire <url> [--download-dir DIR] [--mission NAME] [-y]
 
 | Option | Description |
 |--------|-------------|
-| `url` | URL to a remote `.tm` metakernel |
+| `url` | URL to a remote `.tm` metakernel, or just a filename (e.g. `juice_ops.tm`) |
 | `--download-dir` | Override default kernel storage directory |
-| `--mission` | Override auto-detected mission name |
+| `--mission` | Override auto-detected mission name (required if multiple missions known and using filename) |
 | `-y, --yes` | Skip confirmation prompt |
 
 ```bash
-# Interactive (shows table, prompts before downloading)
-spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm
+# By filename (after browsing a mission at least once)
+spice-kernel-db acquire juice_ops.tm
+
+# By filename with explicit mission (when multiple missions are known)
+spice-kernel-db acquire juice_ops.tm --mission JUICE
+
+# By full URL
+spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
 
 # Auto-confirm download
-spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm -y
-
-# Custom download directory
-spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm \
-    --download-dir /data/spice/juice
-
-# Override mission name
-spice-kernel-db acquire https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_crema_5_1.tm \
-    --mission JUICE
+spice-kernel-db acquire juice_ops.tm -y
 ```
 
+When a filename is given instead of a URL, the tool looks up the mk/ directory URL from previously acquired metakernels. If multiple missions are known, use `--mission` to disambiguate.
+
 The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
+
+
+## `browse`
+
+Browse remote metakernels in a NAIF mission `mk/` directory, or list known directories.
+
+```bash
+spice-kernel-db browse [url] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `url` | URL to a mission's `mk/` directory, or a mission name (omit to list known directories) |
+| `--mission` | Override auto-detected mission name |
+| `--show-versioned` | Show versioned snapshots under each metakernel |
+
+```bash
+# List all known mk/ directories (derived from previously acquired metakernels)
+spice-kernel-db browse
+
+# Browse by mission name (looks up the URL from previous acquisitions)
+spice-kernel-db browse JUICE
+
+# Browse by full URL
+spice-kernel-db browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
+```
+
+**Without a URL**, lists all remote `mk/` directories known from previous `acquire` commands, along with how many metakernels have been acquired from each:
+
+```
+Known remote metakernel directories:
+
+  Mission  URL                                                        Acquired
+  ───────  ─────────────────────────────────────────────────────────  ────────
+  JUICE    https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/            3
+  MRO      https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/             1
+
+Use 'spice-kernel-db browse <url>' to scan a specific directory.
+```
+
+**With a URL**, fetches the Apache directory listing, parses `.tm` file entries, groups them by base name (stripping version tags like `_v461_20251127_001`), and displays a compact summary:
+
+```
+Remote metakernels: JUICE (https://naif.jpl.nasa.gov/.../mk/)
+
+  Metakernel                         Versions  Latest           Local
+  ─────────────────────────────────  ────────  ──────────────── ─────
+  juice_crema_5_0.tm                        1  2025-08-15 11:00 no
+  juice_ops.tm                              3  2025-11-27 09:30 yes
+  juice_plan.tm                             2  2026-02-02 14:00 no
+
+  Total: 3 unique | 6 files | 1 locally acquired
+  Use --show-versioned to see individual snapshots.
+```
+
+With `--show-versioned`, versioned snapshots are listed under each base metakernel:
+
+```
+  juice_ops.tm                                 2025-11-27 09:30    12K  yes
+    snapshot: juice_ops_v230_20221128_001.tm   2022-11-28 10:00     8K
+    snapshot: juice_ops_v461_20251127_001.tm   2025-11-27 09:30    12K
+```
 
 
 ## `config`

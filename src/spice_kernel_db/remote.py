@@ -2,14 +2,83 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
 from tqdm.contrib.concurrent import thread_map
 
 from spice_kernel_db.parser import ParsedMetakernel
+
+# Regex for NAIF versioned metakernel snapshots: _v461_20251127_001.tm
+_VERSION_TAG_RE = re.compile(r"(_v\d+_\d{8}_\d{3})\.tm$")
+
+# Regex for Apache mod_autoindex directory listing entries
+_DIR_LISTING_RE = re.compile(
+    r'<a href="([^"]+\.tm)">[^<]+</a>\s+'
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s+"
+    r"(\S+)"
+)
+
+
+@dataclass
+class RemoteMetakernel:
+    """A metakernel entry parsed from a remote Apache directory listing."""
+
+    filename: str
+    url: str
+    date: str  # "2025-11-27 09:30"
+    size: str  # "12K"
+    base_name: str  # filename with version tag stripped
+    version_tag: str | None  # "v461_20251127_001" or None
+
+
+def list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]:
+    """Parse an Apache directory listing to extract .tm metakernels.
+
+    Fetches the HTML from *mk_dir_url*, extracts ``.tm`` file entries,
+    strips version tags to compute ``base_name``, and returns the list
+    sorted by (base_name, filename).
+
+    Entries under ``former_versions/`` are excluded.
+    """
+    if not mk_dir_url.endswith("/"):
+        mk_dir_url += "/"
+
+    with urllib.request.urlopen(mk_dir_url) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    results: list[RemoteMetakernel] = []
+    for m in _DIR_LISTING_RE.finditer(html):
+        filename, date, size = m.group(1), m.group(2), m.group(3)
+
+        # Skip entries from subdirectories (e.g. former_versions/)
+        if "/" in filename:
+            continue
+
+        # Extract version tag if present
+        tag_match = _VERSION_TAG_RE.search(filename)
+        if tag_match:
+            version_tag = tag_match.group(1).lstrip("_")  # "v461_20251127_001"
+            base_name = filename[: tag_match.start()] + ".tm"
+        else:
+            version_tag = None
+            base_name = filename
+
+        results.append(RemoteMetakernel(
+            filename=filename,
+            url=urljoin(mk_dir_url, filename),
+            date=date,
+            size=size,
+            base_name=base_name,
+            version_tag=version_tag,
+        ))
+
+    results.sort(key=lambda r: (r.base_name, r.filename))
+    return results
 
 
 def fetch_metakernel(url: str) -> str:

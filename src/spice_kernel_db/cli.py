@@ -102,7 +102,10 @@ def main(argv: list[str] | None = None):
         "acquire",
         help="Download missing kernels for a remote metakernel",
     )
-    p_acquire.add_argument("url", help="URL to a remote .tm metakernel")
+    p_acquire.add_argument(
+        "url",
+        help="URL to a remote .tm metakernel, or just a filename (e.g. juice_ops.tm)",
+    )
     p_acquire.add_argument(
         "--download-dir", default=config.kernel_dir,
         help=f"Directory for downloaded kernels (default: {config.kernel_dir})",
@@ -111,6 +114,21 @@ def main(argv: list[str] | None = None):
     p_acquire.add_argument(
         "-y", "--yes", action="store_true",
         help="Skip confirmation prompt",
+    )
+
+    # --- browse ---
+    p_browse = sub.add_parser(
+        "browse",
+        help="Browse remote metakernels in a NAIF mk/ directory",
+    )
+    p_browse.add_argument(
+        "url", nargs="?", default=None,
+        help="URL to a mission's mk/ directory, or a mission name (omit to list known directories)",
+    )
+    p_browse.add_argument("--mission", help="Override auto-detected mission name")
+    p_browse.add_argument(
+        "--show-versioned", action="store_true",
+        help="Show versioned snapshots under each metakernel",
     )
 
     # --- config ---
@@ -212,12 +230,65 @@ def main(argv: list[str] | None = None):
                 db.list_metakernels(mission=args.mission)
 
         elif args.command == "acquire":
+            url = args.url
+            if not url.startswith("http"):
+                # Treat as a filename — resolve to full URL via known dirs
+                known = db.list_known_mk_dirs(quiet=True)
+                if args.mission:
+                    known = [
+                        d for d in known
+                        if d["mission"].lower() == args.mission.lower()
+                    ]
+                if not known:
+                    mission_hint = f" for mission '{args.mission}'" if args.mission else ""
+                    print(
+                        f"No known mk/ directory{mission_hint}. "
+                        f"Use a full URL or browse a mission first.",
+                        file=sys.stderr,
+                    )
+                    return
+                if len(known) > 1:
+                    missions = ", ".join(d["mission"] for d in known)
+                    print(
+                        f"Multiple missions known: {missions}. "
+                        f"Use --mission to specify which one.",
+                        file=sys.stderr,
+                    )
+                    return
+                url = known[0]["mk_dir_url"] + url
+                args.mission = args.mission or known[0]["mission"]
             db.acquire_metakernel(
-                args.url,
+                url,
                 download_dir=args.download_dir,
                 mission=args.mission,
                 yes=args.yes,
             )
+
+        elif args.command == "browse":
+            if args.url:
+                url = args.url
+                # If not a URL, treat as a mission name
+                if not url.startswith("http"):
+                    known = db.list_known_mk_dirs(quiet=True)
+                    match = [
+                        d for d in known
+                        if d["mission"].lower() == url.lower()
+                    ]
+                    if not match:
+                        print(
+                            f"No known mk/ directory for mission '{url}'.",
+                            file=sys.stderr,
+                        )
+                        return
+                    url = match[0]["mk_dir_url"]
+                    args.mission = args.mission or match[0]["mission"]
+                db.browse_remote_metakernels(
+                    url,
+                    mission=args.mission,
+                    show_versioned=args.show_versioned,
+                )
+            else:
+                db.list_known_mk_dirs()
 
     finally:
         db.close()

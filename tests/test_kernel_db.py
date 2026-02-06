@@ -14,7 +14,12 @@ from spice_kernel_db import KernelDB, parse_metakernel
 from spice_kernel_db.config import Config, load_config, save_config, show_config
 from spice_kernel_db.hashing import classify_kernel, guess_mission, sha256_file
 from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
-from spice_kernel_db.remote import resolve_kernel_urls
+from spice_kernel_db.remote import (
+    RemoteMetakernel,
+    list_remote_metakernels,
+    resolve_kernel_urls,
+    _VERSION_TAG_RE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -747,14 +752,6 @@ class TestMetakernelListingInfo:
         results = populated_db.list_metakernels(mission="MRO")
         assert len(results) == 0
 
-    def test_list_metakernels_shows_availability(self, populated_db, tmp_path):
-        """list_metakernels shows how many kernels are available."""
-        self._acquire_test_mk(populated_db, tmp_path)
-        results = populated_db.list_metakernels()
-        # naif0012.tls is in the DB, new_kernel.bsp is not
-        assert results[0]["n_available"] == 1
-        assert results[0]["n_kernels"] == 2
-
     def test_info_metakernel(self, populated_db, tmp_path, capsys):
         """info_metakernel shows detailed per-kernel info."""
         self._acquire_test_mk(populated_db, tmp_path)
@@ -901,3 +898,223 @@ class TestArchiveOnScan:
         assert (src_dir / "juice_v44.tf").is_symlink()
 
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: version tag regex
+# ---------------------------------------------------------------------------
+
+class TestVersionTag:
+    def test_versioned_filename(self):
+        m = _VERSION_TAG_RE.search("juice_ops_v230_20221128_001.tm")
+        assert m is not None
+        assert m.group(1) == "_v230_20221128_001"
+
+    def test_unversioned_filename(self):
+        m = _VERSION_TAG_RE.search("juice_ops.tm")
+        assert m is None
+
+    def test_complex_versioned(self):
+        m = _VERSION_TAG_RE.search("juice_crema_5_1_150lb_23_1_v461_20251127_001.tm")
+        assert m is not None
+        assert m.group(1) == "_v461_20251127_001"
+
+    def test_base_name_extraction(self):
+        filename = "juice_ops_v230_20221128_001.tm"
+        m = _VERSION_TAG_RE.search(filename)
+        base = filename[:m.start()] + ".tm"
+        assert base == "juice_ops.tm"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: list_remote_metakernels (HTML parsing)
+# ---------------------------------------------------------------------------
+
+class TestListRemoteMetakernels:
+    SAMPLE_HTML = textwrap.dedent("""\
+        <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+        <html><head><title>Index of /pub/naif/JUICE/kernels/mk</title></head>
+        <body><h1>Index of /pub/naif/JUICE/kernels/mk</h1>
+        <pre><img src="/icons/blank.gif"> <a href="?C=N;O=D">Name</a>
+        <hr><img src="/icons/back.gif"> <a href="/pub/naif/JUICE/kernels/">Parent Directory</a>
+        <img src="/icons/folder.gif"> <a href="former_versions/">former_versions/</a>   2026-01-15 10:00    -
+        <img src="/icons/unknown.gif"> <a href="aareadme.txt">aareadme.txt</a>          2025-06-03 08:00   12K
+        <img src="/icons/unknown.gif"> <a href="juice_ops.tm">juice_ops.tm</a>          2025-11-27 09:30   12K
+        <img src="/icons/unknown.gif"> <a href="juice_ops_v230_20221128_001.tm">juice_ops_v230_20221128_001.tm</a>  2022-11-28 10:00    8K
+        <img src="/icons/unknown.gif"> <a href="juice_ops_v461_20251127_001.tm">juice_ops_v461_20251127_001.tm</a>  2025-11-27 09:30   12K
+        <img src="/icons/unknown.gif"> <a href="juice_plan.tm">juice_plan.tm</a>        2026-02-02 14:00   15K
+        <img src="/icons/unknown.gif"> <a href="juice_plan_v100_20250101_001.tm">juice_plan_v100_20250101_001.tm</a>  2025-01-01 12:00   10K
+        <img src="/icons/unknown.gif"> <a href="juice_crema_5_0.tm">juice_crema_5_0.tm</a>  2025-08-15 11:00    9K
+        <hr></pre></body></html>
+    """)
+
+    def test_parses_tm_files(self):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = self.SAMPLE_HTML.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            results = list_remote_metakernels("https://example.com/mk/")
+
+        # Should find 6 .tm files (not aareadme.txt, not former_versions/)
+        assert len(results) == 6
+        filenames = [r.filename for r in results]
+        assert "juice_ops.tm" in filenames
+        assert "juice_ops_v230_20221128_001.tm" in filenames
+        assert "juice_plan.tm" in filenames
+        assert "juice_crema_5_0.tm" in filenames
+
+    def test_version_tag_extraction(self):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = self.SAMPLE_HTML.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            results = list_remote_metakernels("https://example.com/mk/")
+
+        by_name = {r.filename: r for r in results}
+        # Current version has no tag
+        assert by_name["juice_ops.tm"].version_tag is None
+        assert by_name["juice_ops.tm"].base_name == "juice_ops.tm"
+        # Versioned snapshot has tag
+        assert by_name["juice_ops_v230_20221128_001.tm"].version_tag == "v230_20221128_001"
+        assert by_name["juice_ops_v230_20221128_001.tm"].base_name == "juice_ops.tm"
+
+    def test_sorted_by_base_name_then_filename(self):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = self.SAMPLE_HTML.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            results = list_remote_metakernels("https://example.com/mk/")
+
+        base_names = [r.base_name for r in results]
+        assert base_names == sorted(base_names)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: browse_remote_metakernels
+# ---------------------------------------------------------------------------
+
+class TestBrowseRemoteMetakernels:
+    SAMPLE_HTML = TestListRemoteMetakernels.SAMPLE_HTML
+
+    def _mock_urlopen(self, url):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = self.SAMPLE_HTML.encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_groups_by_base_name(self, db, capsys):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen):
+            results = db.browse_remote_metakernels(
+                "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
+                mission="JUICE",
+            )
+
+        # juice_ops.tm + 2 versioned = 1 group
+        # juice_plan.tm + 1 versioned = 1 group
+        # juice_crema_5_0.tm = 1 group
+        assert len(results) == 3
+        by_base = {r["base_name"]: r for r in results}
+        assert by_base["juice_ops.tm"]["n_versions"] == 3
+        assert by_base["juice_plan.tm"]["n_versions"] == 2
+        assert by_base["juice_crema_5_0.tm"]["n_versions"] == 1
+
+    def test_latest_date(self, db):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen):
+            results = db.browse_remote_metakernels(
+                "https://example.com/mk/", mission="JUICE",
+            )
+
+        by_base = {r["base_name"]: r for r in results}
+        assert by_base["juice_ops.tm"]["latest_date"] == "2025-11-27 09:30"
+
+    def test_local_status_no_acquired(self, db):
+        """With no acquired MKs, all should show is_local=False."""
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen):
+            results = db.browse_remote_metakernels(
+                "https://example.com/mk/", mission="JUICE",
+            )
+
+        assert all(not r["is_local"] for r in results)
+
+    def test_local_status_with_acquired(self, db, capsys):
+        """After registering an MK in metakernel_registry, is_local should be True."""
+        # Simulate having acquired juice_ops.tm
+        db.con.execute("""
+            INSERT INTO metakernel_registry VALUES
+            (?, ?, ?, ?, current_timestamp)
+        """, ["/tmp/juice_ops.tm", "JUICE", "https://example.com/mk/juice_ops.tm", "juice_ops.tm"])
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen):
+            results = db.browse_remote_metakernels(
+                "https://example.com/mk/", mission="JUICE",
+            )
+
+        by_base = {r["base_name"]: r for r in results}
+        assert by_base["juice_ops.tm"]["is_local"] is True
+        assert by_base["juice_plan.tm"]["is_local"] is False
+
+        captured = capsys.readouterr()
+        assert "yes" in captured.out
+        assert "no" in captured.out
+
+    def test_prints_summary(self, db, capsys):
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen):
+            db.browse_remote_metakernels(
+                "https://example.com/mk/", mission="JUICE",
+            )
+
+        captured = capsys.readouterr()
+        assert "3 unique" in captured.out
+        assert "6 files" in captured.out
+        assert "0 locally acquired" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: list_known_mk_dirs
+# ---------------------------------------------------------------------------
+
+class TestListKnownMkDirs:
+    def test_empty_registry(self, db, capsys):
+        """No acquired MKs → informative message."""
+        results = db.list_known_mk_dirs()
+        assert results == []
+        captured = capsys.readouterr()
+        assert "no known" in captured.out.lower()
+
+    def test_with_entries(self, db, capsys):
+        """Acquired MKs → correct dirs and counts."""
+        db.con.execute("""
+            INSERT INTO metakernel_registry VALUES
+            (?, ?, ?, ?, current_timestamp)
+        """, ["/tmp/a.tm", "JUICE", "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm", "juice_ops.tm"])
+        db.con.execute("""
+            INSERT INTO metakernel_registry VALUES
+            (?, ?, ?, ?, current_timestamp)
+        """, ["/tmp/b.tm", "JUICE", "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_plan.tm", "juice_plan.tm"])
+        db.con.execute("""
+            INSERT INTO metakernel_registry VALUES
+            (?, ?, ?, ?, current_timestamp)
+        """, ["/tmp/c.tm", "MRO", "https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/mro_ops.tm", "mro_ops.tm"])
+
+        results = db.list_known_mk_dirs()
+        assert len(results) == 2
+
+        by_mission = {r["mission"]: r for r in results}
+        assert by_mission["JUICE"]["n_acquired"] == 2
+        assert "JUICE/kernels/mk/" in by_mission["JUICE"]["mk_dir_url"]
+        assert by_mission["MRO"]["n_acquired"] == 1
+
+        captured = capsys.readouterr()
+        assert "JUICE" in captured.out
+        assert "MRO" in captured.out
+        assert "browse <url>" in captured.out
