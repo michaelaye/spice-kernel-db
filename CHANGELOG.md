@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-06
+
+### Added
+
+- `browse` CLI command to scan remote NAIF `mk/` directories, grouping
+  metakernels by base name and showing version counts and local status
+- `browse` without arguments lists known `mk/` directory URLs from prior acquires
+- `browse` accepts mission names (e.g. `browse JUICE`) in addition to full URLs
+- `--show-versioned` flag on `browse` to display individual versioned snapshots
+- `acquire` now accepts filenames (e.g. `acquire juice_ops.tm`) resolving via
+  known `mk/` directories, with `--mission` for disambiguation
+- `list_known_mk_dirs()` API for querying previously seen remote directories
+- `browse_remote_metakernels()` API with compact and expanded display modes
+- `list_remote_metakernels()` and `RemoteMetakernel` dataclass for parsing
+  Apache directory listings
+- `tqdm` dependency for progress bars during parallel downloads and size queries
+- `download_kernels_parallel()` for concurrent kernel downloads with progress
+
+### Changed
+
+- Parallel downloads use `tqdm.contrib.concurrent.thread_map` instead of
+  manual `ThreadPoolExecutor` loops
+- Removed redundant "Available" column from `metakernels` listing (acquired
+  metakernels always have all kernels downloaded)
+- `info_metakernel()` uses `resolve_kernel()` for consistent availability checks
+- Test suite expanded from 49 to 62 tests
+
 ## [0.3.0] - 2026-02-06
 
 ### Added
@@ -64,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.4.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/michaelaye/spice-kernel-db/releases/tag/v0.1.0
