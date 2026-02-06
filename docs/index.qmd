@@ -3,6 +3,8 @@ title: "spice-kernel-db"
 subtitle: "Content-addressed SPICE kernel database for deduplication and metakernel rewriting across planetary missions"
 ---
 
+![](images/hero.svg){fig-alt="Diagram showing SPICE kernel files (SPK, CK, LSK) flowing through SHA-256 hashing into a DuckDB content-addressed database, with outputs for deduplication, mission-aware resolution, and metakernel rewriting."}
+
 ## What is this?
 
 `spice-kernel-db` is a Python tool that solves two practical problems for anyone working with NAIF SPICE kernels across multiple planetary missions:
