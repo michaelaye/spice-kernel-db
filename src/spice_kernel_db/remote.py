@@ -1,15 +1,13 @@
-"""Remote SPICE kernel operations — fetch, resolve, and download.
-
-All networking uses stdlib urllib so no extra dependencies are needed.
-"""
+"""Remote SPICE kernel operations — fetch, resolve, and download."""
 
 from __future__ import annotations
 
 import shutil
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urljoin
+
+from tqdm.contrib.concurrent import thread_map
 
 from spice_kernel_db.parser import ParsedMetakernel
 
@@ -75,17 +73,12 @@ def _head_size(url: str) -> tuple[str, int | None]:
 def query_remote_sizes(
     urls: list[str], *, max_workers: int = 8
 ) -> dict[str, int | None]:
-    """Query Content-Length for multiple URLs in parallel.
-
-    Returns {url: size_bytes} where size_bytes is None if unavailable.
-    """
-    results: dict[str, int | None] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_head_size, u): u for u in urls}
-        for future in as_completed(futures):
-            url, size = future.result()
-            results[url] = size
-    return results
+    """Query Content-Length for multiple URLs in parallel."""
+    results = thread_map(
+        _head_size, urls, max_workers=max_workers,
+        desc="Querying sizes", unit="file",
+    )
+    return {url: size for url, size in results}
 
 
 def download_kernel(url: str, dest: Path) -> Path:
@@ -98,3 +91,45 @@ def download_kernel(url: str, dest: Path) -> Path:
         with open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
     return dest
+
+
+def _download_task(
+    task: tuple[str, Path, str],
+) -> tuple[str, Path | None, str | None]:
+    """Download a single kernel, returning (filename, dest_or_None, error_or_None)."""
+    url, dest, filename = task
+    try:
+        download_kernel(url, dest)
+        return filename, dest, None
+    except Exception as e:
+        return filename, None, str(e)
+
+
+def download_kernels_parallel(
+    tasks: list[tuple[str, Path, str]],
+    *,
+    max_workers: int = 8,
+) -> tuple[list[Path], list[str]]:
+    """Download multiple kernels in parallel with a progress bar.
+
+    Args:
+        tasks: List of (url, dest_path, filename) tuples.
+        max_workers: Maximum concurrent downloads.
+
+    Returns:
+        (downloaded_paths, warnings)
+    """
+    results = thread_map(
+        _download_task, tasks, max_workers=max_workers,
+        desc="Downloading", unit="file",
+    )
+
+    downloaded: list[Path] = []
+    warnings: list[str] = []
+    for fname, dest, error in results:
+        if error is None:
+            downloaded.append(dest)
+        else:
+            warnings.append(f"{fname}: {error}")
+
+    return downloaded, warnings

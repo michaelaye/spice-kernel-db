@@ -36,6 +36,7 @@ from spice_kernel_db.parser import (
 )
 from spice_kernel_db.remote import (
     download_kernel,
+    download_kernels_parallel,
     fetch_metakernel,
     query_remote_sizes,
     resolve_kernel_urls,
@@ -645,7 +646,6 @@ class KernelDB:
                 missing_indices.append(i)
 
         # 4. Query remote sizes for ALL kernels (parallel HEAD)
-        print(f"Querying file sizes for {len(kernel_urls)} kernels ...")
         sizes = query_remote_sizes(kernel_urls)
 
         # 5. Display table
@@ -698,22 +698,25 @@ class KernelDB:
                     "warnings": [],
                 }
 
-        # 7. Download and register
-        downloaded: list[str] = []
-        warnings: list[str] = []
-        for idx, i in enumerate(missing_indices, 1):
+        # 7. Download in parallel and register
+        tasks = []
+        task_info: dict[str, str] = {}  # filename -> source_url
+        for i in missing_indices:
             kurl = kernel_urls[i]
             relpath = relpaths[i]
             dest = download_dir / mission / relpath
-            print(f"  [{idx}/{n_missing}] {filenames[i]} ... ", end="", flush=True)
-            try:
-                download_kernel(kurl, dest)
-                self.register_file(dest, mission=mission, source_url=kurl)
-                downloaded.append(str(dest))
-                print("ok")
-            except Exception as e:
-                warnings.append(f"{filenames[i]}: {e}")
-                print(f"FAILED ({e})")
+            fname = filenames[i]
+            tasks.append((kurl, dest, fname))
+            task_info[fname] = kurl
+
+        dl_paths, warnings = download_kernels_parallel(tasks)
+
+        # Register downloaded files
+        downloaded: list[str] = []
+        for dest in dl_paths:
+            kurl = task_info[dest.name]
+            self.register_file(dest, mission=mission, source_url=kurl)
+            downloaded.append(str(dest))
 
         print(f"\n  Downloaded: {len(downloaded)}/{n_missing}")
         if warnings:

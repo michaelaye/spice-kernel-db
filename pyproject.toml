@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "duckdb>=1.0",
+    "tqdm>=4.60",
 ]
 
 [project.optional-dependencies]
