@@ -22,13 +22,21 @@ erDiagram
         VARCHAR source_url
         TIMESTAMP scanned_at
     }
-    metakernels {
+    metakernel_entries {
         VARCHAR mk_path PK
         INTEGER entry_index PK
         VARCHAR raw_entry
         VARCHAR filename
     }
+    metakernel_registry {
+        VARCHAR mk_path PK
+        VARCHAR mission
+        VARCHAR source_url
+        VARCHAR filename
+        TIMESTAMP acquired_at
+    }
     kernels ||--o{ locations : "one hash → many locations"
+    metakernel_registry ||--o{ metakernel_entries : "one .tm → many entries"
 ```
 
 The separation between `kernels` and `locations` is the core of the design:

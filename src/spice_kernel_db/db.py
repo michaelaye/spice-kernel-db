@@ -15,6 +15,7 @@ Key design decisions:
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -58,7 +59,8 @@ class KernelDB:
     Schema:
         kernels:     sha256 (PK), filename, kernel_type, size_bytes
         locations:   sha256 + abs_path (PK), mission, source_url, scanned_at
-        metakernels: mk_path + entry_index (PK), raw_entry, filename
+        metakernel_entries:  mk_path + entry_index (PK), raw_entry, filename
+        metakernel_registry: mk_path (PK), mission, source_url, filename, acquired_at
 
     A kernel is uniquely identified by its SHA-256. Multiple *locations*
     (from different missions or the same mission in different directories)
@@ -90,12 +92,21 @@ class KernelDB:
             )
         """)
         self.con.execute("""
-            CREATE TABLE IF NOT EXISTS metakernels (
+            CREATE TABLE IF NOT EXISTS metakernel_entries (
                 mk_path      VARCHAR,
                 entry_index  INTEGER,
                 raw_entry    VARCHAR,
                 filename     VARCHAR,
                 PRIMARY KEY (mk_path, entry_index)
+            )
+        """)
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS metakernel_registry (
+                mk_path      VARCHAR PRIMARY KEY,
+                mission      VARCHAR,
+                source_url   VARCHAR,
+                filename     VARCHAR,
+                acquired_at  TIMESTAMP DEFAULT current_timestamp
             )
         """)
 
@@ -108,6 +119,7 @@ class KernelDB:
         path: str | Path,
         mission: str | None = None,
         source_url: str | None = None,
+        archive_dir: str | Path | None = None,
     ) -> str:
         """Register a single kernel file. Returns its SHA-256.
 
@@ -116,6 +128,10 @@ class KernelDB:
         This is exactly what happens when JUICE ships ``jup365_19900101_20500101.bsp``
         and generic_kernels has ``jup365.bsp`` — same content, different names,
         one hash.
+
+        If ``archive_dir`` is set, the file is moved to
+        ``archive_dir/mission/kernel_type/filename`` and a symlink is left
+        at the original location.
         """
         p = Path(path).resolve()
         if not p.is_file():
@@ -126,6 +142,20 @@ class KernelDB:
         ktype = classify_kernel(fname)
         size = p.stat().st_size
         m = mission or guess_mission(str(p))
+
+        # Archive: move to central location, leave symlink
+        if archive_dir is not None:
+            dest = Path(archive_dir).expanduser().resolve() / m / ktype / fname
+            if p != dest:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), str(dest))
+                try:
+                    p.symlink_to(dest)
+                except OSError:
+                    logger.warning(
+                        "Could not create symlink at %s (unsupported OS?)", p,
+                    )
+                p = dest
 
         # Insert or update the kernel record.
         # If the hash already exists with a different filename, we keep
@@ -158,8 +188,12 @@ class KernelDB:
         mission: str | None = None,
         extensions: set[str] | None = None,
         verbose: bool = False,
+        archive_dir: str | Path | None = None,
     ) -> int:
         """Recursively scan a directory tree and register all kernel files.
+
+        If ``archive_dir`` is set, files are moved into the archive and
+        symlinks are left at the original locations.
 
         Returns the number of files registered.
         """
@@ -171,7 +205,9 @@ class KernelDB:
         for p in sorted(root.rglob("*")):
             if p.is_file() and p.suffix.lower() in extensions:
                 try:
-                    self.register_file(p, mission=mission)
+                    self.register_file(
+                        p, mission=mission, archive_dir=archive_dir,
+                    )
                     count += 1
                     if verbose:
                         print(f"  registered: {p.name}")
@@ -401,11 +437,11 @@ class KernelDB:
         mk_path = str(Path(mk_path).resolve())
         parsed = parse_metakernel(mk_path)
         self.con.execute(
-            "DELETE FROM metakernels WHERE mk_path = ?", [mk_path]
+            "DELETE FROM metakernel_entries WHERE mk_path = ?", [mk_path]
         )
         for i, raw in enumerate(parsed.kernels):
             self.con.execute(
-                "INSERT INTO metakernels VALUES (?, ?, ?, ?)",
+                "INSERT INTO metakernel_entries VALUES (?, ?, ?, ?)",
                 [mk_path, i, raw, Path(raw).name],
             )
 
@@ -570,12 +606,28 @@ class KernelDB:
         Returns:
             dict with keys: found, missing, downloaded, warnings
         """
+        # 0. Resolve download_dir early (needed for saving .tm)
+        if download_dir is None:
+            download_dir = Path("~/.local/share/spice-kernel-db/kernels").expanduser()
+        download_dir = Path(download_dir).expanduser().resolve()
+
         # 1. Fetch and parse
         print(f"Fetching {url} ...")
         text = fetch_metakernel(url)
         parsed = parse_metakernel_text(text, url)
         if mission is None:
             mission = guess_mission(url)
+
+        # 1b. Save .tm file to disk and register
+        mk_filename = url.rsplit("/", 1)[-1]
+        mk_dest = download_dir / mission / "mk" / mk_filename
+        mk_dest.parent.mkdir(parents=True, exist_ok=True)
+        mk_dest.write_text(text)
+        self.index_metakernel(mk_dest)
+        self.con.execute("""
+            INSERT OR REPLACE INTO metakernel_registry
+            VALUES (?, ?, ?, ?, current_timestamp)
+        """, [str(mk_dest), mission, url, mk_filename])
 
         # 2. Resolve kernel URLs
         kernel_urls = resolve_kernel_urls(url, parsed)
@@ -647,10 +699,6 @@ class KernelDB:
                 }
 
         # 7. Download and register
-        if download_dir is None:
-            download_dir = Path("~/.local/share/spice-kernel-db/kernels").expanduser()
-        download_dir = Path(download_dir).expanduser().resolve()
-
         downloaded: list[str] = []
         warnings: list[str] = []
         for idx, i in enumerate(missing_indices, 1):
@@ -677,6 +725,167 @@ class KernelDB:
             "missing": missing_indices,
             "downloaded": downloaded,
             "warnings": warnings,
+        }
+
+    # ------------------------------------------------------------------
+    # Metakernel listing / info
+    # ------------------------------------------------------------------
+
+    def list_metakernels(self, mission: str | None = None) -> list[dict]:
+        """List all tracked metakernels, optionally filtered by mission."""
+        if mission:
+            rows = self.con.execute("""
+                SELECT r.filename, r.mission, r.source_url, r.acquired_at,
+                       r.mk_path, COUNT(e.entry_index) AS n_kernels
+                FROM metakernel_registry r
+                LEFT JOIN metakernel_entries e ON e.mk_path = r.mk_path
+                WHERE r.mission = ?
+                GROUP BY r.mk_path, r.filename, r.mission, r.source_url, r.acquired_at
+                ORDER BY r.mission, r.filename
+            """, [mission]).fetchall()
+        else:
+            rows = self.con.execute("""
+                SELECT r.filename, r.mission, r.source_url, r.acquired_at,
+                       r.mk_path, COUNT(e.entry_index) AS n_kernels
+                FROM metakernel_registry r
+                LEFT JOIN metakernel_entries e ON e.mk_path = r.mk_path
+                GROUP BY r.mk_path, r.filename, r.mission, r.source_url, r.acquired_at
+                ORDER BY r.mission, r.filename
+            """).fetchall()
+
+        results = []
+        for r in rows:
+            filename, mis, source_url, acquired_at, mk_path, n_kernels = r
+            # Count how many kernels are available in the DB
+            available = self.con.execute("""
+                SELECT COUNT(*) FROM metakernel_entries e
+                WHERE e.mk_path = ?
+                  AND EXISTS (
+                    SELECT 1 FROM kernels k
+                    WHERE k.filename = e.filename
+                  )
+            """, [mk_path]).fetchone()[0]
+            results.append({
+                "filename": filename,
+                "mission": mis,
+                "source_url": source_url,
+                "acquired_at": acquired_at,
+                "mk_path": mk_path,
+                "n_kernels": n_kernels,
+                "n_available": available,
+            })
+
+        if not results:
+            print("No tracked metakernels.")
+            return results
+
+        # Print summary table
+        name_w = max(len(r["filename"]) for r in results)
+        name_w = max(name_w, 12)
+        mis_w = max(len(r["mission"]) for r in results)
+        mis_w = max(mis_w, 7)
+
+        print("\nTracked metakernels:\n")
+        print(f"  {'Mission':<{mis_w}}  {'Metakernel':<{name_w}}  {'Kernels':>7}  {'Available':>9}  Source")
+        print(f"  {'─' * mis_w}  {'─' * name_w}  {'─' * 7}  {'─' * 9}  {'─' * 20}")
+        for r in results:
+            avail_str = f"{r['n_available']}/{r['n_kernels']}"
+            source = r["source_url"] or ""
+            # Shorten source URL to host
+            if "://" in source:
+                source_short = source.split("://", 1)[1].split("/", 1)[0]
+            else:
+                source_short = source
+            print(
+                f"  {r['mission']:<{mis_w}}  {r['filename']:<{name_w}}"
+                f"  {r['n_kernels']:>7}  {avail_str:>9}  {source_short}"
+            )
+        print()
+        return results
+
+    def info_metakernel(self, name: str) -> dict | None:
+        """Show detailed info about a tracked metakernel.
+
+        Looks up by filename (or path) in metakernel_registry.
+        """
+        row = self.con.execute("""
+            SELECT mk_path, mission, source_url, filename, acquired_at
+            FROM metakernel_registry
+            WHERE filename = ? OR mk_path = ?
+        """, [name, name]).fetchone()
+
+        if row is None:
+            print(f"Metakernel not found: {name}")
+            return None
+
+        mk_path, mission, source_url, filename, acquired_at = row
+
+        # Get kernel entries
+        entries = self.con.execute("""
+            SELECT entry_index, raw_entry, filename
+            FROM metakernel_entries
+            WHERE mk_path = ?
+            ORDER BY entry_index
+        """, [mk_path]).fetchall()
+
+        # For each entry, check if in kernels table
+        kernel_info = []
+        n_in_db = 0
+        for _, raw_entry, entry_fname in entries:
+            k_row = self.con.execute("""
+                SELECT kernel_type, size_bytes FROM kernels
+                WHERE filename = ?
+            """, [entry_fname]).fetchone()
+            if k_row:
+                ktype, size_bytes = k_row
+                status = "in db"
+                n_in_db += 1
+            else:
+                ktype = classify_kernel(entry_fname)
+                size_bytes = None
+                status = "missing"
+            kernel_info.append({
+                "filename": entry_fname,
+                "kernel_type": ktype,
+                "size_bytes": size_bytes,
+                "status": status,
+            })
+
+        n_missing = len(entries) - n_in_db
+
+        # Print detailed info
+        print(f"\nMetakernel: {filename}")
+        print(f"  Mission:      {mission}")
+        if source_url:
+            print(f"  Source:       {source_url}")
+        print(f"  Acquired:     {acquired_at}")
+        print(f"  Local path:   {mk_path}")
+
+        if kernel_info:
+            name_w = max(len(k["filename"]) for k in kernel_info)
+            name_w = max(name_w, 10)
+            print(f"\n  {'Kernel':<{name_w}}  {'Type':<9}  {'Size':>10}  Status")
+            print(f"  {'─' * name_w}  {'─' * 9}  {'─' * 10}  {'─' * 7}")
+            for k in kernel_info:
+                sz_str = _format_size(k["size_bytes"]) if k["size_bytes"] is not None else "—"
+                print(
+                    f"  {k['filename']:<{name_w}}  {k['kernel_type']:<9}"
+                    f"  {sz_str:>10}  {k['status']}"
+                )
+
+        print(f"\n  Total: {len(entries)} | In DB: {n_in_db} | Missing: {n_missing}")
+        print()
+
+        return {
+            "filename": filename,
+            "mission": mission,
+            "source_url": source_url,
+            "acquired_at": acquired_at,
+            "mk_path": mk_path,
+            "kernels": kernel_info,
+            "n_kernels": len(entries),
+            "n_in_db": n_in_db,
+            "n_missing": n_missing,
         }
 
     # ------------------------------------------------------------------

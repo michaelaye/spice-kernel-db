@@ -178,7 +178,27 @@ Returns a dict with keys: `found`, `missing`, `downloaded`, `warnings`.
 db.index_metakernel(mk_path: str | Path)
 ```
 
-Parse a metakernel and store its entries in the `metakernels` table for future reference.
+Parse a metakernel and store its entries in the `metakernel_entries` table for future reference.
+
+#### `list_metakernels`
+
+```python
+db.list_metakernels(mission: str | None = None) -> list[dict]
+```
+
+List all tracked metakernels, optionally filtered by mission. Each entry includes the number of kernel entries and how many are available in the database.
+
+Prints a summary table and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, `n_available`.
+
+#### `info_metakernel`
+
+```python
+db.info_metakernel(name: str) -> dict | None
+```
+
+Show detailed info about a tracked metakernel, looked up by filename. Displays per-kernel status (`in db` / `missing`) with kernel type and size.
+
+Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `kernels`, `n_kernels`, `n_in_db`, `n_missing`. Returns `None` if not found.
 
 ---
 

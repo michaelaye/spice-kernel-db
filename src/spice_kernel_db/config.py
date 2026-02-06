@@ -78,6 +78,15 @@ def setup_interactive() -> Config:
     return config
 
 
+def show_config(config: Config) -> None:
+    """Print current configuration."""
+    print(f"\nspice-kernel-db configuration\n")
+    print(f"  Config file:   {CONFIG_FILE}")
+    print(f"  Database:      {config.db_path}")
+    print(f"  Kernel dir:    {config.kernel_dir}")
+    print()
+
+
 def ensure_config() -> Config:
     """Load config or run interactive setup if first time."""
     config = load_config()

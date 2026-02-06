@@ -11,7 +11,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config
+from spice_kernel_db.config import Config, load_config, save_config, show_config
 from spice_kernel_db.hashing import classify_kernel, guess_mission, sha256_file
 from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
 from spice_kernel_db.remote import resolve_kernel_urls
@@ -613,32 +613,32 @@ class TestAcquireMetakernel:
         \\begintext
     """)
 
-    def test_acquire_shows_table(self, populated_db, tmp_path, capsys):
-        """acquire_metakernel prints a table even when we skip download."""
-        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+    def _mock_urlopen(self, req_or_url):
+        """Mock urlopen that returns metakernel text or HEAD sizes."""
+        mock_resp = MagicMock()
 
-        def mock_urlopen(req_or_url):
-            """Mock urlopen that returns metakernel text or HEAD sizes."""
-            mock_resp = MagicMock()
+        if isinstance(req_or_url, str):
+            url = req_or_url
+        else:
+            url = req_or_url.full_url if hasattr(req_or_url, 'full_url') else str(req_or_url)
 
-            if isinstance(req_or_url, str):
-                url = req_or_url
-            else:
-                url = req_or_url.full_url if hasattr(req_or_url, 'full_url') else str(req_or_url)
-
-            if url.endswith(".tm"):
-                mock_resp.read.return_value = self.REMOTE_MK_TEXT.encode()
-                mock_resp.__enter__ = lambda s: s
-                mock_resp.__exit__ = MagicMock(return_value=False)
-                return mock_resp
-
-            # HEAD request for sizes
-            mock_resp.headers = {"Content-Length": "1024"}
+        if url.endswith(".tm"):
+            mock_resp.read.return_value = self.REMOTE_MK_TEXT.encode()
             mock_resp.__enter__ = lambda s: s
             mock_resp.__exit__ = MagicMock(return_value=False)
             return mock_resp
 
-        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=mock_urlopen), \
+        # HEAD request for sizes
+        mock_resp.headers = {"Content-Length": "1024"}
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_acquire_shows_table(self, populated_db, tmp_path, capsys):
+        """acquire_metakernel prints a table even when we skip download."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("builtins.input", return_value="n"):
             result = populated_db.acquire_metakernel(
                 mk_url,
@@ -653,3 +653,251 @@ class TestAcquireMetakernel:
         # naif0012.tls should be "in db" since populated_db has it
         assert "in db" in captured.out
         assert "missing" in captured.out
+
+    def test_acquire_saves_tm_file(self, populated_db, tmp_path):
+        """acquire_metakernel saves the .tm file to disk."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.acquire_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        mk_file = dl_dir / "JUICE" / "mk" / "test.tm"
+        assert mk_file.is_file()
+        assert "KERNELS_TO_LOAD" in mk_file.read_text()
+
+    def test_acquire_registers_in_metakernel_registry(self, populated_db, tmp_path):
+        """acquire_metakernel registers the .tm in metakernel_registry."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.acquire_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        row = populated_db.con.execute(
+            "SELECT mission, source_url, filename FROM metakernel_registry"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "JUICE"
+        assert row[1] == mk_url
+        assert row[2] == "test.tm"
+
+    def test_acquire_indexes_metakernel_entries(self, populated_db, tmp_path):
+        """acquire_metakernel populates metakernel_entries."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.acquire_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        count = populated_db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_entries"
+        ).fetchone()[0]
+        assert count == 2  # naif0012.tls + new_kernel.bsp
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: metakernel listing and info
+# ---------------------------------------------------------------------------
+
+class TestMetakernelListingInfo:
+    REMOTE_MK_TEXT = TestAcquireMetakernel.REMOTE_MK_TEXT
+
+    def _mock_urlopen(self, req_or_url):
+        return TestAcquireMetakernel._mock_urlopen(self, req_or_url)
+
+    def _acquire_test_mk(self, db, tmp_path):
+        """Helper: acquire a test metakernel into the DB."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            db.acquire_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+        return dl_dir
+
+    def test_list_metakernels(self, populated_db, tmp_path, capsys):
+        """list_metakernels returns tracked metakernels."""
+        self._acquire_test_mk(populated_db, tmp_path)
+        results = populated_db.list_metakernels()
+        assert len(results) == 1
+        assert results[0]["filename"] == "test.tm"
+        assert results[0]["mission"] == "JUICE"
+        assert results[0]["n_kernels"] == 2
+
+        captured = capsys.readouterr()
+        assert "test.tm" in captured.out
+        assert "JUICE" in captured.out
+
+    def test_list_metakernels_filter_by_mission(self, populated_db, tmp_path):
+        """list_metakernels filters by mission."""
+        self._acquire_test_mk(populated_db, tmp_path)
+        results = populated_db.list_metakernels(mission="JUICE")
+        assert len(results) == 1
+        results = populated_db.list_metakernels(mission="MRO")
+        assert len(results) == 0
+
+    def test_list_metakernels_shows_availability(self, populated_db, tmp_path):
+        """list_metakernels shows how many kernels are available."""
+        self._acquire_test_mk(populated_db, tmp_path)
+        results = populated_db.list_metakernels()
+        # naif0012.tls is in the DB, new_kernel.bsp is not
+        assert results[0]["n_available"] == 1
+        assert results[0]["n_kernels"] == 2
+
+    def test_info_metakernel(self, populated_db, tmp_path, capsys):
+        """info_metakernel shows detailed per-kernel info."""
+        self._acquire_test_mk(populated_db, tmp_path)
+        result = populated_db.info_metakernel("test.tm")
+        assert result is not None
+        assert result["filename"] == "test.tm"
+        assert result["mission"] == "JUICE"
+        assert result["n_kernels"] == 2
+        assert result["n_in_db"] == 1
+        assert result["n_missing"] == 1
+
+        # Check per-kernel details
+        kernel_names = [k["filename"] for k in result["kernels"]]
+        assert "naif0012.tls" in kernel_names
+        assert "new_kernel.bsp" in kernel_names
+
+        captured = capsys.readouterr()
+        assert "in db" in captured.out
+        assert "missing" in captured.out
+
+    def test_info_metakernel_not_found(self, populated_db, capsys):
+        """info_metakernel returns None for unknown name."""
+        result = populated_db.info_metakernel("nonexistent.tm")
+        assert result is None
+        captured = capsys.readouterr()
+        assert "not found" in captured.out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: reset command
+# ---------------------------------------------------------------------------
+
+class TestReset:
+    def test_reset_deletes_db_file(self, tmp_path):
+        """reset deletes only the DB file, not the kernel directory."""
+        db_path = tmp_path / "test.duckdb"
+        kernel_dir = tmp_path / "kernels"
+        kernel_dir.mkdir()
+        (kernel_dir / "naif0012.tls").write_text("FAKE")
+
+        # Create DB so the file exists
+        db = KernelDB(db_path)
+        db.close()
+        assert db_path.is_file()
+
+        # Delete it
+        db_path.unlink()
+        assert not db_path.is_file()
+
+        # Kernel dir untouched
+        assert kernel_dir.is_dir()
+        assert (kernel_dir / "naif0012.tls").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: show_config
+# ---------------------------------------------------------------------------
+
+class TestShowConfig:
+    def test_show_config_prints_paths(self, capsys):
+        cfg = Config(db_path="/tmp/test.duckdb", kernel_dir="/tmp/kernels")
+        show_config(cfg)
+        captured = capsys.readouterr()
+        assert "/tmp/test.duckdb" in captured.out
+        assert "/tmp/kernels" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: archive-on-scan
+# ---------------------------------------------------------------------------
+
+class TestArchiveOnScan:
+    def test_archive_moves_file_and_creates_symlink(self, tmp_path):
+        """scan with archive_dir moves files and leaves symlinks."""
+        # Setup: a random directory with a kernel
+        src_dir = tmp_path / "random_project"
+        src_dir.mkdir()
+        kernel_file = src_dir / "naif0012.tls"
+        kernel_file.write_text("FAKE LSK naif0012")
+
+        archive_dir = tmp_path / "archive"
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.scan_directory(
+            src_dir, mission="JUICE", archive_dir=archive_dir,
+        )
+
+        # File should now be in the archive
+        archived = archive_dir / "JUICE" / "lsk" / "naif0012.tls"
+        assert archived.is_file()
+        assert archived.read_text() == "FAKE LSK naif0012"
+
+        # Original location should be a symlink
+        assert kernel_file.is_symlink()
+        assert kernel_file.resolve() == archived.resolve()
+
+        # DB should point to the archive path
+        hits = db.find_by_filename("naif0012.tls")
+        assert len(hits) == 1
+        assert str(archived) in hits[0]["abs_path"]
+
+        db.close()
+
+    def test_archive_skips_already_archived(self, tmp_path):
+        """If file is already at the archive destination, no move needed."""
+        archive_dir = tmp_path / "archive"
+        dest = archive_dir / "JUICE" / "lsk" / "naif0012.tls"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("FAKE LSK naif0012")
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.scan_directory(
+            archive_dir, mission="JUICE", archive_dir=archive_dir,
+        )
+
+        # File should still be a regular file, not a symlink
+        assert dest.is_file()
+        assert not dest.is_symlink()
+
+        hits = db.find_by_filename("naif0012.tls")
+        assert len(hits) == 1
+        db.close()
+
+    def test_archive_multiple_types(self, tmp_path):
+        """Archive correctly sorts different kernel types into subdirs."""
+        src_dir = tmp_path / "mixed"
+        src_dir.mkdir()
+        (src_dir / "naif0012.tls").write_text("FAKE LSK")
+        (src_dir / "de432s.bsp").write_bytes(b"FAKE SPK" + b"\x00" * 100)
+        (src_dir / "juice_v44.tf").write_text("FAKE FK")
+
+        archive_dir = tmp_path / "archive"
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.scan_directory(src_dir, mission="TEST", archive_dir=archive_dir)
+
+        assert (archive_dir / "TEST" / "lsk" / "naif0012.tls").is_file()
+        assert (archive_dir / "TEST" / "spk" / "de432s.bsp").is_file()
+        assert (archive_dir / "TEST" / "fk" / "juice_v44.tf").is_file()
+
+        # All originals should be symlinks
+        assert (src_dir / "naif0012.tls").is_symlink()
+        assert (src_dir / "de432s.bsp").is_symlink()
+        assert (src_dir / "juice_v44.tf").is_symlink()
+
+        db.close()

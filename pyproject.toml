@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spice-kernel-db"
-version = "0.2.0"
+version = "0.3.0"
 description = "Content-addressed SPICE kernel database for deduplication and metakernel rewriting across missions"
 readme = "README.md"
 license = "MIT"

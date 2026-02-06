@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-06
+
+### Added
+
+- `metakernels` CLI command and `list_metakernels()` / `info_metakernel()` API
+  for listing tracked metakernels with kernel counts and per-kernel status
+- `metakernel_registry` DB table tracking acquired metakernel files (mission,
+  source URL, local path, acquisition timestamp)
+- `acquire` now saves the `.tm` file to disk and registers it in the database
+- `config` CLI command to show current settings or re-run interactive setup
+- `reset` CLI command to delete the database (kernel files are preserved)
+- `--archive` flag on `scan` to move kernels into the configured archive
+  directory and leave symlinks at original locations
+- `show_config()` helper in config module
+
+### Changed
+
+- Renamed `metakernels` DB table to `metakernel_entries` for clarity (the table
+  stores individual kernel entries within a metakernel, not metakernels themselves)
+- `reset` and `config` commands run without opening a DB connection
+- Test suite expanded from 36 to 49 tests
+
 ## [0.2.0] - 2026-02-06
 
 ### Added
@@ -42,5 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.3.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/michaelaye/spice-kernel-db/releases/tag/v0.1.0
