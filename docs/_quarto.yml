@@ -28,8 +28,8 @@ website:
 format:
   html:
     theme:
-      dark: [darkly, custom.scss]
       light: [cosmo, custom.scss]
+      dark: [darkly, custom.scss]
     toc: true
     toc-depth: 3
     code-copy: true
