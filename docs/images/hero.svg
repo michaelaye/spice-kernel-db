@@ -82,7 +82,7 @@
   <text x="135" y="316" text-anchor="middle" fill="#5e81ac" font-size="10" font-weight="600" letter-spacing="1">BROWSE</text>
 
   <!-- ============================================ -->
-  <!-- ARROWS: Browse → Acquire                     -->
+  <!-- ARROWS: Browse → Get                          -->
   <!-- ============================================ -->
   <g transform="translate(255, 110)">
     <!-- Parallel download streams -->
@@ -91,14 +91,10 @@
       <path d="M0,58 L50,58" marker-end="url(#arrow)"/>
       <path d="M0,86 C20,86 25,100 50,100" marker-end="url(#arrow)"/>
     </g>
-    <!-- Small kernel icons on streams -->
-    <rect x="18" y="24" width="14" height="10" rx="2" fill="#415a77" stroke="#5e81ac" stroke-width="0.8" opacity="0.8"/>
-    <rect x="15" y="52" width="14" height="10" rx="2" fill="#415a77" stroke="#a3be8c" stroke-width="0.8" opacity="0.8"/>
-    <rect x="18" y="90" width="14" height="10" rx="2" fill="#415a77" stroke="#b48ead" stroke-width="0.8" opacity="0.8"/>
   </g>
 
   <!-- ============================================ -->
-  <!-- STAGE 2: ACQUIRE (center panel)              -->
+  <!-- STAGE 2: GET (center panel)                   -->
   <!-- ============================================ -->
   <g transform="translate(310, 38)">
     <rect width="180" height="260" rx="8" fill="url(#panelGrad)" stroke="#2d6a4f" stroke-width="1.2"/>
@@ -149,10 +145,10 @@
   </g>
 
   <!-- Stage label -->
-  <text x="400" y="316" text-anchor="middle" fill="#81b29a" font-size="10" font-weight="600" letter-spacing="1">ACQUIRE</text>
+  <text x="400" y="316" text-anchor="middle" fill="#81b29a" font-size="10" font-weight="600" letter-spacing="1">GET</text>
 
   <!-- ============================================ -->
-  <!-- ARROWS: Acquire → Use                        -->
+  <!-- ARROWS: Get → Use                             -->
   <!-- ============================================ -->
   <g transform="translate(498, 110)">
     <g stroke="#81b29a" stroke-width="1.5" fill="none" opacity="0.6">

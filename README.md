@@ -1,5 +1,7 @@
 # spice-kernel-db
 
+[![CI](https://github.com/michaelaye/spice-kernel-db/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelaye/spice-kernel-db/actions/workflows/ci.yml)
+
 Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives.
 
 ## What this tool does

@@ -1,0 +1,17 @@
+/*-- scss:defaults --*/
+
+/*-- scss:rules --*/
+
+/* Improve table readability in dark mode */
+[data-bs-theme="dark"] .table {
+  --bs-table-bg: #1e2d3d;
+  --bs-table-striped-bg: #243447;
+  --bs-table-border-color: #3a5068;
+  --bs-table-hover-bg: #2a3e52;
+  color: #d4dce6;
+
+  th {
+    color: #e8edf2;
+    border-bottom-color: #4a6a8a;
+  }
+}
