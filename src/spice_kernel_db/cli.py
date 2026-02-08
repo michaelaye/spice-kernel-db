@@ -279,11 +279,22 @@ def main(argv: list[str] | None = None):
                         return
                     url = m["mk_dir_url"]
                     args.mission = args.mission or m["name"]
-                db.browse_remote_metakernels(
-                    url,
-                    mission=args.mission,
-                    show_versioned=args.show_versioned,
-                )
+                try:
+                    db.browse_remote_metakernels(
+                        url,
+                        mission=args.mission,
+                        show_versioned=args.show_versioned,
+                    )
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        print(
+                            f"No metakernel directory found at:\n  {url}\n\n"
+                            f"This mission may not publish metakernels at this location.\n"
+                            f"Use 'spice-kernel-db mission remove' and re-add with the correct URL.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        raise
             else:
                 # No args — list configured missions
                 missions = db.list_missions()
