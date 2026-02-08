@@ -818,6 +818,13 @@ class TestMetakernelListingInfo:
         results = populated_db.list_metakernels(mission="MRO")
         assert len(results) == 0
 
+    def test_list_metakernels_filter_case_insensitive(self, populated_db, tmp_path):
+        """list_metakernels filter accepts lowercase and prefix."""
+        self._get_test_mk(populated_db, tmp_path)
+        assert len(populated_db.list_metakernels(mission="juice")) >= 1
+        assert len(populated_db.list_metakernels(mission="jui")) >= 1
+        assert len(populated_db.list_metakernels(mission="NONEXISTENT")) == 0
+
     def test_info_metakernel(self, populated_db, tmp_path, capsys):
         """info_metakernel shows detailed per-kernel info."""
         self._get_test_mk(populated_db, tmp_path)
@@ -1347,6 +1354,16 @@ class TestMissionManagement:
     def test_remove_mission(self, db):
         db.add_mission("JUICE", self.ESA_URL, "https://example.com/mk/", True)
         assert db.remove_mission("JUICE") is True
+        assert db.get_mission("JUICE") is None
+
+    def test_remove_mission_case_insensitive(self, db):
+        db.add_mission("JUICE", self.ESA_URL, "https://example.com/mk/", True)
+        assert db.remove_mission("juice") is True
+        assert db.get_mission("JUICE") is None
+
+    def test_remove_mission_prefix(self, db):
+        db.add_mission("JUICE", self.ESA_URL, "https://example.com/mk/", True)
+        assert db.remove_mission("jui") is True
         assert db.get_mission("JUICE") is None
 
     def test_remove_nonexistent_mission(self, db):

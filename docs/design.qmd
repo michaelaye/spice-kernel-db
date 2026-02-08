@@ -336,3 +336,33 @@ For example:
 | `/data/generic_kernels/lsk/naif0012.tls` | Falls back to filename heuristic → `generic` |
 
 You can always override this with the `mission` parameter in the API or `--mission` on the CLI.
+
+
+## Dependency roadmap
+
+The project currently depends on only two packages beyond the standard library: `duckdb` for the database engine and `rich` for terminal output (tables, progress bars, panels). This section documents planned additions that would simplify the codebase or add meaningful capability.
+
+### `httpx` — HTTP client
+
+The `remote.py` module currently uses `urllib.request` from the standard library. This works but results in verbose code — each HTTP call requires manual request construction, error handling, and timeout management. Replacing with `httpx` would:
+
+- Simplify ~30–40 lines of URL-fetching boilerplate across `remote.py` and `cli.py`
+- Provide consistent timeout handling and retry semantics
+- Enable a future migration to `async` for parallel downloads (currently uses `ThreadPoolExecutor`)
+- Replace patterns like `urllib.request.Request(url, method="HEAD")` + `urlopen()` with `httpx.head(url)`
+
+### `beautifulsoup4` — HTML parsing
+
+Directory listings from NASA NAIF and ESA SPICE servers are parsed with regex patterns in `remote.py`. These patterns handle the two known server HTML formats (plain-text Apache listings from NASA, table-based listings from ESA) but are inherently fragile — any change to the HTML structure would require regex updates.
+
+Replacing with `beautifulsoup4` and CSS selectors would make the parsing ~20–25 lines shorter and significantly more robust against minor HTML changes from the upstream servers.
+
+### `spiceypy` — SPICE toolkit (optional)
+
+[SpiceyPy](https://spiceypy.readthedocs.io/) wraps NASA's CSPICE library. Adding it as an optional dependency would enable:
+
+- **Kernel validation**: verify that downloaded files are valid SPICE kernels (not just by extension)
+- **Metadata extraction**: read coverage windows, reference frames, and object IDs from binary kernels
+- **Metakernel loading verification**: actually load a rewritten metakernel through SPICE to confirm it works
+
+This would be an optional dependency (`pip install spice-kernel-db[spice]`) since CSPICE requires a compiled binary and not all users need runtime validation.

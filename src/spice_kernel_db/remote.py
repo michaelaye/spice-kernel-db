@@ -10,8 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
-from tqdm import tqdm
-from tqdm.contrib.concurrent import thread_map
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 
 from spice_kernel_db.parser import ParsedMetakernel
 
@@ -190,20 +197,30 @@ def query_remote_sizes(
     urls: list[str], *, max_workers: int = 8
 ) -> dict[str, int | None]:
     """Query Content-Length for multiple URLs in parallel."""
-    results = thread_map(
-        _head_size, urls, max_workers=max_workers,
-        desc="Querying sizes", unit="file",
-    )
-    return {url: size for url, size in results}
+    out: dict[str, int | None] = {}
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        BarColumn(), TextColumn("{task.completed}/{task.total} files"),
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("Querying sizes", total=len(urls))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_head_size, u): u for u in urls}
+            for future in as_completed(futures):
+                url, size = future.result()
+                out[url] = size
+                progress.advance(task_id)
+    return out
 
 
 def download_kernel(
-    url: str, dest: Path, *, progress: tqdm | None = None,
+    url: str, dest: Path, *, progress: Progress | None = None,
+    task_id: int | None = None,
 ) -> Path:
     """Download a single kernel file to *dest*.
 
-    Creates parent directories as needed. If *progress* is given,
-    updates it with bytes written. Returns *dest*.
+    Creates parent directories as needed. If *progress* and *task_id*
+    are given, updates the progress bar with bytes written. Returns *dest*.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(url) as resp:
@@ -213,8 +230,8 @@ def download_kernel(
                 if not chunk:
                     break
                 f.write(chunk)
-                if progress is not None:
-                    progress.update(len(chunk))
+                if progress is not None and task_id is not None:
+                    progress.advance(task_id, len(chunk))
     return dest
 
 
@@ -236,36 +253,51 @@ def download_kernels_parallel(
         (downloaded_paths, warnings)
     """
     if total_bytes and total_bytes > 0:
-        progress = tqdm(
-            total=total_bytes, desc="Downloading", unit="B",
-            unit_scale=True, unit_divisor=1024,
-        )
+        columns = [
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+        ]
     else:
-        progress = tqdm(
-            total=len(tasks), desc="Downloading", unit="file",
-        )
-
-    def _do(task: tuple[str, Path, str]) -> tuple[str, Path | None, str | None]:
-        url, dest, filename = task
-        try:
-            download_kernel(url, dest, progress=progress if total_bytes else None)
-            if not total_bytes:
-                progress.update(1)
-            return filename, dest, None
-        except Exception as e:
-            return filename, None, str(e)
+        columns = [
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total} files"),
+        ]
 
     downloaded: list[Path] = []
     warnings: list[str] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_do, t): t for t in tasks}
-        for future in as_completed(futures):
-            fname, dest, error = future.result()
-            if error is None:
-                downloaded.append(dest)
-            else:
-                warnings.append(f"{fname}: {error}")
+    with Progress(*columns) as progress:
+        if total_bytes and total_bytes > 0:
+            pid = progress.add_task("Downloading", total=total_bytes)
+        else:
+            pid = progress.add_task("Downloading", total=len(tasks))
 
-    progress.close()
+        def _do(task: tuple[str, Path, str]) -> tuple[str, Path | None, str | None]:
+            url, dest, filename = task
+            try:
+                download_kernel(
+                    url, dest,
+                    progress=progress if total_bytes else None,
+                    task_id=pid if total_bytes else None,
+                )
+                if not total_bytes:
+                    progress.advance(pid)
+                return filename, dest, None
+            except Exception as e:
+                return filename, None, str(e)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_do, t): t for t in tasks}
+            for future in as_completed(futures):
+                fname, dest, error = future.result()
+                if error is None:
+                    downloaded.append(dest)
+                else:
+                    warnings.append(f"{fname}: {error}")
 
     return downloaded, warnings

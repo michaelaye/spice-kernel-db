@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Optional
 
 import duckdb
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+console = Console()
 
 from spice_kernel_db.hashing import (
     KERNEL_EXTENSIONS,
@@ -172,13 +177,14 @@ class KernelDB:
         return results
 
     def remove_mission(self, name: str) -> bool:
-        """Remove a mission from the database. Returns True if found."""
-        count = self.con.execute(
-            "SELECT COUNT(*) FROM missions WHERE name = ?", [name]
-        ).fetchone()[0]
-        if count == 0:
+        """Remove a mission from the database (case-insensitive, prefix-matchable).
+
+        Uses the same fuzzy lookup as ``get_mission``. Returns True if found.
+        """
+        mission = self.get_mission(name)
+        if mission is None:
             return False
-        self.con.execute("DELETE FROM missions WHERE name = ?", [name])
+        self.con.execute("DELETE FROM missions WHERE name = ?", [mission["name"]])
         return True
 
     def get_mission(self, name: str) -> dict | None:
@@ -540,18 +546,20 @@ class KernelDB:
             })
 
         if results:
-            print(f"\n{'=' * 70}")
-            print(f"Duplicate kernels: {len(results)} files with "
-                  f"{min_copies}+ copies")
-            print(f"Total wasted space: {total_waste / 1e6:.1f} MB")
-            print(f"{'=' * 70}")
+            console.print(Panel(
+                f"[bold]{len(results)}[/bold] files with {min_copies}+ copies\n"
+                f"Total wasted space: [bold]{total_waste / 1e6:.1f} MB[/bold]",
+                title="Duplicate kernels",
+            ))
             for d in results[:30]:
-                print(f"\n  {d['filename']}  "
-                      f"({d['size_bytes'] / 1e6:.1f} MB × {d['count']} copies)")
+                console.print(
+                    f"\n  [bold]{d['filename']}[/bold]  "
+                    f"({d['size_bytes'] / 1e6:.1f} MB × {d['count']} copies)"
+                )
                 for p, m in zip(d["paths"], d["missions"]):
-                    print(f"    [{m}] {p}")
+                    console.print(f"    [{m}] {p}")
         else:
-            print("No duplicates found.")
+            console.print("No duplicates found.")
 
         return results
 
@@ -833,17 +841,18 @@ class KernelDB:
             sizes.get(kernel_urls[i]) or 0 for i in missing_indices
         )
 
-        print(f"\nMetakernel: {mk_name} ({total} kernels)\n")
-        name_width = max((len(filenames[i]) for i in range(total)), default=20)
-        name_width = max(name_width, 20)
-        print(f"  {'Kernel':<{name_width}}  {'Size':>10}  Status")
-        print(f"  {'─' * name_width}  {'─' * 10}  {'─' * 8}")
+        table = Table(title=f"Metakernel: {mk_name} ({total} kernels)")
+        table.add_column("Kernel")
+        table.add_column("Size", justify="right")
+        table.add_column("Status")
         for i in range(total):
             fname = filenames[i]
             sz = sizes.get(kernel_urls[i])
             sz_str = _format_size(sz) if sz is not None else "unknown"
             status = "in db" if i in found_indices else "missing"
-            print(f"  {fname:<{name_width}}  {sz_str:>10}  {status}")
+            style = "green" if status == "in db" else "red"
+            table.add_row(fname, sz_str, f"[{style}]{status}[/{style}]")
+        console.print(table)
 
         print(
             f"\n  Total: {total} | In DB: {n_found} | "
@@ -942,15 +951,22 @@ class KernelDB:
     # Metakernel listing / info
     # ------------------------------------------------------------------
 
+    # TODO: add a compare_metakernels(mission) method that diffs the kernel
+    # lists of acquired metakernels for a given mission, highlighting added,
+    # removed, and changed kernels between versions.
+
     def list_metakernels(self, mission: str | None = None) -> list[dict]:
-        """List all tracked metakernels, optionally filtered by mission."""
+        """List all tracked metakernels, optionally filtered by mission.
+
+        The *mission* filter is case-insensitive with prefix matching.
+        """
         if mission:
             rows = self.con.execute("""
                 SELECT r.filename, r.mission, r.source_url, r.acquired_at,
                        r.mk_path, COUNT(e.entry_index) AS n_kernels
                 FROM metakernel_registry r
                 LEFT JOIN metakernel_entries e ON e.mk_path = r.mk_path
-                WHERE r.mission = ?
+                WHERE LOWER(r.mission) LIKE LOWER(?) || '%'
                 GROUP BY r.mk_path, r.filename, r.mission, r.source_url, r.acquired_at
                 ORDER BY r.mission, r.filename
             """, [mission]).fetchall()
@@ -1007,27 +1023,25 @@ class KernelDB:
                 r["identical_to"] = None
 
         # Print summary table
-        name_w = max(len(r["filename"]) for r in results)
-        name_w = max(name_w, 12)
-        mis_w = max(len(r["mission"]) for r in results)
-        mis_w = max(mis_w, 7)
-
-        print("\nTracked metakernels:\n")
-        print(f"  {'Mission':<{mis_w}}  {'Metakernel':<{name_w}}  {'Kernels':>7}  Source")
-        print(f"  {'─' * mis_w}  {'─' * name_w}  {'─' * 7}  {'─' * 20}")
+        table = Table(title="Tracked metakernels")
+        table.add_column("Mission")
+        table.add_column("Metakernel")
+        table.add_column("Kernels", justify="right")
+        table.add_column("Source")
         for r in results:
             source = r["source_url"] or ""
             if "://" in source:
                 source_short = source.split("://", 1)[1].split("/", 1)[0]
             else:
                 source_short = source
-            print(
-                f"  {r['mission']:<{mis_w}}  {r['filename']:<{name_w}}"
-                f"  {r['n_kernels']:>7}  {source_short}"
-            )
+            name_cell = r["filename"]
             if r["identical_to"]:
-                print(f"  {'':<{mis_w}}  ↳ identical to {r['identical_to']}")
-        print()
+                name_cell += f"\n[dim]↳ identical to {r['identical_to']}[/dim]"
+            table.add_row(
+                r["mission"], name_cell,
+                str(r["n_kernels"]), source_short,
+            )
+        console.print(table)
         return results
 
     def info_metakernel(self, name: str) -> dict | None:
@@ -1098,16 +1112,17 @@ class KernelDB:
         print(f"  Local path:   {mk_path}")
 
         if kernel_info:
-            name_w = max(len(k["filename"]) for k in kernel_info)
-            name_w = max(name_w, 10)
-            print(f"\n  {'Kernel':<{name_w}}  {'Type':<9}  {'Size':>10}  Status")
-            print(f"  {'─' * name_w}  {'─' * 9}  {'─' * 10}  {'─' * 7}")
+            table = Table()
+            table.add_column("Kernel")
+            table.add_column("Type")
+            table.add_column("Size", justify="right")
+            table.add_column("Status")
             for k in kernel_info:
                 sz_str = _format_size(k["size_bytes"]) if k["size_bytes"] is not None else "—"
-                print(
-                    f"  {k['filename']:<{name_w}}  {k['kernel_type']:<9}"
-                    f"  {sz_str:>10}  {k['status']}"
+                table.add_row(
+                    k["filename"], k["kernel_type"], sz_str, k["status"],
                 )
+            console.print(table)
 
         print(f"\n  Total: {len(entries)} | In DB: {n_in_db} | Missing: {n_missing}")
         print()
@@ -1161,10 +1176,13 @@ class KernelDB:
             groups[entry.base_name].append(entry)
 
         # Get locally acquired metakernel filenames for this mission
-        local_rows = self.con.execute(
-            "SELECT filename FROM metakernel_registry WHERE mission = ?",
-            [mission],
-        ).fetchall()
+        if mission:
+            local_rows = self.con.execute(
+                "SELECT filename FROM metakernel_registry WHERE LOWER(mission) LIKE LOWER(?) || '%'",
+                [mission],
+            ).fetchall()
+        else:
+            local_rows = []
         local_filenames = {r[0] for r in local_rows}
 
         results: list[dict] = []
@@ -1207,48 +1225,39 @@ class KernelDB:
 
         if show_versioned:
             # Expanded view: show each file, versioned snapshots indented
-            all_display_names = []
-            for r in results:
-                for e in r["current"]:
-                    all_display_names.append(e.filename)
-                for e in r["versioned"]:
-                    all_display_names.append(f"  snapshot: {e.filename}")
-            name_w = max((len(n) for n in all_display_names), default=12)
-            name_w = max(name_w, 12)
-
-            print(f"  {'Metakernel':<{name_w}}  {'Date':<16}  {'Size':>5}  Local")
-            print(f"  {'─' * name_w}  {'─' * 16}  {'─' * 5}  {'─' * 5}")
+            table = Table()
+            table.add_column("Metakernel")
+            table.add_column("Date")
+            table.add_column("Size", justify="right")
+            table.add_column("Local")
             for r in results:
                 local_str = "yes" if r["is_local"] else "no"
                 if r["current"]:
                     e = r["current"][0]
-                    print(
-                        f"  {e.filename:<{name_w}}  {e.date:<16}"
-                        f"  {e.size:>5}  {local_str}"
-                    )
+                    table.add_row(e.filename, e.date, e.size, local_str)
                 else:
-                    print(
-                        f"  {r['base_name']:<{name_w}}  {r['latest_date']:<16}"
-                        f"  {'':>5}  {local_str}"
-                    )
+                    table.add_row(r["base_name"], r["latest_date"], "", local_str)
                 for e in r["versioned"]:
-                    label = f"  snapshot: {e.filename}"
-                    print(
-                        f"  {label:<{name_w}}  {e.date:<16}  {e.size:>5}"
+                    table.add_row(
+                        f"  [dim]snapshot: {e.filename}[/dim]",
+                        f"[dim]{e.date}[/dim]",
+                        f"[dim]{e.size}[/dim]",
                     )
+            console.print(table)
         else:
             # Compact view: one line per unique metakernel
-            name_w = max(len(r["base_name"]) for r in results)
-            name_w = max(name_w, 12)
-
-            print(f"  {'Metakernel':<{name_w}}  {'Versions':>8}  {'Latest':<16}  Local")
-            print(f"  {'─' * name_w}  {'─' * 8}  {'─' * 16}  {'─' * 5}")
+            table = Table()
+            table.add_column("Metakernel")
+            table.add_column("Versions", justify="right")
+            table.add_column("Latest")
+            table.add_column("Local")
             for r in results:
                 local_str = "yes" if r["is_local"] else "no"
-                print(
-                    f"  {r['base_name']:<{name_w}}  {r['n_versions']:>8}"
-                    f"  {r['latest_date']:<16}  {local_str}"
+                table.add_row(
+                    r["base_name"], str(r["n_versions"]),
+                    r["latest_date"], local_str,
                 )
+            console.print(table)
 
         print(
             f"\n  Total: {n_unique} unique | {n_files} files"
@@ -1291,18 +1300,21 @@ class KernelDB:
             )
         """).fetchone()[0]
 
-        print(f"\n{'=' * 50}")
-        print(f"SPICE Kernel Database: {self.db_path}")
-        print(f"{'=' * 50}")
-        print(f"  Unique kernels:   {n_kernels}")
-        print(f"  Total locations:  {n_locs}")
-        print(f"  Unique content:   {total_size / 1e9:.2f} GB")
-        print(f"  Duplicated files: {dups}")
-        print(f"  Missions:         {', '.join(missions)}")
-        print(f"\n  By type:")
+        console.print(Panel(
+            f"Unique kernels:   [bold]{n_kernels}[/bold]\n"
+            f"Total locations:  {n_locs}\n"
+            f"Unique content:   {total_size / 1e9:.2f} GB\n"
+            f"Duplicated files: {dups}\n"
+            f"Missions:         {', '.join(missions)}",
+            title=f"SPICE Kernel Database: {self.db_path}",
+        ))
+        type_table = Table(title="By type")
+        type_table.add_column("Type")
+        type_table.add_column("Files", justify="right")
+        type_table.add_column("Size", justify="right")
         for ktype, cnt, sz in by_type:
-            print(f"    {ktype:8s}  {cnt:5d} files  {sz / 1e6:10.1f} MB")
-        print()
+            type_table.add_row(ktype, str(cnt), f"{sz / 1e6:.1f} MB")
+        console.print(type_table)
 
         return {
             "n_kernels": n_kernels,

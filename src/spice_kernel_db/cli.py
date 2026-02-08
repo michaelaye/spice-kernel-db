@@ -8,6 +8,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from rich.console import Console
+from rich.table import Table
+
 from spice_kernel_db.config import (
     ensure_config,
     setup_interactive,
@@ -15,6 +18,8 @@ from spice_kernel_db.config import (
 )
 from spice_kernel_db.db import KernelDB
 from spice_kernel_db.remote import SPICE_SERVERS, list_remote_missions
+
+console = Console()
 
 
 def main(argv: list[str] | None = None):
@@ -431,18 +436,17 @@ def _handle_mission(db: KernelDB, args):
             print("No configured missions.")
             print("Use 'spice-kernel-db mission add' to set one up.")
             return
-        name_w = max(len(m["name"]) for m in missions)
-        name_w = max(name_w, 7)
-        print("\nConfigured missions:\n")
-        print(f"  {'Mission':<{name_w}}  {'Server':<6}  {'Dedup':<5}  mk/ URL")
-        print(f"  {'─' * name_w}  {'─' * 6}  {'─' * 5}  {'─' * 30}")
+        table = Table(title="Configured missions")
+        table.add_column("Mission")
+        table.add_column("Server")
+        table.add_column("Dedup")
+        table.add_column("mk/ URL")
         for m in missions:
             dedup_str = "yes" if m["dedup"] else "no"
-            print(
-                f"  {m['name']:<{name_w}}  {m['server_label']:<6}"
-                f"  {dedup_str:<5}  {m['mk_dir_url']}"
+            table.add_row(
+                m["name"], m["server_label"], dedup_str, m["mk_dir_url"],
             )
-        print()
+        console.print(table)
 
     elif args.mission_command == "remove":
         if db.remove_mission(args.name):
