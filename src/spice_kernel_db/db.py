@@ -951,10 +951,6 @@ class KernelDB:
     # Metakernel listing / info
     # ------------------------------------------------------------------
 
-    # TODO: add a compare_metakernels(mission) method that diffs the kernel
-    # lists of acquired metakernels for a given mission, highlighting added,
-    # removed, and changed kernels between versions.
-
     def list_metakernels(self, mission: str | None = None) -> list[dict]:
         """List all tracked metakernels, optionally filtered by mission.
 
