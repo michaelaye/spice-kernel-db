@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from spice_kernel_db.config import (
@@ -486,8 +488,20 @@ def _mission_add_interactive(db: KernelDB):
             break
         print("Invalid choice.")
 
-    # 3. Compute mk/ directory URL
+    # 3. Compute mk/ directory URL and validate it exists
     mk_dir_url = f"{server_url}{mission_name}/kernels/mk/"
+    try:
+        req = urllib.request.Request(mk_dir_url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        print(f"\n  Warning: {mk_dir_url} not found (404).")
+        print(f"  This mission may not have metakernels on this server.")
+        custom = input(
+            "  Enter correct mk/ URL (or press Enter to save anyway): "
+        ).strip()
+        if custom:
+            mk_dir_url = custom if custom.endswith("/") else custom + "/"
 
     # 4. Dedup preference
     dedup_answer = input(
