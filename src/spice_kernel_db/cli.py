@@ -17,7 +17,7 @@ from spice_kernel_db.config import (
     show_config,
 )
 from spice_kernel_db.db import KernelDB
-from spice_kernel_db.remote import SPICE_SERVERS, list_remote_missions
+from spice_kernel_db.remote import SPICE_SERVERS, list_remote_metakernels, list_remote_missions
 
 console = Console()
 
@@ -111,8 +111,8 @@ def main(argv: list[str] | None = None):
         help="Download missing kernels for a remote metakernel",
     )
     p_get.add_argument(
-        "url",
-        help="URL to a remote .tm metakernel, or just a filename (e.g. juice_ops.tm)",
+        "url", nargs="?", default=None,
+        help="URL or filename of a .tm metakernel (omit to select interactively)",
     )
     p_get.add_argument(
         "--download-dir", default=config.kernel_dir,
@@ -253,7 +253,13 @@ def main(argv: list[str] | None = None):
 
         elif args.command == "get":
             url = args.url
-            if not url.startswith("http"):
+            if url is None:
+                # Interactive selection — fetch remote listing
+                url = _interactive_select_metakernel(db, args.mission)
+                if not url:
+                    return
+                args.mission = args.mission or _guess_mission_from_url(url)
+            elif not url.startswith("http"):
                 # Treat as a filename — resolve mission mk_dir_url
                 mk_dir_url, mission_name = _resolve_mission_mk_dir(
                     db, args.mission,
@@ -426,6 +432,91 @@ def _resolve_mission_mk_dir(
             file=sys.stderr,
         )
     return None, None
+
+
+def _guess_mission_from_url(url: str) -> str | None:
+    """Extract mission name from a metakernel URL."""
+    from spice_kernel_db.hashing import guess_mission
+    return guess_mission(url)
+
+
+def _interactive_select_metakernel(
+    db: KernelDB, mission_name: str | None,
+) -> str | None:
+    """Fetch remote metakernels and let the user pick one interactively.
+
+    Returns the full URL of the selected metakernel, or None on failure.
+    """
+    mk_dir_url, resolved_name = _resolve_mission_mk_dir(db, mission_name)
+    if not mk_dir_url:
+        return None
+
+    console.print(f"Fetching metakernels from {mk_dir_url} ...")
+    try:
+        entries = list_remote_metakernels(mk_dir_url)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(
+                f"No metakernel directory found at:\n  {mk_dir_url}",
+                file=sys.stderr,
+            )
+        else:
+            raise
+        return None
+
+    if not entries:
+        print("No metakernels found.", file=sys.stderr)
+        return None
+
+    # Group by base_name, show latest version per group
+    from collections import defaultdict
+    groups: dict[str, list] = defaultdict(list)
+    for entry in entries:
+        groups[entry.base_name].append(entry)
+
+    # Check which are locally acquired
+    local_rows = db.con.execute(
+        "SELECT filename FROM metakernel_registry WHERE LOWER(mission) LIKE LOWER(?) || '%'",
+        [resolved_name or ""],
+    ).fetchall()
+    local_filenames = {r[0] for r in local_rows}
+
+    # Build selection list — one row per base_name, link to latest version
+    choices: list[tuple[str, str, bool]] = []  # (url, base_name, is_local)
+    rows: list[tuple[str, str, str, str, str]] = []  # (#, base_name, versions, date, local)
+    for base_name in sorted(groups):
+        group = groups[base_name]
+        latest = max(group, key=lambda e: e.filename)
+        is_local = any(e.filename in local_filenames for e in group)
+        n_ver = str(len(group)) if len(group) > 1 else ""
+        local_col = "\u2713" if is_local else ""
+        choices.append((latest.url, base_name, is_local))
+        rows.append((str(len(rows) + 1), base_name, n_ver, latest.date, local_col))
+
+    table = Table(title=f"Available metakernels — {resolved_name or 'remote'}")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Metakernel")
+    table.add_column("Versions", justify="right")
+    table.add_column("Latest date")
+    table.add_column("Local?", justify="center")
+    for num, base_name, n_ver, date, local_col in rows:
+        table.add_row(num, base_name, n_ver, date, local_col)
+    console.print(table)
+
+    try:
+        raw = input(f"\nSelect metakernel [1-{len(choices)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(choices):
+            url, _, _ = choices[idx - 1]
+            return url
+    except ValueError:
+        pass
+    print("Invalid selection.", file=sys.stderr)
+    return None
 
 
 def _handle_mission(db: KernelDB, args):

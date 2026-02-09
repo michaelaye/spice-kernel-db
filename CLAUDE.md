@@ -39,7 +39,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 | `db.py` | `KernelDB` class — all DB operations, scanning, resolution, metakernel rewriting, get, browse |
 | `parser.py` | `ParsedMetakernel` dataclass; parse/write `.tm` files; symbol resolution |
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission()` (path heuristic) |
-| `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with tqdm |
+| `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
 | `config.py` | `Config` dataclass, TOML persistence at `~/.config/spice-kernel-db/config.toml` |
 | `cli.py` | argparse CLI dispatching to `KernelDB` methods |
 
@@ -63,7 +63,10 @@ Tests use `pytest-tmp-files` for temporary directory fixtures. The main fixture 
 
 ## Release Process
 
+**IMPORTANT: Always update the changelog when bumping the version. Never commit a version bump without a corresponding changelog entry.**
+
 1. Update version in `pyproject.toml`
 2. Add entry to `CHANGELOG.md` (Keep a Changelog format)
 3. Add comparison link at bottom of changelog
 4. Commit as "Bump version to X.Y.Z and add changelog"
+5. Build and publish: `rm -rf dist/ && python -m build && python -m twine upload dist/*`
