@@ -19,18 +19,19 @@ pytest tests/test_kernel_db.py::TestResolveKernel::test_exact_match_preferred_mi
 cd docs && quarto preview
 ```
 
-There is no linter or formatter configured. The CI workflow only builds and deploys Quarto docs to GitHub Pages.
+There is no linter or formatter configured. CI runs pytest across Python 3.11–3.14; the publish workflow deploys Quarto docs to GitHub Pages (chained after CI passes).
 
 ## Architecture
 
 Content-addressed SPICE kernel database. Every kernel file is identified by its SHA-256 hash, not its filename. Multiple filesystem locations (across missions) can reference the same hash, enabling deduplication and cross-mission reuse.
 
-### DuckDB Schema (4 tables)
+### DuckDB Schema (5 tables)
 
 - **`kernels`** — unique file content: `(sha256 PK, filename, kernel_type, size_bytes)`
 - **`locations`** — where files live on disk: `(sha256 + abs_path PK, mission, source_url, scanned_at)` → references `kernels`
 - **`metakernel_entries`** — kernel entries within a `.tm` file: `(mk_path + entry_index PK, raw_entry, filename)`
 - **`metakernel_registry`** — tracked metakernel files: `(mk_path PK, mission, source_url, filename, acquired_at)`
+- **`missions`** — configured missions: `(name PK, server_url, mk_dir_url, dedup, added_at)`
 
 ### Module Responsibilities
 
@@ -41,7 +42,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission()` (path heuristic) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
 | `config.py` | `Config` dataclass, TOML persistence at `~/.config/spice-kernel-db/config.toml` |
-| `cli.py` | argparse CLI dispatching to `KernelDB` methods |
+| `cli.py` | argparse CLI with interactive mission setup, metakernel selection, and dispatching to `KernelDB` |
 
 ### Key Design Decisions
 
@@ -56,6 +57,10 @@ Each fallback step emits a warning. Fuzzy matching handles NAIF naming variation
 **Metakernel rewriting** only modifies `PATH_VALUES` — the header, `PATH_SYMBOLS`, `KERNELS_TO_LOAD`, and all comments are preserved verbatim. A symlink tree bridges between where the metakernel expects files and where they actually live.
 
 **Remote browsing** parses Apache `mod_autoindex` HTML directory listings. Version tags like `_v461_20251127_001` are stripped to group versioned snapshots under their base metakernel name.
+
+**Case-insensitive fuzzy matching** — all mission name lookups (get, browse, metakernels, mission remove) use case-insensitive prefix matching. `get_mission()` resolves via the `missions` table; SQL queries on `metakernel_registry` use `LOWER(mission) LIKE LOWER(?) || '%'` directly.
+
+**Output formatting** uses `rich` throughout — `rich.Table` and `rich.Panel` for all tabular output, `rich.progress.Progress` for download and query progress bars (thread-safe with `ThreadPoolExecutor`).
 
 ## Testing Patterns
 
