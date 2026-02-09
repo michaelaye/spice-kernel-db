@@ -76,7 +76,11 @@ class KernelDB:
     can reference the same hash — that's how duplicates are detected.
     """
 
-    def __init__(self, db_path: str | Path = "~/.spice_kernels.duckdb"):
+    def __init__(self, db_path: str | Path | None = None):
+        if db_path is None:
+            from spice_kernel_db.config import load_config
+            config = load_config()
+            db_path = config.db_path if config else "~/.spice_kernels.duckdb"
         self.db_path = str(Path(db_path).expanduser())
         self.con = duckdb.connect(self.db_path)
         self._init_schema()
@@ -787,11 +791,19 @@ class KernelDB:
         if m:
             mission = m["name"]
 
-        # 1b. Save .tm file to disk and register
+        # 1b. Save .tm file to disk with absolute PATH_VALUES so it works
+        # from any working directory (SPICE resolves paths relative to CWD,
+        # not relative to the .tm file).
         mk_filename = url.rsplit("/", 1)[-1]
         mk_dest = download_dir / mission / "mk" / mk_filename
         mk_dest.parent.mkdir(parents=True, exist_ok=True)
-        mk_dest.write_text(text)
+
+        # Resolve each PATH_VALUE relative to the mk/ directory and make absolute
+        mk_dir = mk_dest.parent
+        abs_path_values = [
+            str((mk_dir / v).resolve()) for v in parsed.path_values
+        ]
+        write_metakernel(parsed, mk_dest, path_values=abs_path_values)
         self.index_metakernel(mk_dest)
         self.con.execute("""
             INSERT OR REPLACE INTO metakernel_registry

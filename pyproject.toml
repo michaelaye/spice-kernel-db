@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spice-kernel-db"
-version = "0.7.0"
+version = "0.7.1"
 description = "Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives"
 readme = "README.md"
 license = "MIT"

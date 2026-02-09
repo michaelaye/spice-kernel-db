@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-02-09
+
+### Fixed
+
+- `KernelDB()` now reads the configured database path from `config.toml` instead of defaulting to a hardcoded `~/.spice_kernels.duckdb`. Previously the Python API connected to a different database than the CLI, causing `list_metakernels()` to return empty results.
+- `get_metakernel` now writes absolute `PATH_VALUES` in saved `.tm` files. SPICE resolves paths relative to the current working directory, not the metakernel file location, so the original relative `'..'` only worked if you happened to `cd` into the `mk/` directory. Metakernels now work with `spice.furnsh()` from any directory.
+
 ## [0.7.0] - 2026-02-09
 
 ### Changed
@@ -157,6 +164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.7.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.4.0...v0.5.0
