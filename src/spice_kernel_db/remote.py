@@ -36,13 +36,14 @@ _DIR_ENTRY_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
 )
 
-# Regex for NAIF versioned metakernel snapshots: _v461_20251127_001.tm
-_VERSION_TAG_RE = re.compile(r"(_v\d+_\d{8}_\d{3})\.tm$")
+# Regex for NAIF versioned metakernel snapshots: _v461_20251127_001.tm or _V324_20260206_002.TM
+_VERSION_TAG_RE = re.compile(r"(_[vV]\d+_\d{8}_\d{3})\.[tT][mM]$")
 
 # Regex for Apache mod_autoindex .tm file entries.
 # Handles both plain-text (NASA) and table-based (ESA) formats.
+# Case-insensitive on the .tm extension (ESA uses .TM for some missions).
 _DIR_LISTING_RE = re.compile(
-    r'<a href="([^"]+\.tm)">[^<]+</a>'
+    r'<a href="([^"]+\.[tT][mM])">[^<]+</a>'
     r".+?"
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
     r".+?"
@@ -89,7 +90,8 @@ def list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]:
         tag_match = _VERSION_TAG_RE.search(filename)
         if tag_match:
             version_tag = tag_match.group(1).lstrip("_")  # "v461_20251127_001"
-            base_name = filename[: tag_match.start()] + ".tm"
+            ext = filename[filename.rfind("."):]  # preserve original case (.tm or .TM)
+            base_name = filename[: tag_match.start()] + ext
         else:
             version_tag = None
             base_name = filename
@@ -133,6 +135,44 @@ def list_remote_missions(server_url: str) -> list[str]:
 
     missions.sort()
     return missions
+
+
+def check_mk_availability(
+    server_url: str, missions: list[str], *, max_workers: int = 16
+) -> dict[str, bool]:
+    """Check which missions have a ``kernels/mk/`` directory.
+
+    Sends parallel HEAD requests to ``{server_url}{mission}/kernels/mk/``
+    and returns a mapping of mission name → availability.
+    """
+    if not server_url.endswith("/"):
+        server_url += "/"
+
+    def _check(name: str) -> tuple[str, bool]:
+        url = f"{server_url}{name}/kernels/mk/"
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5):
+                return name, True
+        except Exception:
+            return name, False
+
+    result: dict[str, bool] = {}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("Checking metakernel directories", total=len(missions))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_check, m): m for m in missions}
+            for future in as_completed(futures):
+                name, available = future.result()
+                result[name] = available
+                progress.advance(task_id)
+    return result
 
 
 def fetch_metakernel(url: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import textwrap
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from spice_kernel_db.hashing import classify_kernel, guess_mission, sha256_file
 from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
 from spice_kernel_db.remote import (
     RemoteMetakernel,
+    check_mk_availability,
     list_remote_metakernels,
     list_remote_missions,
     resolve_kernel_urls,
@@ -1089,6 +1091,34 @@ class TestListRemoteMetakernels:
         assert by_name["juice_ops_v230_20221128_001.tm"].version_tag == "v230_20221128_001"
         assert by_name["juice_ops_v230_20221128_001.tm"].base_name == "juice_ops.tm"
 
+    def test_parses_uppercase_tm_files(self):
+        """ESA missions like MEX use .TM extension."""
+        html = textwrap.dedent("""\
+            <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+            <html><body><pre>
+            <a href="MEX_OPS.TM">MEX_OPS.TM</a>                    2026-01-20 14:00   10K
+            <a href="MEX_OPS_V324_20260206_002.TM">MEX_OPS_V324_20260206_002.TM</a>  2026-02-06 09:00   11K
+            </pre></body></html>
+        """)
+        with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = html.encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_open.return_value = mock_resp
+
+            results = list_remote_metakernels("https://example.com/mk/")
+
+        assert len(results) == 2
+        filenames = [r.filename for r in results]
+        assert "MEX_OPS.TM" in filenames
+        assert "MEX_OPS_V324_20260206_002.TM" in filenames
+        # Version tag extraction works with uppercase
+        by_name = {r.filename: r for r in results}
+        assert by_name["MEX_OPS.TM"].version_tag is None
+        assert by_name["MEX_OPS_V324_20260206_002.TM"].version_tag == "V324_20260206_002"
+        assert by_name["MEX_OPS_V324_20260206_002.TM"].base_name == "MEX_OPS.TM"
+
     def test_sorted_by_base_name_then_filename(self):
         with patch("spice_kernel_db.remote.urllib.request.urlopen") as mock_open:
             mock_resp = MagicMock()
@@ -1303,6 +1333,39 @@ class TestListRemoteMissions:
         assert "JUICE" in missions
         assert "ROSETTA" in missions
         assert len(missions) == 3
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: check_mk_availability
+# ---------------------------------------------------------------------------
+
+class TestCheckMkAvailability:
+    def test_returns_true_for_reachable_mk_dirs(self):
+        """Missions whose mk/ URL responds 200 are marked True."""
+        def fake_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            if "JUICE" in url or "MRO" in url:
+                return MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=fake_urlopen):
+            result = check_mk_availability(
+                "https://example.com/", ["JUICE", "MRO", "APOLLO"]
+            )
+
+        assert result["JUICE"] is True
+        assert result["MRO"] is True
+        assert result["APOLLO"] is False
+
+    def test_returns_false_on_connection_error(self):
+        """Network errors are treated as unavailable."""
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("timeout"),
+        ):
+            result = check_mk_availability("https://example.com/", ["CASSINI"])
+
+        assert result["CASSINI"] is False
 
 
 # ---------------------------------------------------------------------------

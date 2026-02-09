@@ -17,7 +17,12 @@ from spice_kernel_db.config import (
     show_config,
 )
 from spice_kernel_db.db import KernelDB
-from spice_kernel_db.remote import SPICE_SERVERS, list_remote_metakernels, list_remote_missions
+from spice_kernel_db.remote import (
+    SPICE_SERVERS,
+    check_mk_availability,
+    list_remote_metakernels,
+    list_remote_missions,
+)
 
 console = Console()
 
@@ -568,46 +573,50 @@ def _mission_add_interactive(db: KernelDB):
         print("Invalid choice.")
     server_url = SPICE_SERVERS[server_label]
 
-    # 2. List missions
+    # 2. List missions and check which have metakernel directories
     print(f"\nFetching missions from {server_label}...")
-    missions = list_remote_missions(server_url)
-    if not missions:
+    all_missions = list_remote_missions(server_url)
+    if not all_missions:
         print("No missions found.", file=sys.stderr)
         return
 
-    print(f"\nAvailable missions ({len(missions)}):\n")
-    for i, name in enumerate(missions, 1):
+    mk_status = check_mk_availability(server_url, all_missions)
+    supported = [m for m in all_missions if mk_status.get(m)]
+    unsupported = [m for m in all_missions if not mk_status.get(m)]
+
+    if not supported:
+        print("No missions with metakernel directories found.", file=sys.stderr)
+        return
+
+    print(f"\nAvailable missions ({len(supported)} with metakernels):\n")
+    for i, name in enumerate(supported, 1):
         print(f"  [{i:>3}] {name}")
+
+    if unsupported:
+        print(
+            f"\nNot yet supported ({len(unsupported)} without metakernels "
+            f"— see github.com/michaelaye/spice-kernel-db/issues/2):"
+        )
+        print(f"  {', '.join(unsupported)}")
+
     print()
     while True:
-        choice = input(f"Select mission [1-{len(missions)}] or type name: ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(missions):
-            mission_name = missions[int(choice) - 1]
+        choice = input(f"Select mission [1-{len(supported)}] or type name: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(supported):
+            mission_name = supported[int(choice) - 1]
             break
-        elif choice in missions:
+        elif choice in supported:
             mission_name = choice
             break
         # Case-insensitive match
-        matches = [m for m in missions if m.lower() == choice.lower()]
+        matches = [m for m in supported if m.lower() == choice.lower()]
         if matches:
             mission_name = matches[0]
             break
         print("Invalid choice.")
 
-    # 3. Compute mk/ directory URL and validate it exists
+    # 3. mk/ directory URL (already validated by check_mk_availability)
     mk_dir_url = f"{server_url}{mission_name}/kernels/mk/"
-    try:
-        req = urllib.request.Request(mk_dir_url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=10):
-            pass
-    except (urllib.error.HTTPError, urllib.error.URLError):
-        print(f"\n  Warning: {mk_dir_url} not found (404).")
-        print(f"  This mission may not have metakernels on this server.")
-        custom = input(
-            "  Enter correct mk/ URL (or press Enter to save anyway): "
-        ).strip()
-        if custom:
-            mk_dir_url = custom if custom.endswith("/") else custom + "/"
 
     # 4. Dedup preference
     dedup_answer = input(
