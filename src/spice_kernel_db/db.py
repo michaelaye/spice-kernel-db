@@ -131,6 +131,16 @@ class KernelDB:
                 added_at     TIMESTAMP DEFAULT current_timestamp
             )
         """)
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS kernel_coverage (
+                sha256          VARCHAR NOT NULL,
+                body_id         INTEGER NOT NULL,
+                interval_index  INTEGER NOT NULL,
+                et_start        DOUBLE NOT NULL,
+                et_end          DOUBLE NOT NULL,
+                PRIMARY KEY (sha256, body_id, interval_index)
+            )
+        """)
 
     # ------------------------------------------------------------------
     # Mission management
@@ -1416,6 +1426,147 @@ class KernelDB:
         action = "Would save" if dry_run else "Saved"
         print(f"\n{action}: {total_saved / 1e6:.1f} MB")
         return plan
+
+    # ------------------------------------------------------------------
+    # Coverage analysis
+    # ------------------------------------------------------------------
+
+    def coverage_metakernel(
+        self,
+        mk_path: str | Path,
+        body_id: int,
+        mission: str | None = None,
+    ) -> list:
+        """Check body coverage for all SPK kernels in a metakernel.
+
+        Follows the ``check_metakernel`` pattern: parse → resolve → classify
+        → delegate to ``coverage.check_coverage()``. Results are stored in
+        the ``kernel_coverage`` table.
+
+        If *mk_path* does not exist on disk, falls back to looking up the
+        filename in metakernel_registry.
+
+        Returns:
+            list of KernelCoverageResult
+        """
+        from spice_kernel_db.coverage import check_coverage
+
+        mk = Path(mk_path)
+        if not mk.is_file():
+            # Try registry lookup by filename
+            row = self.con.execute(
+                "SELECT mk_path FROM metakernel_registry WHERE filename = ?",
+                [str(mk_path)],
+            ).fetchone()
+            if row:
+                mk = Path(row[0])
+            else:
+                raise FileNotFoundError(
+                    f"Metakernel not found: {mk_path}"
+                )
+
+        parsed = parse_metakernel(mk)
+        if mission is None:
+            mission = guess_mission(str(mk))
+
+        filenames = parsed.kernel_filenames()
+        resolved_paths: list[str | None] = []
+        kernel_types: list[str] = []
+
+        # Auto-discover LSK for UTC display
+        lsk_path: str | None = None
+
+        for raw in parsed.kernels:
+            fname = Path(raw).name
+            ktype = classify_kernel(fname)
+            kernel_types.append(ktype)
+            local, _ = self.resolve_kernel(fname, preferred_mission=mission)
+            resolved_paths.append(local)
+            if ktype == "lsk" and local and Path(local).is_file():
+                lsk_path = local
+
+        results = check_coverage(
+            filenames, resolved_paths, kernel_types, body_id,
+            lsk_path=lsk_path,
+        )
+
+        # Store coverage in DB
+        for res in results:
+            if res.intervals and res.kernel_type == "spk":
+                # Look up sha256 for the resolved path
+                idx = filenames.index(res.filename)
+                rpath = resolved_paths[idx]
+                if rpath:
+                    sha_row = self.con.execute(
+                        "SELECT sha256 FROM locations WHERE abs_path = ?",
+                        [rpath],
+                    ).fetchone()
+                    if sha_row:
+                        self.store_coverage(
+                            sha_row[0], body_id, res.intervals,
+                        )
+
+        return results
+
+    def store_coverage(
+        self,
+        sha256: str,
+        body_id: int,
+        intervals: list,
+    ) -> None:
+        """Upsert coverage intervals into kernel_coverage table."""
+        # Delete existing intervals for this kernel+body
+        self.con.execute(
+            "DELETE FROM kernel_coverage WHERE sha256 = ? AND body_id = ?",
+            [sha256, body_id],
+        )
+        for i, iv in enumerate(intervals):
+            self.con.execute(
+                "INSERT INTO kernel_coverage VALUES (?, ?, ?, ?, ?)",
+                [sha256, body_id, i, iv.et_start, iv.et_end],
+            )
+
+    def query_coverage(
+        self,
+        body_id: int,
+        et_start: float | None = None,
+        et_end: float | None = None,
+    ) -> list[dict]:
+        """Query kernels that cover a body, optionally within a time range.
+
+        Uses interval overlap: et_start < row.et_end AND et_end > row.et_start
+
+        Returns:
+            list of dicts with sha256, filename, et_start, et_end
+        """
+        if et_start is not None and et_end is not None:
+            rows = self.con.execute("""
+                SELECT DISTINCT kc.sha256, k.filename,
+                       kc.et_start, kc.et_end
+                FROM kernel_coverage kc
+                JOIN kernels k ON k.sha256 = kc.sha256
+                WHERE kc.body_id = ?
+                  AND kc.et_start < ?
+                  AND kc.et_end > ?
+                ORDER BY kc.et_start
+            """, [body_id, et_end, et_start]).fetchall()
+        else:
+            rows = self.con.execute("""
+                SELECT DISTINCT kc.sha256, k.filename,
+                       kc.et_start, kc.et_end
+                FROM kernel_coverage kc
+                JOIN kernels k ON k.sha256 = kc.sha256
+                WHERE kc.body_id = ?
+                ORDER BY kc.et_start
+            """, [body_id]).fetchall()
+
+        return [
+            {
+                "sha256": r[0], "filename": r[1],
+                "et_start": r[2], "et_end": r[3],
+            }
+            for r in rows
+        ]
 
     def close(self):
         """Close the database connection."""

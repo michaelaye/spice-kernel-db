@@ -65,7 +65,10 @@ def main(argv: list[str] | None = None):
     p_check = sub.add_parser(
         "check", help="Check which kernels in a metakernel are available locally"
     )
-    p_check.add_argument("metakernel", help="Path to .tm file")
+    p_check.add_argument(
+        "metakernel", nargs="?", default=None,
+        help="Path to .tm file (omit to select from local registry)",
+    )
     p_check.add_argument("--mission", help="Override mission name")
 
     # --- rewrite ---
@@ -155,6 +158,21 @@ def main(argv: list[str] | None = None):
     p_mission_rm = mission_sub.add_parser("remove", help="Remove a mission")
     p_mission_rm.add_argument("name", help="Mission name to remove")
 
+    # --- coverage ---
+    p_cov = sub.add_parser(
+        "coverage",
+        help="Check SPK body coverage in a metakernel",
+    )
+    p_cov.add_argument(
+        "body_id",
+        help="NAIF body ID (e.g. 399) or body name (e.g. Earth)",
+    )
+    p_cov.add_argument(
+        "metakernel", nargs="?", default=None,
+        help="Path to .tm file or registry filename (omit to select interactively)",
+    )
+    p_cov.add_argument("--mission", help="Override mission name")
+
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update configuration")
     p_config.add_argument(
@@ -226,7 +244,10 @@ def main(argv: list[str] | None = None):
             db.report_duplicates()
 
         elif args.command == "check":
-            db.check_metakernel(args.metakernel, mission=args.mission)
+            metakernel = _require_metakernel(args.metakernel, db, args.mission)
+            if metakernel is None:
+                return
+            db.check_metakernel(metakernel, mission=args.mission)
 
         elif args.command == "rewrite":
             db.rewrite_metakernel(
@@ -255,6 +276,28 @@ def main(argv: list[str] | None = None):
                 db.info_metakernel(args.name)
             else:
                 db.list_metakernels(mission=args.mission)
+
+        elif args.command == "coverage":
+            body_id = _resolve_body_interactive(args.body_id)
+            if body_id is None:
+                return
+
+            metakernel = _require_metakernel(args.metakernel, db, args.mission)
+            if metakernel is None:
+                return
+
+            try:
+                results = db.coverage_metakernel(
+                    metakernel, body_id, mission=args.mission,
+                )
+            except ImportError:
+                print(
+                    "SpiceyPy is required for coverage analysis.\n"
+                    "Install it with: pip install spice-kernel-db[spice]",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            _print_coverage_table(results, body_id, metakernel)
 
         elif args.command == "get":
             url = args.url
@@ -327,6 +370,176 @@ def main(argv: list[str] | None = None):
 
     finally:
         db.close()
+
+
+def _print_coverage_table(results, body_id: int, metakernel: str):
+    """Print a rich table summarising body coverage results."""
+    from rich.panel import Panel
+
+    spk_count = sum(1 for r in results if r.kernel_type == "spk")
+    cov_count = sum(1 for r in results if r.body_found)
+
+    console.print(Panel(
+        f"Body ID:      [bold]{body_id}[/bold]\n"
+        f"Metakernel:   {metakernel}\n"
+        f"SPK files:    {spk_count}\n"
+        f"With coverage: {cov_count}",
+        title="Coverage summary",
+    ))
+
+    table = Table(title="Kernel coverage")
+    table.add_column("Kernel", no_wrap=True)
+    table.add_column("Type")
+    table.add_column("Coverage")
+    table.add_column("Start (UTC)")
+    table.add_column("End (UTC)")
+
+    for r in results:
+        if r.kernel_type != "spk":
+            table.add_row(r.filename, r.kernel_type, "N/A", "", "")
+            continue
+        if r.error:
+            # Truncate long SPICE tracebacks to the key message
+            err_msg = r.error
+            if len(err_msg) > 60:
+                # Extract the short SPICE error if present
+                for marker in ("SPICE(", "Input file"):
+                    idx = err_msg.find(marker)
+                    if idx >= 0:
+                        err_msg = err_msg[idx:idx + 80].split("\n")[0]
+                        break
+                else:
+                    err_msg = err_msg[:60] + "…"
+            table.add_row(
+                r.filename, r.kernel_type,
+                f"[red]{err_msg}[/red]", "", "",
+            )
+            continue
+        if not r.body_found:
+            table.add_row(
+                r.filename, r.kernel_type,
+                "[dim]not found[/dim]", "", "",
+            )
+            continue
+        for i, iv in enumerate(r.intervals):
+            label = r.filename if i == 0 else ""
+            type_label = r.kernel_type if i == 0 else ""
+            cov_str = "[green]yes[/green]" if i == 0 else "[green]gap[/green]"
+            table.add_row(
+                label, type_label, cov_str,
+                iv.utc_start or f"{iv.et_start:.3f} ET",
+                iv.utc_end or f"{iv.et_end:.3f} ET",
+            )
+
+    console.print(table)
+
+
+def _require_metakernel(
+    metakernel: str | None, db: KernelDB, mission: str | None,
+) -> str | None:
+    """Return *metakernel* if given, otherwise prompt the user to pick one."""
+    if metakernel is not None:
+        return metakernel
+    return _select_local_metakernel(db, mission)
+
+
+def _resolve_body_interactive(name_or_id: str) -> int | None:
+    """Resolve a body name/ID string to a single NAIF ID, prompting if ambiguous.
+
+    Returns the integer body ID, or None on failure / user cancellation.
+    Calls ``sys.exit(1)`` for unknown names.
+    """
+    from spice_kernel_db.coverage import resolve_body_id
+
+    candidates = resolve_body_id(name_or_id)
+    if not candidates:
+        print(
+            f"Unknown body: '{name_or_id}'. "
+            f"Use a NAIF ID (e.g. 399) or a known name (e.g. Earth).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if len(candidates) == 1:
+        return candidates[0][0]
+
+    # Disambiguation prompt
+    console.print(f"\n'{name_or_id}' matches multiple NAIF bodies:\n")
+    for i, (bid, desc) in enumerate(candidates, 1):
+        console.print(f"  [{i}] {desc}  (NAIF ID {bid})")
+    console.print()
+    try:
+        raw = input(f"Select [1-{len(candidates)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(candidates):
+            return candidates[idx - 1][0]
+    except ValueError:
+        pass
+    print("Invalid selection.", file=sys.stderr)
+    sys.exit(1)
+
+
+def _select_local_metakernel(
+    db: KernelDB, mission: str | None,
+) -> str | None:
+    """List locally registered metakernels and let the user pick one.
+
+    Returns the mk_path of the selected metakernel, or None on failure.
+    Prints a hint about ``browse`` and ``get`` when no metakernels are found
+    or when the user wants to fetch more.
+    """
+    rows = db.con.execute("""
+        SELECT r.mk_path, r.filename, r.mission, r.acquired_at
+        FROM metakernel_registry r
+        {}
+        ORDER BY r.mission, r.filename
+    """.format(
+        "WHERE LOWER(r.mission) LIKE LOWER(?) || '%'" if mission else "",
+    ), [mission] if mission else []).fetchall()
+
+    if not rows:
+        mission_hint = f" for mission '{mission}'" if mission else ""
+        print(
+            f"No locally acquired metakernels{mission_hint}.\n\n"
+            f"To browse and download metakernels:\n"
+            f"  spice-kernel-db browse [MISSION]\n"
+            f"  spice-kernel-db get [METAKERNEL]\n",
+            file=sys.stderr,
+        )
+        return None
+
+    table = Table(title="Local metakernels")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Filename")
+    table.add_column("Mission")
+    table.add_column("Acquired")
+    for i, (mk_path, filename, mis, acquired) in enumerate(rows, 1):
+        acq_str = str(acquired)[:19] if acquired else ""
+        table.add_row(str(i), filename, mis, acq_str)
+    console.print(table)
+
+    console.print(
+        "\n[dim]To fetch more metakernels: "
+        "spice-kernel-db browse [MISSION][/dim]\n"
+    )
+
+    try:
+        raw = input(f"Select metakernel [1-{len(rows)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(rows):
+            return rows[idx - 1][0]  # mk_path
+    except ValueError:
+        pass
+    print("Invalid selection.", file=sys.stderr)
+    return None
 
 
 def _read_spice_server_marker(directory: Path) -> dict[str, str] | None:

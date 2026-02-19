@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spice-kernel-db"
-version = "0.7.1"
+version = "0.8.0"
 description = "Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives"
 readme = "README.md"
 license = "MIT"
@@ -26,6 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+spice = ["spiceypy>=6.0"]
 dev = [
     "pytest>=7",
     "pytest-tmp-files>=0.0.2",

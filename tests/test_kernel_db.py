@@ -1541,3 +1541,330 @@ class TestSpiceServers:
     def test_urls_are_https(self):
         for label, url in SPICE_SERVERS.items():
             assert url.startswith("https://"), f"{label} URL should be HTTPS"
+
+
+# ---------------------------------------------------------------------------
+# Unit / integration tests: coverage module
+# ---------------------------------------------------------------------------
+
+class TestCoverage:
+    """Tests for the coverage analysis feature.
+
+    All tests mock spiceypy to avoid needing real binary SPK files.
+    """
+
+    def test_non_spk_kernels_skipped(self):
+        """check_coverage skips non-SPK kernels without calling spk_coverage."""
+        from spice_kernel_db.coverage import check_coverage
+
+        with patch("spice_kernel_db.coverage.spk_coverage") as mock_cov:
+            results = check_coverage(
+                filenames=["naif0012.tls", "juice_v44.tf"],
+                resolved_paths=["/fake/naif0012.tls", "/fake/juice_v44.tf"],
+                kernel_types=["lsk", "fk"],
+                body_id=399,
+            )
+
+        mock_cov.assert_not_called()
+        assert len(results) == 2
+        assert all(not r.body_found for r in results)
+        assert all(r.error is None for r in results)
+
+    def test_missing_spk_sets_error(self):
+        """Missing SPK file produces an error entry."""
+        from spice_kernel_db.coverage import check_coverage
+
+        results = check_coverage(
+            filenames=["missing.bsp"],
+            resolved_paths=[None],
+            kernel_types=["spk"],
+            body_id=399,
+        )
+        assert len(results) == 1
+        assert results[0].error is not None
+        assert "not found" in results[0].error.lower()
+        assert not results[0].body_found
+
+    def test_body_found_single_interval(self, tmp_path):
+        """Body found with a single coverage interval."""
+        from spice_kernel_db.coverage import (
+            CoverageInterval,
+            check_coverage,
+        )
+
+        fake_spk = tmp_path / "test.bsp"
+        fake_spk.write_bytes(b"FAKE SPK")
+
+        mock_interval = CoverageInterval(
+            et_start=0.0, et_end=1e8,
+            utc_start="2000-JAN-01 12:00",
+            utc_end="2003-FEB-27 08:47",
+        )
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            return_value=[mock_interval],
+        ):
+            results = check_coverage(
+                filenames=["test.bsp"],
+                resolved_paths=[str(fake_spk)],
+                kernel_types=["spk"],
+                body_id=399,
+            )
+
+        assert len(results) == 1
+        assert results[0].body_found is True
+        assert len(results[0].intervals) == 1
+        assert results[0].intervals[0].et_start == 0.0
+
+    def test_body_found_multiple_intervals_gap(self, tmp_path):
+        """Body found with multiple intervals (gap in coverage)."""
+        from spice_kernel_db.coverage import (
+            CoverageInterval,
+            check_coverage,
+        )
+
+        fake_spk = tmp_path / "gapped.bsp"
+        fake_spk.write_bytes(b"FAKE SPK")
+
+        intervals = [
+            CoverageInterval(et_start=0.0, et_end=1e8),
+            CoverageInterval(et_start=2e8, et_end=3e8),
+        ]
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            return_value=intervals,
+        ):
+            results = check_coverage(
+                filenames=["gapped.bsp"],
+                resolved_paths=[str(fake_spk)],
+                kernel_types=["spk"],
+                body_id=399,
+            )
+
+        assert results[0].body_found is True
+        assert len(results[0].intervals) == 2
+
+    def test_body_not_found_empty_intervals(self, tmp_path):
+        """Body not in SPK file → empty intervals, body_found=False."""
+        from spice_kernel_db.coverage import check_coverage
+
+        fake_spk = tmp_path / "nobody.bsp"
+        fake_spk.write_bytes(b"FAKE SPK")
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            return_value=[],
+        ):
+            results = check_coverage(
+                filenames=["nobody.bsp"],
+                resolved_paths=[str(fake_spk)],
+                kernel_types=["spk"],
+                body_id=90004923,
+            )
+
+        assert results[0].body_found is False
+        assert len(results[0].intervals) == 0
+
+    def test_spiceypy_import_error(self, tmp_path):
+        """ImportError from spiceypy gives a clear message."""
+        from spice_kernel_db.coverage import check_coverage
+
+        fake_spk = tmp_path / "test.bsp"
+        fake_spk.write_bytes(b"FAKE SPK")
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            side_effect=ImportError("No module named 'spiceypy'"),
+        ):
+            results = check_coverage(
+                filenames=["test.bsp"],
+                resolved_paths=[str(fake_spk)],
+                kernel_types=["spk"],
+                body_id=399,
+            )
+
+        assert results[0].error is not None
+        assert "spiceypy" in results[0].error.lower()
+
+    def test_lsk_autodiscovery_passes_lsk_path(self, tmp_path):
+        """check_coverage forwards lsk_path when provided."""
+        from spice_kernel_db.coverage import check_coverage
+
+        fake_spk = tmp_path / "test.bsp"
+        fake_spk.write_bytes(b"FAKE SPK")
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            return_value=[],
+        ) as mock_cov:
+            check_coverage(
+                filenames=["test.bsp"],
+                resolved_paths=[str(fake_spk)],
+                kernel_types=["spk"],
+                body_id=399,
+                lsk_path="/fake/naif0012.tls",
+            )
+
+        mock_cov.assert_called_once_with(
+            str(fake_spk), 399, lsk_path="/fake/naif0012.tls",
+        )
+
+    def test_coverage_metakernel_integration(
+        self, populated_db, tmp_spice_tree,
+    ):
+        """coverage_metakernel resolves, classifies, and delegates correctly."""
+        from spice_kernel_db.coverage import CoverageInterval
+
+        mk = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
+
+        mock_interval = CoverageInterval(et_start=0.0, et_end=1e8)
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            return_value=[mock_interval],
+        ):
+            results = populated_db.coverage_metakernel(
+                mk, body_id=399, mission="JUICE",
+            )
+
+        # 11 kernels in juice_test.tm
+        assert len(results) == 11
+        spk_results = [r for r in results if r.kernel_type == "spk"]
+        # de432s.bsp, jup365_*.bsp, juice_crema_*.bsp = 3 SPK files
+        assert len(spk_results) == 3
+        assert all(r.body_found for r in spk_results)
+
+    def test_store_and_query_coverage(self, populated_db):
+        """store_coverage persists, query_coverage retrieves."""
+        from spice_kernel_db.coverage import CoverageInterval
+
+        intervals = [
+            CoverageInterval(et_start=0.0, et_end=1e8),
+            CoverageInterval(et_start=2e8, et_end=3e8),
+        ]
+
+        # Use a known sha256 from the DB
+        row = populated_db.con.execute(
+            "SELECT sha256 FROM kernels LIMIT 1"
+        ).fetchone()
+        sha = row[0]
+
+        populated_db.store_coverage(sha, 399, intervals)
+
+        # Query without time range
+        hits = populated_db.query_coverage(399)
+        assert len(hits) == 2
+        assert hits[0]["sha256"] == sha
+
+        # Query with overlapping time range
+        hits = populated_db.query_coverage(399, et_start=0.5e8, et_end=0.9e8)
+        assert len(hits) == 1  # only first interval overlaps
+
+        # Query with non-overlapping time range
+        hits = populated_db.query_coverage(399, et_start=1e8, et_end=2e8)
+        assert len(hits) == 0
+
+    def test_query_coverage_wrong_body(self, populated_db):
+        """query_coverage returns empty for unknown body."""
+        hits = populated_db.query_coverage(99999)
+        assert hits == []
+
+    def test_store_coverage_upserts(self, populated_db):
+        """Calling store_coverage twice replaces previous intervals."""
+        from spice_kernel_db.coverage import CoverageInterval
+
+        row = populated_db.con.execute(
+            "SELECT sha256 FROM kernels LIMIT 1"
+        ).fetchone()
+        sha = row[0]
+
+        populated_db.store_coverage(
+            sha, 399, [CoverageInterval(et_start=0.0, et_end=1e8)],
+        )
+        assert len(populated_db.query_coverage(399)) == 1
+
+        # Upsert with different intervals
+        populated_db.store_coverage(
+            sha, 399, [
+                CoverageInterval(et_start=5e8, et_end=6e8),
+                CoverageInterval(et_start=7e8, et_end=8e8),
+            ],
+        )
+        hits = populated_db.query_coverage(399)
+        assert len(hits) == 2
+        assert hits[0]["et_start"] == 5e8
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: body name resolution
+# ---------------------------------------------------------------------------
+
+class TestBodyNameResolution:
+    """Tests for resolve_body_id and NAIF_BODIES lookup."""
+
+    def test_numeric_id_passthrough(self):
+        """Numeric string returns single-element list with that ID."""
+        from spice_kernel_db.coverage import resolve_body_id
+        result = resolve_body_id("399")
+        assert len(result) == 1
+        assert result[0][0] == 399
+
+    def test_negative_numeric_id(self):
+        """Negative NAIF IDs (spacecraft) work."""
+        from spice_kernel_db.coverage import resolve_body_id
+        result = resolve_body_id("-61")
+        assert len(result) == 1
+        assert result[0][0] == -61
+
+    def test_name_case_insensitive(self):
+        """Body names are case-insensitive."""
+        from spice_kernel_db.coverage import resolve_body_id
+        for name in ("Earth", "earth", "EARTH", "eArTh"):
+            result = resolve_body_id(name)
+            assert len(result) >= 1
+            ids = [r[0] for r in result]
+            assert 399 in ids
+
+    def test_ambiguous_name_returns_multiple(self):
+        """Ambiguous names like 'earth' return body center + barycenter."""
+        from spice_kernel_db.coverage import resolve_body_id
+        result = resolve_body_id("earth")
+        assert len(result) == 2
+        ids = {r[0] for r in result}
+        assert 399 in ids  # Earth body center
+        assert 3 in ids    # Earth-Moon barycenter
+
+    def test_unambiguous_name_returns_one(self):
+        """Unambiguous names return a single match."""
+        from spice_kernel_db.coverage import resolve_body_id
+        result = resolve_body_id("moon")
+        assert len(result) == 1
+        assert result[0][0] == 301
+
+    def test_unknown_name_returns_empty(self):
+        """Unknown names return an empty list."""
+        from spice_kernel_db.coverage import resolve_body_id
+        result = resolve_body_id("krypton")
+        assert result == []
+
+    def test_common_bodies_present(self):
+        """Key solar system bodies are in the lookup table."""
+        from spice_kernel_db.coverage import NAIF_BODIES
+        expected = [
+            "sun", "mercury", "venus", "earth", "mars",
+            "jupiter", "saturn", "uranus", "neptune",
+            "moon", "europa", "ganymede", "titan",
+        ]
+        for name in expected:
+            assert name in NAIF_BODIES, f"{name} missing from NAIF_BODIES"
+
+    def test_3i_atlas_in_table(self):
+        """3I/ATLAS is in the lookup table with both Horizons IDs."""
+        from spice_kernel_db.coverage import resolve_body_id
+        result = resolve_body_id("3i/atlas")
+        assert len(result) == 2
+        ids = {r[0] for r in result}
+        assert 1004083 in ids   # Horizons SPK ID
+        assert 90004923 in ids  # Horizons record ID
