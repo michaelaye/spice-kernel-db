@@ -30,15 +30,50 @@ console = Console()
 def main(argv: list[str] | None = None):
     config = ensure_config()
 
+    # ANSI green for command names when outputting to a terminal
+    if sys.stdout.isatty():
+        _g, _r = "\033[1;32m", "\033[0m"
+    else:
+        _g, _r = "", ""
+
+    _EPILOG = f"""\
+commands:
+  browse & acquire:
+    {_g}browse{_r}          Browse remote metakernels in a NAIF mk/ directory
+    {_g}get{_r}             Download missing kernels for a remote metakernel
+    {_g}update{_r}          Re-fetch a metakernel and download new kernels
+
+  inspect:
+    {_g}check{_r}           Check which kernels in a metakernel are available locally
+    {_g}coverage{_r}        Check SPK body coverage in a metakernel
+    {_g}metakernels{_r}     List tracked metakernels or show details  (alias: {_g}mk{_r})
+    {_g}resolve{_r}         Find local path for a kernel filename
+    {_g}stats{_r}           Show database statistics
+    {_g}duplicates{_r}      Report duplicate kernels
+
+  transform:
+    {_g}scan{_r}            Scan a directory for kernel files
+    {_g}rewrite{_r}         Rewrite a metakernel with a local symlink tree
+    {_g}dedup{_r}           Deduplicate kernel files using symlinks
+
+  configure:
+    {_g}mission{_r}         Manage configured missions
+    {_g}config{_r}          Show or update configuration
+    {_g}reset{_r}           Delete the database and start fresh
+"""
+
     parser = argparse.ArgumentParser(
         prog="spice-kernel-db",
+        usage="%(prog)s [-h] [--db DB] {command} ...",
         description="Browse, get, and manage SPICE kernels and metakernels",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--db", default=config.db_path,
         help=f"Path to DuckDB database file (default: {config.db_path})",
     )
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command", metavar="{command}", help=argparse.SUPPRESS)
 
     # --- scan ---
     p_scan = sub.add_parser("scan", help="Scan a directory for kernel files")
@@ -70,6 +105,10 @@ def main(argv: list[str] | None = None):
         help="Path to .tm file (omit to select from local registry)",
     )
     p_check.add_argument("--mission", help="Override mission name")
+    p_check.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Show full per-file warnings instead of summary",
+    )
 
     # --- rewrite ---
     p_rewrite = sub.add_parser(
@@ -105,7 +144,8 @@ def main(argv: list[str] | None = None):
 
     # --- metakernels ---
     p_mk = sub.add_parser(
-        "metakernels", help="List tracked metakernels or show details",
+        "metakernels", aliases=["mk"],
+        help="List tracked metakernels or show details",
     )
     p_mk.add_argument(
         "name", nargs="?",
@@ -128,6 +168,25 @@ def main(argv: list[str] | None = None):
     )
     p_get.add_argument("--mission", help="Override auto-detected mission name")
     p_get.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    # --- update ---
+    p_update = sub.add_parser(
+        "update",
+        help="Re-fetch a metakernel from its source and download new kernels",
+    )
+    p_update.add_argument(
+        "metakernel", nargs="?", default=None,
+        help="Metakernel filename or path (omit to select interactively)",
+    )
+    p_update.add_argument("--mission", help="Override mission name")
+    p_update.add_argument(
+        "--download-dir", default=config.kernel_dir,
+        help=f"Directory for downloaded kernels (default: {config.kernel_dir})",
+    )
+    p_update.add_argument(
         "-y", "--yes", action="store_true",
         help="Skip confirmation prompt",
     )
@@ -247,7 +306,9 @@ def main(argv: list[str] | None = None):
             metakernel = _require_metakernel(args.metakernel, db, args.mission)
             if metakernel is None:
                 return
-            db.check_metakernel(metakernel, mission=args.mission)
+            db.check_metakernel(
+                metakernel, mission=args.mission, verbose=args.verbose,
+            )
 
         elif args.command == "rewrite":
             db.rewrite_metakernel(
@@ -271,7 +332,7 @@ def main(argv: list[str] | None = None):
             for w in warnings:
                 print(f"  ⚠ {w}", file=sys.stderr)
 
-        elif args.command == "metakernels":
+        elif args.command in ("metakernels", "mk"):
             if args.name:
                 db.info_metakernel(args.name)
             else:
@@ -323,6 +384,17 @@ def main(argv: list[str] | None = None):
                 yes=args.yes,
             )
 
+        elif args.command == "update":
+            metakernel = _require_metakernel(args.metakernel, db, args.mission)
+            if metakernel is None:
+                return
+            db.update_metakernel(
+                metakernel,
+                mission=args.mission,
+                download_dir=args.download_dir,
+                yes=args.yes,
+            )
+
         elif args.command == "browse":
             if args.url:
                 url = args.url
@@ -361,9 +433,16 @@ def main(argv: list[str] | None = None):
                     print("No configured missions.")
                     print("Use 'spice-kernel-db mission add' to set one up.")
                     return
-                print("\nConfigured missions:\n")
+                table = Table(title="Configured missions")
+                table.add_column("Mission")
+                table.add_column("mk/ URL")
                 for m in missions:
-                    print(f"  {m['name']}  {m['mk_dir_url']}")
+                    table.add_row(m["name"], m["mk_dir_url"])
+                console.print(table)
+                console.print(
+                    "\n[dim]Use 'spice-kernel-db browse <mission>' to scan a specific directory.\n"
+                    "Use 'spice-kernel-db mission add' to add another mission.[/dim]"
+                )
 
         elif args.command == "mission":
             _handle_mission(db, args)
@@ -503,12 +582,12 @@ def _select_local_metakernel(
 
     if not rows:
         mission_hint = f" for mission '{mission}'" if mission else ""
-        print(
-            f"No locally acquired metakernels{mission_hint}.\n\n"
-            f"To browse and download metakernels:\n"
+        console.print(
+            f"[yellow]No locally acquired metakernels{mission_hint}.[/yellow]\n\n"
+            f"[dim]To browse and download metakernels:\n"
             f"  spice-kernel-db browse [MISSION]\n"
-            f"  spice-kernel-db get [METAKERNEL]\n",
-            file=sys.stderr,
+            f"  spice-kernel-db get [METAKERNEL][/dim]\n",
+            stderr=True,
         )
         return None
 
@@ -518,7 +597,7 @@ def _select_local_metakernel(
     table.add_column("Mission")
     table.add_column("Acquired")
     for i, (mk_path, filename, mis, acquired) in enumerate(rows, 1):
-        acq_str = str(acquired)[:19] if acquired else ""
+        acq_str = str(acquired)[:16] if acquired else ""
         table.add_row(str(i), filename, mis, acq_str)
     console.print(table)
 
@@ -538,7 +617,7 @@ def _select_local_metakernel(
             return rows[idx - 1][0]  # mk_path
     except ValueError:
         pass
-    print("Invalid selection.", file=sys.stderr)
+    console.print("[red]Invalid selection.[/red]", stderr=True)
     return None
 
 
@@ -637,18 +716,35 @@ def _resolve_mission_mk_dir(
         return m["mk_dir_url"], m["name"]
 
     if not missions:
-        print(
-            "No missions configured. "
-            "Use 'spice-kernel-db mission add' first.",
-            file=sys.stderr,
+        console.print(
+            "[yellow]No missions configured.[/yellow]\n"
+            "[dim]Use 'spice-kernel-db mission add' first.[/dim]",
+            stderr=True,
         )
-    else:
-        names = ", ".join(m["name"] for m in missions)
-        print(
-            f"Multiple missions configured: {names}. "
-            f"Use --mission to specify which one.",
-            file=sys.stderr,
-        )
+        return None, None
+
+    # Multiple missions — let user pick interactively
+    table = Table(title="Select a mission")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Mission")
+    table.add_column("mk/ URL")
+    for i, m in enumerate(missions, 1):
+        table.add_row(str(i), m["name"], m["mk_dir_url"])
+    console.print(table)
+
+    try:
+        raw = input(f"\nSelect mission [1-{len(missions)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None, None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(missions):
+            m = missions[idx - 1]
+            return m["mk_dir_url"], m["name"]
+    except ValueError:
+        pass
+    console.print("[red]Invalid selection.[/red]", stderr=True)
     return None, None
 
 
@@ -669,21 +765,21 @@ def _interactive_select_metakernel(
     if not mk_dir_url:
         return None
 
-    console.print(f"Fetching metakernels from {mk_dir_url} ...")
+    console.print(f"Fetching metakernels from [bold]{mk_dir_url}[/bold] ...")
     try:
         entries = list_remote_metakernels(mk_dir_url)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            print(
-                f"No metakernel directory found at:\n  {mk_dir_url}",
-                file=sys.stderr,
+            console.print(
+                f"[red]No metakernel directory found at:[/red]\n  {mk_dir_url}",
+                stderr=True,
             )
         else:
             raise
         return None
 
     if not entries:
-        print("No metakernels found.", file=sys.stderr)
+        console.print("[red]No metakernels found.[/red]", stderr=True)
         return None
 
     # Group by base_name, show latest version per group
@@ -701,24 +797,24 @@ def _interactive_select_metakernel(
 
     # Build selection list — one row per base_name, link to latest version
     choices: list[tuple[str, str, bool]] = []  # (url, base_name, is_local)
-    rows: list[tuple[str, str, str, str, str]] = []  # (#, base_name, versions, date, local)
     for base_name in sorted(groups):
         group = groups[base_name]
         latest = max(group, key=lambda e: e.filename)
         is_local = any(e.filename in local_filenames for e in group)
-        n_ver = str(len(group)) if len(group) > 1 else ""
-        local_col = "\u2713" if is_local else ""
         choices.append((latest.url, base_name, is_local))
-        rows.append((str(len(rows) + 1), base_name, n_ver, latest.date, local_col))
 
     table = Table(title=f"Available metakernels — {resolved_name or 'remote'}")
     table.add_column("#", justify="right", style="bold")
     table.add_column("Metakernel")
     table.add_column("Versions", justify="right")
-    table.add_column("Latest date")
-    table.add_column("Local?", justify="center")
-    for num, base_name, n_ver, date, local_col in rows:
-        table.add_row(num, base_name, n_ver, date, local_col)
+    table.add_column("Latest")
+    table.add_column("Local", justify="center")
+    for i, (base_name, group) in enumerate(sorted(groups.items()), 1):
+        latest = max(group, key=lambda e: e.filename)
+        is_local = any(e.filename in local_filenames for e in group)
+        n_ver = str(len(group)) if len(group) > 1 else ""
+        local_col = "[green]\u2713[/green]" if is_local else ""
+        table.add_row(str(i), base_name, n_ver, latest.date, local_col)
     console.print(table)
 
     try:
@@ -733,7 +829,7 @@ def _interactive_select_metakernel(
             return url
     except ValueError:
         pass
-    print("Invalid selection.", file=sys.stderr)
+    console.print("[red]Invalid selection.[/red]", stderr=True)
     return None
 
 

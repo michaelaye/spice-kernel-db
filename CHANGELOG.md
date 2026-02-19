@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-02-20
+
+### Added
+
+- `update` command — re-fetch a metakernel from its source URL and download new/missing kernels. Resolves the URL from the metakernel registry so you don't have to remember it.
+- `mk` alias for `metakernels` command.
+- `browse` 3-state local indicator: `yes` (up to date), `outdated` (remote newer than acquired), `no` (not acquired). Prints a hint when outdated metakernels are found.
+- `check` remote staleness notice — queries the remote server and prints a notice when a newer version is available (read-only, no automatic download).
+- `check -v` / `--verbose` flag for full per-file warnings. Default output now shows a compact summary (dedup count, cross-mission count) instead of flooding with per-file lines.
+- Categorized `--help` output — subcommands grouped into browse & acquire, inspect, transform, and configure sections with color-coded command names.
+- Interactive mission picker — `get` and `browse` without `--mission` now show a numbered mission table instead of an error when multiple missions are configured.
+
+### Changed
+
+- `get` output uses `rich.Panel` for summary and result sections instead of scattered `print` calls.
+- `browse` without arguments uses `rich.Table` for the mission listing.
+- Interactive selectors (`get`, `check`, `update`, `coverage`) use styled `console.print` throughout for consistent formatting.
+- CLI docs (`docs/cli.qmd`) updated for all new features.
+
 ## [0.8.1] - 2026-02-19
 
 ### Fixed
@@ -193,6 +212,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.9.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.0...v0.7.1

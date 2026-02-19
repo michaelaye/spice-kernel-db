@@ -67,13 +67,14 @@ Lists each kernel that exists in 2+ locations, showing all paths and missions, w
 Check which kernels from a metakernel are available locally.
 
 ```bash
-spice-kernel-db check [metakernel] [--mission NAME]
+spice-kernel-db check [metakernel] [--mission NAME] [-v]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `metakernel` | Path to a `.tm` file or registry filename. **Omit to select interactively** from locally acquired metakernels. |
 | `--mission` | Mission name for preferred-mission resolution |
+| `-v, --verbose` | Show full per-file warnings instead of compact summary |
 
 ```bash
 # Interactive — pick from local metakernels
@@ -81,9 +82,14 @@ spice-kernel-db check
 
 # Explicit metakernel
 spice-kernel-db check juice_crema_5_1.tm --mission JUICE
+
+# Full per-file warnings
+spice-kernel-db check juice_crema_5_1.tm -v
 ```
 
-Reports found/missing counts, lists missing files, and shows warnings for cross-mission fallbacks.
+Reports found/missing counts, lists missing files, and shows warnings for cross-mission fallbacks. By default, warnings are grouped into a compact summary (dedup resolutions, cross-mission lookups). Use `-v` to see full per-file details.
+
+If the metakernel was fetched from a remote server, `check` also queries the server to see if a newer version is available and prints a notice if so. This adds one HTTP request but does not download anything.
 
 
 ## `rewrite`
@@ -162,12 +168,13 @@ spice-kernel-db dedup --execute
 The canonical copy (the file that symlinks point to) is chosen with a preference for files in the `generic` mission.
 
 
-## `metakernels`
+## `metakernels` (alias: `mk`)
 
 List tracked metakernels or show detailed info about a specific one.
 
 ```bash
 spice-kernel-db metakernels [name] [--mission NAME]
+spice-kernel-db mk [name] [--mission NAME]
 ```
 
 | Option | Description |
@@ -223,6 +230,35 @@ When a filename is given instead of a URL, the tool looks up the mk/ directory U
 The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
 
 
+## `update`
+
+Re-fetch a metakernel from its source URL and download any new or missing kernels.
+
+```bash
+spice-kernel-db update [metakernel] [--mission NAME] [--download-dir DIR] [-y]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Metakernel filename or path. **Omit to select interactively.** |
+| `--mission` | Override mission name |
+| `--download-dir` | Override default kernel storage directory |
+| `-y, --yes` | Skip confirmation prompt |
+
+```bash
+# Interactive selection
+spice-kernel-db update
+
+# By filename
+spice-kernel-db update juice_ops.tm
+
+# Auto-confirm
+spice-kernel-db update juice_ops.tm -y
+```
+
+This is a convenience command that combines looking up the source URL from the metakernel registry and calling `get`. It's the recommended action after `check` or `browse` reports that a remote update is available. Metakernels added via `scan` (without a source URL) cannot be updated this way — use `get` with an explicit URL instead.
+
+
 ## `browse`
 
 Browse remote metakernels in a NAIF mission `mk/` directory, or list known directories.
@@ -268,14 +304,21 @@ Use 'spice-kernel-db browse <url>' to scan a specific directory.
 Remote metakernels: JUICE (https://naif.jpl.nasa.gov/.../mk/)
 
   Metakernel                         Versions  Latest           Local
-  ─────────────────────────────────  ────────  ──────────────── ─────
+  ─────────────────────────────────  ────────  ──────────────── ────────
   juice_crema_5_0.tm                        1  2025-08-15 11:00 no
   juice_ops.tm                              3  2025-11-27 09:30 yes
-  juice_plan.tm                             2  2026-02-02 14:00 no
+  juice_plan.tm                             2  2026-02-02 14:00 outdated
 
   Total: 3 unique | 6 files | 1 locally acquired
+  Run 'spice-kernel-db get <name>' to update outdated metakernels.
   Use --show-versioned to see individual snapshots.
 ```
+
+The **Local** column shows three states:
+
+- **yes** — locally acquired and up to date (or scan-acquired, where remote date is unknown)
+- **outdated** — locally acquired but the remote copy has been modified since acquisition
+- **no** — not acquired locally
 
 With `--show-versioned`, versioned snapshots are listed under each base metakernel:
 

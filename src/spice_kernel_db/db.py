@@ -601,12 +601,14 @@ class KernelDB:
         self,
         mk_path: str | Path,
         mission: str | None = None,
+        verbose: bool = False,
     ) -> dict:
         """Check which kernels from a metakernel are already available.
 
         Args:
             mk_path: Path to the .tm file.
             mission: Mission name for preferred-mission resolution.
+            verbose: If True, print full per-file warnings instead of summary.
 
         Returns:
             dict with keys:
@@ -640,11 +642,84 @@ class KernelDB:
             for m in missing:
                 print(f"    {m}")
         if all_warnings:
-            print("  Warnings:")
-            for w in all_warnings:
-                print(f"    ⚠ {w}")
+            if verbose:
+                print("  Warnings:")
+                for w in all_warnings:
+                    print(f"    ⚠ {w}")
+            else:
+                # Categorise and summarise
+                n_hash = sum(1 for w in all_warnings if "matched by content hash" in w or "matched by hash" in w)
+                n_cross = sum(1 for w in all_warnings if "using copy from" in w)
+                n_other = len(all_warnings) - n_hash - n_cross
+                parts = []
+                if n_hash:
+                    parts.append(f"    Resolved via dedup:     {n_hash} kernels (same content, different filename)")
+                if n_cross:
+                    parts.append(f"    Cross-mission:          {n_cross} kernels")
+                if n_other:
+                    parts.append(f"    Other warnings:         {n_other}")
+                if parts:
+                    print("  Warnings:")
+                    for p in parts:
+                        print(p)
+                    print("    (use -v for full details)")
+
+        # Check for remote updates
+        self._check_remote_staleness(mk_path, mission)
 
         return {"found": found, "missing": missing, "warnings": all_warnings}
+
+    def _check_remote_staleness(
+        self,
+        mk_path: str | Path,
+        mission: str | None,
+    ) -> None:
+        """Print a notice if the remote metakernel is newer than the local copy.
+
+        This is a read-only check — it never downloads. Network errors are
+        silently swallowed so ``check`` keeps working offline.
+        """
+        mk_path_str = str(mk_path)
+        # Look up source_url and acquired_at from registry
+        row = self.con.execute("""
+            SELECT source_url, acquired_at, filename
+            FROM metakernel_registry WHERE mk_path = ?
+        """, [mk_path_str]).fetchone()
+        if not row:
+            return
+        source_url, acquired_at, mk_filename = row
+        if not acquired_at:
+            return
+
+        # Determine mk_dir_url
+        mk_dir_url = None
+        if source_url:
+            mk_dir_url = source_url.rsplit("/", 1)[0] + "/"
+        elif mission:
+            m = self.get_mission(mission)
+            if m and m.get("mk_dir_url"):
+                mk_dir_url = m["mk_dir_url"]
+        if not mk_dir_url:
+            return
+
+        try:
+            entries = list_remote_metakernels(mk_dir_url)
+        except Exception:
+            return
+
+        # Find matching remote entry
+        acq_str = str(acquired_at)[:16]  # "YYYY-MM-DD HH:MM"
+        for entry in entries:
+            if entry.filename == mk_filename:
+                if entry.date > acq_str:
+                    print(
+                        f"\n  Remote update available: server modified {entry.date}"
+                        f" (acquired {acq_str})"
+                    )
+                    print(
+                        f"  Run 'spice-kernel-db update {mk_filename}' to fetch the latest version."
+                    )
+                break
 
     def rewrite_metakernel(
         self,
@@ -794,7 +869,7 @@ class KernelDB:
         download_dir = Path(download_dir).expanduser().resolve()
 
         # 1. Fetch and parse
-        print(f"Fetching {url} ...")
+        console.print(f"Fetching [bold]{url}[/bold] ...")
         text = fetch_metakernel(url)
         parsed = parse_metakernel_text(text, url)
         if mission is None:
@@ -879,19 +954,23 @@ class KernelDB:
             table.add_row(fname, sz_str, f"[{style}]{status}[/{style}]")
         console.print(table)
 
-        print(
-            f"\n  Total: {total} | In DB: {n_found} | "
-            f"Missing: {n_missing} | Download: {_format_size(download_bytes)}"
-        )
+        console.print(Panel(
+            f"Total: [bold]{total}[/bold] | "
+            f"In DB: [green]{n_found}[/green] | "
+            f"Missing: [red]{n_missing}[/red] | "
+            f"Download: [bold]{_format_size(download_bytes)}[/bold]",
+            title=mk_name,
+        ))
 
         if n_missing == 0:
-            print("\n  All kernels already in database.")
             n_linked = self._link_existing_kernels(
                 found_indices, filenames, relpaths, download_dir, mission,
             )
+            lines = ["[green]All kernels already in database.[/green]"]
             if n_linked:
-                print(f"  Linked {n_linked} existing kernels into download tree.")
-            print(f"\n  Metakernel ready: {mk_dest}")
+                lines.append(f"Linked {n_linked} existing kernels into download tree.")
+            lines.append(f"\nMetakernel ready: [bold]{mk_dest}[/bold]")
+            console.print(Panel("\n".join(lines), title="Result"))
             return {
                 "found": found_indices,
                 "missing": [],
@@ -906,13 +985,15 @@ class KernelDB:
                 f"({_format_size(download_bytes)})? [y/N]: "
             ).strip().lower()
             if answer not in ("y", "yes"):
-                print("Aborted.")
+                console.print("[dim]Aborted.[/dim]")
                 n_linked = self._link_existing_kernels(
                     found_indices, filenames, relpaths, download_dir, mission,
                 )
+                lines = []
                 if n_linked:
-                    print(f"  Linked {n_linked} existing kernels into download tree.")
-                print(f"\n  Metakernel ready: {mk_dest}")
+                    lines.append(f"Linked {n_linked} existing kernels into download tree.")
+                lines.append(f"Metakernel ready: [bold]{mk_dest}[/bold]")
+                console.print(Panel("\n".join(lines), title="Result"))
                 return {
                     "found": found_indices,
                     "missing": missing_indices,
@@ -938,7 +1019,7 @@ class KernelDB:
             task_info[fname] = kurl
 
         if already_on_disk:
-            print(f"\n  Skipped: {len(already_on_disk)} already downloaded")
+            console.print(f"  [dim]Skipped: {len(already_on_disk)} already downloaded[/dim]")
             download_bytes -= sum(f.stat().st_size for f in already_on_disk)
 
         dl_paths, warnings = download_kernels_parallel(
@@ -952,18 +1033,21 @@ class KernelDB:
             self.register_file(dest, mission=mission, source_url=kurl)
             downloaded.append(str(dest))
 
-        print(f"\n  Downloaded: {len(dl_paths)}/{n_missing}")
-        if warnings:
-            for w in warnings:
-                print(f"  ⚠ {w}")
-
         # 8. Create symlinks for "in db" kernels so the metakernel works locally
         n_linked = self._link_existing_kernels(
             found_indices, filenames, relpaths, download_dir, mission,
         )
+
+        lines = [f"Downloaded: [bold]{len(dl_paths)}/{n_missing}[/bold]"]
+        if already_on_disk:
+            lines.append(f"Skipped:    {len(already_on_disk)} (already on disk)")
         if n_linked:
-            print(f"  Linked {n_linked} existing kernels into download tree.")
-        print(f"\n  Metakernel ready: {mk_dest}")
+            lines.append(f"Linked:     {n_linked} existing kernels")
+        if warnings:
+            for w in warnings:
+                lines.append(f"[yellow]⚠ {w}[/yellow]")
+        lines.append(f"\nMetakernel ready: [bold]{mk_dest}[/bold]")
+        console.print(Panel("\n".join(lines), title="Result"))
 
         return {
             "found": found_indices,
@@ -971,6 +1055,65 @@ class KernelDB:
             "downloaded": downloaded,
             "warnings": warnings,
         }
+
+    # ------------------------------------------------------------------
+    # Update (re-fetch remote metakernel)
+    # ------------------------------------------------------------------
+
+    def update_metakernel(
+        self,
+        mk_path_or_name: str | Path,
+        mission: str | None = None,
+        download_dir: str | Path | None = None,
+        yes: bool = False,
+    ) -> dict:
+        """Re-fetch a metakernel from its source URL and download new kernels.
+
+        Looks up the source URL from ``metakernel_registry``, falling back to
+        the mission's ``mk_dir_url`` + filename if no source URL is stored.
+
+        Args:
+            mk_path_or_name: mk_path or filename of a registered metakernel.
+            mission: Override mission name.
+            download_dir: Override kernel download directory.
+            yes: Skip confirmation prompt.
+
+        Returns:
+            dict from ``get_metakernel``.
+        """
+        # Look up by mk_path first, then by filename
+        row = self.con.execute("""
+            SELECT mk_path, source_url, filename, mission
+            FROM metakernel_registry
+            WHERE mk_path = ? OR filename = ?
+        """, [str(mk_path_or_name), str(mk_path_or_name)]).fetchone()
+
+        if not row:
+            print(f"Metakernel not found in registry: {mk_path_or_name}", file=sys.stderr)
+            sys.exit(1)
+
+        mk_path, source_url, mk_filename, reg_mission = row
+        mission = mission or reg_mission
+
+        if not source_url:
+            # Try to derive from mission's mk_dir_url
+            m = self.get_mission(mission) if mission else None
+            if m and m.get("mk_dir_url"):
+                source_url = m["mk_dir_url"] + mk_filename
+            else:
+                print(
+                    f"This metakernel was added via scan, not downloaded. "
+                    f"Use 'get' with a URL.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        return self.get_metakernel(
+            source_url,
+            download_dir=download_dir,
+            mission=mission,
+            yes=yes,
+        )
 
     # ------------------------------------------------------------------
     # Metakernel listing / info
@@ -1196,22 +1339,38 @@ class KernelDB:
         for entry in entries:
             groups[entry.base_name].append(entry)
 
-        # Get locally acquired metakernel filenames for this mission
+        # Get locally acquired metakernels with acquired_at for this mission
         if mission:
             local_rows = self.con.execute(
-                "SELECT filename FROM metakernel_registry WHERE LOWER(mission) LIKE LOWER(?) || '%'",
+                "SELECT filename, source_url, acquired_at FROM metakernel_registry WHERE LOWER(mission) LIKE LOWER(?) || '%'",
                 [mission],
             ).fetchall()
         else:
             local_rows = []
-        local_filenames = {r[0] for r in local_rows}
+        local_info: dict[str, tuple[str | None, str | None]] = {}  # filename -> (source_url, acquired_at_str)
+        for fname, source_url, acquired_at in local_rows:
+            acq_str = str(acquired_at)[:16] if acquired_at else None  # "YYYY-MM-DD HH:MM"
+            local_info[fname] = (source_url, acq_str)
 
         results: list[dict] = []
+        has_outdated = False
         for base_name in sorted(groups):
             group = groups[base_name]
             latest_date = max(e.date for e in group)
-            # A base MK is "local" if any file in its group has been acquired
-            is_local = any(e.filename in local_filenames for e in group)
+            # Determine local status: "yes", "outdated", or "no"
+            local_status = "no"
+            for e in group:
+                if e.filename in local_info:
+                    source_url, acq_str = local_info[e.filename]
+                    if source_url is None:
+                        # Scan-acquired — can't determine staleness
+                        local_status = "yes"
+                    elif acq_str is None or e.date > acq_str:
+                        local_status = "outdated"
+                        has_outdated = True
+                    else:
+                        local_status = "yes"
+                    break
             # Separate current (no version tag) from versioned snapshots
             current = [e for e in group if e.version_tag is None]
             versioned = sorted(
@@ -1222,7 +1381,8 @@ class KernelDB:
                 "base_name": base_name,
                 "n_versions": len(group),
                 "latest_date": latest_date,
-                "is_local": is_local,
+                "is_local": local_status != "no",
+                "local_status": local_status,
                 "filenames": [e.filename for e in group],
                 "current": current,
                 "versioned": versioned,
@@ -1244,6 +1404,11 @@ class KernelDB:
             print("  No .tm files found.")
             return results
 
+        def _local_str(status: str) -> str:
+            if status == "outdated":
+                return "[yellow]outdated[/yellow]"
+            return status
+
         if show_versioned:
             # Expanded view: show each file, versioned snapshots indented
             table = Table()
@@ -1252,12 +1417,12 @@ class KernelDB:
             table.add_column("Size", justify="right")
             table.add_column("Local")
             for r in results:
-                local_str = "yes" if r["is_local"] else "no"
+                ls = _local_str(r["local_status"])
                 if r["current"]:
                     e = r["current"][0]
-                    table.add_row(e.filename, e.date, e.size, local_str)
+                    table.add_row(e.filename, e.date, e.size, ls)
                 else:
-                    table.add_row(r["base_name"], r["latest_date"], "", local_str)
+                    table.add_row(r["base_name"], r["latest_date"], "", ls)
                 for e in r["versioned"]:
                     table.add_row(
                         f"  [dim]snapshot: {e.filename}[/dim]",
@@ -1273,10 +1438,10 @@ class KernelDB:
             table.add_column("Latest")
             table.add_column("Local")
             for r in results:
-                local_str = "yes" if r["is_local"] else "no"
+                ls = _local_str(r["local_status"])
                 table.add_row(
                     r["base_name"], str(r["n_versions"]),
-                    r["latest_date"], local_str,
+                    r["latest_date"], ls,
                 )
             console.print(table)
 
@@ -1284,6 +1449,8 @@ class KernelDB:
             f"\n  Total: {n_unique} unique | {n_files} files"
             f" | {n_local} locally acquired"
         )
+        if has_outdated:
+            print("  Run 'spice-kernel-db get <name>' to update outdated metakernels.")
         if not show_versioned and n_files > n_unique:
             print("  Use --show-versioned to also show the identical but versioned snapshot metakernels.")
         print()
