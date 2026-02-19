@@ -435,7 +435,9 @@ class KernelDB:
         # e.g. 'jup365_19900101_20500101' -> try 'jup365%'
         stem = Path(filename).stem
         ext = Path(filename).suffix
-        # Progressively shorten: split on _ and try each prefix
+        # Progressively shorten: split on _ and try each prefix.
+        # Filter by extension (case-insensitive) to avoid cross-type matches
+        # (e.g. a .bsp query must not match a .tm file with the same prefix).
         parts = stem.split("_")
         for n in range(len(parts), 0, -1):
             prefix = "_".join(parts[:n])
@@ -448,8 +450,9 @@ class KernelDB:
                 FROM kernels k
                 JOIN locations l ON k.sha256 = l.sha256
                 WHERE k.filename LIKE ?
+                  AND LOWER(k.filename) LIKE '%' || LOWER(?)
                 ORDER BY l.mission
-            """, [pattern]).fetchall()
+            """, [pattern, ext]).fetchall()
             if rows:
                 return [
                     {"sha256": r[0], "abs_path": r[1], "mission": r[2],

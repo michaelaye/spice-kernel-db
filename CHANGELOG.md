@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-02-19
+
+### Fixed
+
+- Fuzzy kernel resolution no longer matches across file types. Previously, searching for a `.bsp` file could match a `.tm` metakernel with the same name prefix (e.g. `juice_crema_5_1_150lb_23_1_a3_2_v01.bsp` resolved to `juice_crema_5_1_150lb_23_1_a3_2.tm`). This caused `coverage` to feed a text metakernel to SpiceyPy's `spkcov` as if it were a binary SPK, triggering `SPICE(INVALIDARCHITECTURE)`. The fuzzy query now filters by file extension (case-insensitive), so `.bsp` queries only match `.bsp` files.
+
 ## [0.8.0] - 2026-02-19
 
 ### Added
@@ -187,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.8.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.6.0...v0.7.0
