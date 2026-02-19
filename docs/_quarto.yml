@@ -17,6 +17,8 @@ website:
         text: Design
       - href: usage.qmd
         text: Usage Guide
+      - href: coverage.qmd
+        text: Coverage
       - href: cli.qmd
         text: CLI Reference
       - href: api.qmd
@@ -28,8 +30,8 @@ website:
 format:
   html:
     theme:
-      light: [cosmo, custom.scss]
-      dark: [darkly, custom.scss]
+      light: [sandstone, custom.scss]
+      dark: [superhero, custom.scss]
     toc: true
     toc-depth: 3
     code-copy: true

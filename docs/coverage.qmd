@@ -1,0 +1,153 @@
+---
+title: "Coverage"
+subtitle: "Checking body ephemeris coverage"
+---
+
+## Overview
+
+The `coverage` command checks whether a metakernel's SPK (ephemeris) files contain data for a specific NAIF body ID. This is useful for answering questions like:
+
+- Does this metakernel have trajectory data for 3I/ATLAS?
+- Which SPK files cover Earth's ephemeris?
+- Are there any gaps in coverage for Jupiter?
+
+Under the hood, it uses SpiceyPy's `spkcov` function to query each `.bsp` file directly, without loading the full kernel pool.
+
+## Prerequisites
+
+SpiceyPy is an **optional** dependency. Install it with:
+
+```bash
+pip install spice-kernel-db[spice]
+```
+
+If SpiceyPy is not installed, the `coverage` command prints an install instruction and exits.
+
+## CLI usage
+
+```bash
+spice-kernel-db coverage <body> [metakernel] [--mission NAME]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `body` | NAIF body ID (e.g. `399`) **or** body name (e.g. `Earth`) |
+| `metakernel` | Path to a `.tm` file, or a registry filename. **Omit to select interactively** from locally acquired metakernels. |
+| `--mission` | Optional: prefer kernels from this mission during resolution |
+
+Body names are case-insensitive. When a name matches multiple NAIF IDs (e.g. "Earth" matches both Earth body center 399 and Earth-Moon Barycenter 3), you are prompted to choose.
+
+When the metakernel is omitted, the command lists all locally acquired metakernels and lets you pick one. If none are available, it suggests using `browse` and `get` to fetch some first.
+
+### Examples
+
+```bash
+# Interactive — pick from local metakernels
+spice-kernel-db coverage Earth
+
+# Explicit metakernel
+spice-kernel-db coverage Earth juice_ops.tm --mission JUICE
+
+# Numeric ID — no body disambiguation prompt
+spice-kernel-db coverage 399 juice_ops.tm --mission JUICE
+
+# Unambiguous name — no body prompt needed
+spice-kernel-db coverage Moon juice_ops.tm --mission JUICE
+
+# Check for 3I/ATLAS
+spice-kernel-db coverage 3i/atlas /path/to/metakernel.tm
+```
+
+If you have no local metakernels yet:
+
+```bash
+# Browse what's available for a mission
+spice-kernel-db browse JUICE
+
+# Download one
+spice-kernel-db get juice_ops.tm --mission JUICE
+
+# Then check coverage
+spice-kernel-db coverage Earth
+```
+
+## Understanding the output
+
+The command prints two things:
+
+1. **Summary panel** — body ID, metakernel name, number of SPK files, and how many contain data for the requested body.
+
+2. **Coverage table** with columns:
+
+| Column | Meaning |
+|--------|---------|
+| Kernel | Filename of the kernel |
+| Type | SPICE kernel type (spk, lsk, fk, etc.) |
+| Coverage | `yes` if body found, `not found` if not, `N/A` for non-SPK kernels |
+| Start (UTC) | Start of coverage interval (UTC if LSK available, else ET) |
+| End (UTC) | End of coverage interval |
+
+**Gaps:** If an SPK file has a gap in coverage (e.g. covers 2020--2022 and 2024--2026 but not 2023), multiple rows appear for that file. The additional rows show `gap` in the Coverage column.
+
+**Non-SPK kernels** (LSK, FK, CK, etc.) show `N/A` — only `.bsp` files contain ephemeris data.
+
+## The kernel_coverage table
+
+Coverage results are automatically cached in the database's `kernel_coverage` table. Since kernels are content-addressed (identified by SHA-256), coverage data computed once is reusable across missions and sessions.
+
+The table stores individual intervals per body per kernel:
+
+```
+sha256 | body_id | interval_index | et_start | et_end
+```
+
+## Finding kernels for a body (future)
+
+The cached coverage data enables future queries like:
+
+```python
+# Which kernels cover Earth during the first half of 2025?
+db.query_coverage(body_id=399, et_start=..., et_end=...)
+```
+
+A CLI command for this (`find-kernels`) is planned for a future release.
+
+## Python API
+
+```python
+from spice_kernel_db import KernelDB
+from spice_kernel_db.coverage import resolve_body_id
+
+# Resolve a body name to NAIF IDs
+candidates = resolve_body_id("Earth")
+# → [(399, 'Earth'), (3, 'Earth-Moon Barycenter')]
+
+db = KernelDB()
+results = db.coverage_metakernel("juice_ops.tm", body_id=399, mission="JUICE")
+
+for r in results:
+    if r.body_found:
+        print(f"{r.filename}: {len(r.intervals)} interval(s)")
+        for iv in r.intervals:
+            print(f"  {iv.utc_start} — {iv.utc_end}")
+```
+
+## Common NAIF body IDs
+
+| Body | NAIF ID |
+|------|---------|
+| Sun | 10 |
+| Mercury | 199 |
+| Venus | 299 |
+| Earth | 399 |
+| Mars | 499 |
+| Jupiter | 599 |
+| Saturn | 699 |
+| Uranus | 799 |
+| Neptune | 899 |
+| Moon | 301 |
+| Ganymede | 503 |
+| Europa | 502 |
+| 3I/ATLAS | 1004083 (SPK) / 90004923 (record) |
+
+For a complete list, see the [NAIF body ID page](https://naif.jpl.nasa.gov/pub/naif/toolkit_docs/C/req/naif_ids.html).

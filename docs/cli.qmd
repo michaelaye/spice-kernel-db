@@ -67,15 +67,19 @@ Lists each kernel that exists in 2+ locations, showing all paths and missions, w
 Check which kernels from a metakernel are available locally.
 
 ```bash
-spice-kernel-db check <metakernel> [--mission NAME]
+spice-kernel-db check [metakernel] [--mission NAME]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `metakernel` | Path to the `.tm` file |
+| `metakernel` | Path to a `.tm` file or registry filename. **Omit to select interactively** from locally acquired metakernels. |
 | `--mission` | Mission name for preferred-mission resolution |
 
 ```bash
+# Interactive — pick from local metakernels
+spice-kernel-db check
+
+# Explicit metakernel
 spice-kernel-db check juice_crema_5_1.tm --mission JUICE
 ```
 
@@ -280,6 +284,31 @@ With `--show-versioned`, versioned snapshots are listed under each base metakern
     snapshot: juice_ops_v230_20221128_001.tm   2022-11-28 10:00     8K
     snapshot: juice_ops_v461_20251127_001.tm   2025-11-27 09:30    12K
 ```
+
+
+## `coverage`
+
+Check SPK body coverage in a metakernel. See the [Coverage](coverage.qmd) page for full details.
+
+```bash
+spice-kernel-db coverage <body> [metakernel] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `body` | NAIF body ID (e.g. `399`) or body name (e.g. `Earth`) |
+| `metakernel` | Path to a `.tm` file or registry filename. Omit to select interactively. |
+| `--mission` | Mission name for preferred-mission resolution |
+
+```bash
+# Interactive — pick metakernel, resolve body name
+spice-kernel-db coverage Earth
+
+# Explicit
+spice-kernel-db coverage 399 juice_ops.tm --mission JUICE
+```
+
+Requires the optional `spiceypy` dependency: `pip install spice-kernel-db[spice]`
 
 
 ## `mission`
