@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-02-19
+
+### Added
+
+- `coverage` CLI command and `coverage_metakernel()` API for checking SPK body coverage in metakernels. Uses SpiceyPy's `spkcov` to report which SPK files contain data for a given NAIF body, including gap detection.
+- `kernel_coverage` database table caching body coverage intervals per kernel (content-addressed by SHA-256, reusable across sessions).
+- Body name resolution — `coverage` accepts ASCII names like `Earth` or `3i/atlas` in addition to numeric NAIF IDs. Ambiguous names (e.g. "earth" → body center vs barycenter) prompt for disambiguation.
+- `NAIF_BODIES` lookup table with 30+ common solar system bodies.
+- `store_coverage()` and `query_coverage()` API methods for persisting and querying coverage data.
+- SpiceyPy as optional dependency: `pip install spice-kernel-db[spice]`
+- Coverage documentation page (`docs/coverage.qmd`)
+- Interactive metakernel selection for `check` and `coverage` commands — omit the metakernel argument to pick from locally acquired metakernels, with hints to `browse`/`get` when none are available.
+
+### Changed
+
+- Quarto documentation theme: sandstone (light) + superhero (dark) with dark-mode table styling.
+- `check` metakernel argument is now optional (interactive selection when omitted).
+- CLI helpers refactored: `_require_metakernel()` and `_resolve_body_interactive()` extracted to avoid code duplication.
+- Coverage time display uses compact `YYYY-MON-DD HR:MN` format instead of fractional seconds.
+- Coverage table Kernel column uses `no_wrap` for full filename visibility.
+- Coverage table error messages truncated to key SPICE error instead of full traceback.
+- Test suite expanded from 95 to 114 tests.
+
 ## [0.7.1] - 2026-02-09
 
 ### Fixed
@@ -164,6 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.8.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.5.0...v0.6.0
