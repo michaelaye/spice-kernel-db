@@ -1,0 +1,46 @@
+{% set version = "0.9.0" %}
+
+package:
+  name: spice-kernel-db
+  version: {{ version }}
+
+source:
+  url: https://pypi.org/packages/source/s/spice-kernel-db/spice_kernel_db-{{ version }}.tar.gz
+  sha256: a596121ce76e04324a98dd810dd3278769b9e6b3f7477dc39836e58b2e59defa
+
+build:
+  entry_points:
+    - spice-kernel-db = spice_kernel_db.cli:main
+  noarch: python
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  number: 0
+
+requirements:
+  host:
+    - python >=3.11
+    - hatchling
+    - pip
+  run:
+    - python >=3.11
+    - python-duckdb >=1.0
+    - rich >=13.0
+
+test:
+  imports:
+    - spice_kernel_db
+  commands:
+    - pip check
+    - spice-kernel-db --help
+  requires:
+    - pip
+    - python
+
+about:
+  home: https://github.com/michaelaye/spice-kernel-db
+  summary: Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives
+  license: MIT
+  license_file: LICENSE
+
+extra:
+  recipe-maintainers:
+    - michaelaye

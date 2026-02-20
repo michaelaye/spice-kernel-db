@@ -70,8 +70,17 @@ Tests use `pytest-tmp-files` for temporary directory fixtures. The main fixture 
 
 **IMPORTANT: Always update the changelog when bumping the version. Never commit a version bump without a corresponding changelog entry.**
 
-1. Update version in `pyproject.toml`
-2. Add entry to `CHANGELOG.md` (Keep a Changelog format)
-3. Add comparison link at bottom of changelog
-4. Commit as "Bump version to X.Y.Z and add changelog"
-5. Build and publish: `rm -rf dist/ && python -m build && python -m twine upload dist/*`
+1. Commit all changes with descriptive messages
+2. Update version in `pyproject.toml` (minor for features, patch for fixes)
+3. Add entry to `CHANGELOG.md` (Keep a Changelog format) with comparison link at bottom
+4. Commit as "Bump version to X.Y.Z: brief description"
+5. Push to GitHub: `git push`
+6. Publish to PyPI: `rm -rf dist/ && python -m build && python -m twine upload dist/*`
+7. Create GitHub release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."`
+8. Build conda package: `grayskull pypi spice-kernel-db` (in /tmp), then `conda-build /tmp/spice-kernel-db --output-folder /tmp/conda-output --no-anaconda-upload`
+9. Upload to anaconda.org: `anaconda --site anaconda upload /tmp/conda-output/noarch/spice-kernel-db-X.Y.Z-py_0.conda`
+
+**Notes:**
+- The `--site anaconda` flag is required for `anaconda` commands (bypasses an interactive prompt that fails in non-TTY environments)
+- `grayskull`, `conda-build`, and `anaconda-client` are installed in the `py314` conda env
+- The conda recipe maintainer in `meta.yaml` should be `michaelaye` (grayskull defaults to a placeholder)

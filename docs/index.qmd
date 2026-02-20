@@ -19,6 +19,12 @@ After acquisition, the metakernel is immediately usable — existing kernels alr
 pip install spice-kernel-db
 ```
 
+Or with conda:
+
+```bash
+conda install -c michaelaye spice-kernel-db
+```
+
 From source:
 
 ```bash

@@ -24,6 +24,12 @@ Full documentation is at [michaelaye.github.io/spice-kernel-db](https://michaela
 pip install spice-kernel-db
 ```
 
+Or with conda:
+
+```bash
+conda install -c michaelaye spice-kernel-db
+```
+
 Or from source:
 
 ```bash
