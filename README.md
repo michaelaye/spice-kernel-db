@@ -62,9 +62,11 @@ Downloads the metakernel, checks which kernels you already have, downloads the m
 
 ```python
 import spiceypy as spice
+from spice_kernel_db import KernelDB
 
-# The metakernel is ready to use
-spice.furnsh("~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm")
+db = KernelDB()
+mks = db.list_metakernels(mission="JUICE")
+spice.furnsh(mks[0]["mk_path"])
 ```
 
 ### Python API
@@ -104,7 +106,7 @@ Both use the same `<server>/<MISSION>/kernels/mk/` directory structure.
 
 - Python >= 3.10
 - [DuckDB](https://duckdb.org/) >= 1.0
-- [tqdm](https://tqdm.github.io/) >= 4.60
+- [rich](https://rich.readthedocs.io/) >= 13.0
 
 ## License
 
