@@ -1066,10 +1066,16 @@ class KernelDB:
         filenames = parsed.kernel_filenames()
 
         # 3. Check local DB for each kernel
+        # When dedup is disabled for this mission, skip DB lookups and
+        # download every kernel fresh — no symlinks to existing copies.
+        mission_dedup = True
+        if m:
+            mission_dedup = m.get("dedup", True)
+
         found_indices: list[int] = []
         missing_indices: list[int] = []
-        if force:
-            # Force mode: treat everything as missing
+        if force or not mission_dedup:
+            # Force / no-dedup: treat everything as missing, download fresh
             missing_indices = list(range(len(filenames)))
         else:
             for i, fname in enumerate(filenames):
@@ -1125,9 +1131,11 @@ class KernelDB:
         ))
 
         if n_missing == 0:
-            n_linked = self._link_existing_kernels(
-                found_indices, filenames, relpaths, download_dir, mission,
-            )
+            n_linked = 0
+            if mission_dedup:
+                n_linked = self._link_existing_kernels(
+                    found_indices, filenames, relpaths, download_dir, mission,
+                )
             lines = ["[green]All kernels already in database.[/green]"]
             if n_linked:
                 lines.append(f"Linked {n_linked} existing kernels into download tree.")
@@ -1148,9 +1156,11 @@ class KernelDB:
             ).strip().lower()
             if answer not in ("y", "yes"):
                 console.print("[dim]Aborted.[/dim]")
-                n_linked = self._link_existing_kernels(
-                    found_indices, filenames, relpaths, download_dir, mission,
-                )
+                n_linked = 0
+                if mission_dedup and found_indices:
+                    n_linked = self._link_existing_kernels(
+                        found_indices, filenames, relpaths, download_dir, mission,
+                    )
                 lines = []
                 if n_linked:
                     lines.append(f"Linked {n_linked} existing kernels into download tree.")
@@ -1211,9 +1221,12 @@ class KernelDB:
             downloaded.append(str(dest))
 
         # 8. Create symlinks for "in db" kernels so the metakernel works locally
-        n_linked = self._link_existing_kernels(
-            found_indices, filenames, relpaths, download_dir, mission,
-        )
+        # Only when dedup is enabled — otherwise all kernels were downloaded fresh.
+        n_linked = 0
+        if mission_dedup and found_indices:
+            n_linked = self._link_existing_kernels(
+                found_indices, filenames, relpaths, download_dir, mission,
+            )
 
         lines = [f"Downloaded: [bold]{len(dl_paths)}/{n_missing}[/bold]"]
         if already_on_disk:

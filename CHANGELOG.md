@@ -16,11 +16,14 @@ create symlinks between completely different SPICE kernel files. This caused
 data (e.g., a different mission trajectory), producing plausible but incorrect
 results with no error messages.
 
-**Who is affected:** This bug only triggers during `get` and `update` operations,
-which create symlinks for kernels already in the database. The fuzzy match could
-link to the wrong file when kernel filenames shared a common prefix (e.g., all
-JUICE kernels start with `juice_`). Users who only used `scan` and `resolve`
-without the download/update workflow are **not affected**.
+**Who is affected:** This bug only triggers when deduplication is enabled (the
+default) and `get` or `update` is used. The dedup logic creates symlinks for
+kernels already in the database instead of re-downloading them, and the fuzzy
+match could link to the wrong file when kernel filenames shared a common prefix
+(e.g., all JUICE kernels start with `juice_`). Users with `dedup=False` or who
+only used `scan` and `resolve` are **not affected**. Additionally, v0.10.0 now
+correctly gates all symlink creation on the per-mission `dedup` setting —
+previously `_link_existing_kernels` ignored this setting entirely.
 
 **Impact:** Any kernel directory managed by `spice-kernel-db` prior to 0.10.0
 may contain corrupted symlinks. After updating, run:
