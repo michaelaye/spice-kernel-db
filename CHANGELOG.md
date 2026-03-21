@@ -14,9 +14,13 @@ fuzzy filename matching algorithm in `resolve_kernel()` that could silently
 create symlinks between completely different SPICE kernel files. This caused
 **silent scientific data corruption** — SPICE loaded valid but *wrong* kernel
 data (e.g., a different mission trajectory), producing plausible but incorrect
-results with no error messages. The bug was triggered during `get` and `update`
-operations when kernel filenames shared a common prefix (e.g., all JUICE kernels
-start with `juice_`).
+results with no error messages.
+
+**Who is affected:** This bug only triggers during `get` and `update` operations,
+which create symlinks for kernels already in the database. The fuzzy match could
+link to the wrong file when kernel filenames shared a common prefix (e.g., all
+JUICE kernels start with `juice_`). Users who only used `scan` and `resolve`
+without the download/update workflow are **not affected**.
 
 **Impact:** Any kernel directory managed by `spice-kernel-db` prior to 0.10.0
 may contain corrupted symlinks. After updating, run:

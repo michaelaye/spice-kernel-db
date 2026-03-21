@@ -7,9 +7,13 @@ Browse, get, and manage SPICE kernels and metakernels across NASA and ESA missio
 > **⚠️ CRITICAL: Update to v0.10.0 or later.** Versions before 0.10.0 contained a
 > fuzzy filename matching bug that could silently create symlinks between
 > *completely different* SPICE kernel files, causing **silent scientific data
-> corruption** — SPICE loads valid but *wrong* data with no errors. After updating,
-> remove all symlinks in your kernel directories and re-run `spice-kernel-db update`.
-> See [CHANGELOG.md](CHANGELOG.md) for details and recovery steps.
+> corruption** — SPICE loads valid but *wrong* data with no errors. **This bug
+> only affects users who downloaded or updated metakernels via `spice-kernel-db get`
+> or `spice-kernel-db update`** — these commands create symlinks for kernels already
+> in the database, and the fuzzy match could link to the wrong file. Users who only
+> used `scan` and `resolve` without the download workflow are not affected.
+> After updating, remove all symlinks in your kernel directories and re-run
+> `spice-kernel-db update`. See [CHANGELOG.md](CHANGELOG.md) for recovery steps.
 
 ## What this tool does
 
