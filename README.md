@@ -7,11 +7,10 @@ Browse, get, and manage SPICE kernels and metakernels across NASA and ESA missio
 > **⚠️ CRITICAL: Update to v0.10.0 or later.** Versions before 0.10.0 contained a
 > fuzzy filename matching bug that could silently create symlinks between
 > *completely different* SPICE kernel files, causing **silent scientific data
-> corruption** — SPICE loads valid but *wrong* data with no errors. **This bug
-> only affects users who had deduplication enabled** (the default) **for a mission
-> and used `spice-kernel-db get` or `spice-kernel-db update`**. The dedup logic
-> created symlinks for kernels already in the database, and the fuzzy match could
-> link to the wrong file. Users with `dedup=False` or who only used `scan` and
+> corruption** — SPICE loads valid but *wrong* data with no errors. **All users
+> who used `spice-kernel-db get` or `spice-kernel-db update` are affected**,
+> regardless of the dedup setting — the symlink creation code did not honor the
+> per-mission dedup flag (also fixed in 0.10.0). Users who only used `scan` and
 > `resolve` are not affected. After updating, remove all symlinks in your kernel
 > directories and re-run `spice-kernel-db update`. See [CHANGELOG.md](CHANGELOG.md)
 > for recovery steps.
