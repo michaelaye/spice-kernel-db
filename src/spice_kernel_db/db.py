@@ -53,6 +53,50 @@ from spice_kernel_db.remote import (
 logger = logging.getLogger(__name__)
 
 
+def _validate_path_values(
+    path_values: list[str],
+    mk_dir: Path,
+    download_dir: Path,
+) -> None:
+    """Validate that resolved PATH_VALUES stay within download_dir.
+
+    Raises ValueError if any resolved path escapes the download directory.
+    This prevents path traversal attacks via malicious metakernels.
+    """
+    for v in path_values:
+        resolved = (mk_dir / v).resolve()
+        try:
+            resolved.relative_to(download_dir)
+        except ValueError:
+            raise ValueError(
+                f"PATH_VALUE '{v}' resolves to {resolved} which is "
+                f"outside download directory {download_dir}"
+            )
+
+
+def _should_skip_download(
+    dest: Path,
+    remote_size: int | None,
+    db_hash: str | None,
+    force: bool,
+) -> bool:
+    """Check whether a file on disk can be skipped (already correct).
+
+    Returns True only if the file exists, size matches remote, AND
+    the SHA-256 hash matches the database record.
+    """
+    if force:
+        return False
+    if not dest.is_file():
+        return False
+    if not remote_size or dest.stat().st_size != remote_size:
+        return False
+    if not db_hash:
+        return False
+    actual_hash = sha256_file(dest)
+    return actual_hash == db_hash
+
+
 def _format_size(n: int) -> str:
     """Format byte count as human-readable string."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -76,14 +120,29 @@ class KernelDB:
     can reference the same hash — that's how duplicates are detected.
     """
 
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(self, db_path: str | Path | None = None, read_only: bool = False):
         if db_path is None:
             from spice_kernel_db.config import load_config
             config = load_config()
             db_path = config.db_path if config else "~/.spice_kernels.duckdb"
         self.db_path = str(Path(db_path).expanduser())
-        self.con = duckdb.connect(self.db_path)
-        self._init_schema()
+        self.read_only = read_only
+        self.con = duckdb.connect(self.db_path, read_only=read_only)
+        if not read_only:
+            self._init_schema()
+
+    def release(self):
+        """Close the DB connection to release the lock.
+
+        Use before long-running operations (downloads) so other
+        processes can read the DB. Call :meth:`reacquire` to reopen.
+        """
+        self.con.close()
+        self.con = None
+
+    def reacquire(self):
+        """Reopen the DB connection after :meth:`release`."""
+        self.con = duckdb.connect(self.db_path, read_only=self.read_only)
 
     def _init_schema(self):
         self.con.execute("""
@@ -246,6 +305,7 @@ class KernelDB:
         mission: str | None = None,
         source_url: str | None = None,
         archive_dir: str | Path | None = None,
+        expected_hash: str | None = None,
     ) -> str:
         """Register a single kernel file. Returns its SHA-256.
 
@@ -258,12 +318,22 @@ class KernelDB:
         If ``archive_dir`` is set, the file is moved to
         ``archive_dir/mission/kernel_type/filename`` and a symlink is left
         at the original location.
+
+        If ``expected_hash`` is provided, the computed hash is verified
+        against it before storing. Raises ValueError on mismatch (Issue 7).
         """
         p = Path(path).resolve()
         if not p.is_file():
             raise FileNotFoundError(p)
 
         h = sha256_file(p)
+
+        # Issue 7: Verify expected hash if provided
+        if expected_hash is not None and h != expected_hash:
+            raise ValueError(
+                f"Hash mismatch for {p.name}: computed {h[:16]}..., "
+                f"expected {expected_hash[:16]}..."
+            )
         fname = p.name
         ktype = classify_kernel(fname)
         size = p.stat().st_size
@@ -292,10 +362,27 @@ class KernelDB:
         ).fetchone()
 
         if existing is None:
-            self.con.execute(
-                "INSERT INTO kernels VALUES (?, ?, ?, ?)",
-                [h, fname, ktype, size],
-            )
+            # Issue 11: Check if same filename exists with different hash
+            existing_by_name = self.con.execute(
+                "SELECT sha256 FROM kernels WHERE filename = ?", [fname]
+            ).fetchone()
+            if existing_by_name and existing_by_name[0] != h:
+                old_hash = existing_by_name[0]
+                logger.warning(
+                    "Kernel %s hash changed: %s -> %s. "
+                    "Updating to new version (old record preserved).",
+                    fname, old_hash[:16], h[:16],
+                )
+                # Insert the new hash record (old one remains for history)
+                self.con.execute(
+                    "INSERT INTO kernels VALUES (?, ?, ?, ?)",
+                    [h, fname, ktype, size],
+                )
+            else:
+                self.con.execute(
+                    "INSERT INTO kernels VALUES (?, ?, ?, ?)",
+                    [h, fname, ktype, size],
+                )
         elif existing[0] != fname:
             logger.info(
                 "Hash match: %s is identical to already-registered %s",
@@ -329,6 +416,7 @@ class KernelDB:
 
         root = Path(root).expanduser().resolve()
         count = 0
+        error_count = 0
         missions_found: set[str] = set()
         mk_files: list[tuple[Path, str]] = []  # (path, mission)
         for p in sorted(root.rglob("*")):
@@ -344,8 +432,16 @@ class KernelDB:
                         print(f"  registered: {p.name}")
                     if p.suffix.lower() == ".tm":
                         mk_files.append((p, m))
-                except Exception as e:
+                except (PermissionError, MemoryError, KeyboardInterrupt):
+                    # Issue 8: Re-raise fatal errors
+                    raise
+                except OSError as e:
+                    # Issue 8: Catch non-fatal OS errors (file not found, etc.)
+                    error_count += 1
                     logger.warning("Could not register %s: %s", p, e)
+                except Exception:
+                    # Issue 8: Re-raise unexpected exceptions
+                    raise
 
         # Index metakernels into the registry
         for mk_path, m in mk_files:
@@ -355,12 +451,19 @@ class KernelDB:
                     INSERT OR REPLACE INTO metakernel_registry
                     VALUES (?, ?, NULL, ?, current_timestamp)
                 """, [str(mk_path), m, mk_path.name])
-            except Exception as e:
+            except (PermissionError, MemoryError, KeyboardInterrupt):
+                raise
+            except OSError as e:
+                error_count += 1
                 logger.warning("Could not index metakernel %s: %s", mk_path, e)
+            except Exception:
+                raise
 
         print(f"Scanned {root}: {count} kernel files registered.")
         if mk_files:
             print(f"  Indexed {len(mk_files)} metakernels.")
+        if error_count:
+            print(f"  Errors: {error_count} files could not be registered.")
         return count, missions_found
 
     # ------------------------------------------------------------------
@@ -403,18 +506,12 @@ class KernelDB:
             for r in rows
         ]
 
-    def _find_by_filename_any_alias(self, filename: str) -> list[dict]:
-        """Find locations where the file content matches, even if stored
-        under a different filename.
+    def _find_by_path_suffix(self, filename: str) -> list[dict]:
+        """Find locations where the abs_path ends with the given filename.
 
-        This handles the case where JUICE has ``jup365_19900101_20500101.bsp``
-        but the DB only knows it as ``jup365.bsp`` (or vice versa).
-        We search all locations whose sha256 matches any kernel with a
-        similar filename stem prefix.
+        This catches kernels that are registered in the DB under a different
+        canonical name but exist on disk at a path ending with *filename*.
         """
-        # First: try all locations that have the exact filename
-        # (the filename column in `kernels` is the *first* registered name,
-        #  but locations can have any name).
         rows = self.con.execute("""
             SELECT DISTINCT k.sha256, l.abs_path, l.mission,
                    k.kernel_type, k.size_bytes, k.filename AS canonical_name
@@ -423,45 +520,12 @@ class KernelDB:
             WHERE l.abs_path LIKE '%/' || ? OR l.abs_path LIKE '%\\' || ?
             ORDER BY l.mission
         """, [filename, filename]).fetchall()
-        if rows:
-            return [
-                {"sha256": r[0], "abs_path": r[1], "mission": r[2],
-                 "kernel_type": r[3], "size_bytes": r[4],
-                 "canonical_name": r[5]}
-                for r in rows
-            ]
-
-        # Second: fuzzy — strip date/version suffixes and search by prefix.
-        # e.g. 'jup365_19900101_20500101' -> try 'jup365%'
-        stem = Path(filename).stem
-        ext = Path(filename).suffix
-        # Progressively shorten: split on _ and try each prefix.
-        # Filter by extension (case-insensitive) to avoid cross-type matches
-        # (e.g. a .bsp query must not match a .tm file with the same prefix).
-        parts = stem.split("_")
-        for n in range(len(parts), 0, -1):
-            prefix = "_".join(parts[:n])
-            if len(prefix) < 4:
-                continue  # too short, would match too broadly
-            pattern = prefix + "%"
-            rows = self.con.execute("""
-                SELECT DISTINCT k.sha256, l.abs_path, l.mission,
-                       k.kernel_type, k.size_bytes, k.filename AS canonical_name
-                FROM kernels k
-                JOIN locations l ON k.sha256 = l.sha256
-                WHERE k.filename LIKE ?
-                  AND LOWER(k.filename) LIKE '%' || LOWER(?)
-                ORDER BY l.mission
-            """, [pattern, ext]).fetchall()
-            if rows:
-                return [
-                    {"sha256": r[0], "abs_path": r[1], "mission": r[2],
-                     "kernel_type": r[3], "size_bytes": r[4],
-                     "canonical_name": r[5]}
-                    for r in rows
-                ]
-
-        return []
+        return [
+            {"sha256": r[0], "abs_path": r[1], "mission": r[2],
+             "kernel_type": r[3], "size_bytes": r[4],
+             "canonical_name": r[5]}
+            for r in rows
+        ]
 
     def resolve_kernel(
         self,
@@ -473,9 +537,8 @@ class KernelDB:
         Mission-aware resolution order:
           1. Exact filename match in preferred_mission
           2. Exact filename match in any mission
-          3. Fuzzy match (alias/renamed) in preferred_mission
-          4. Fuzzy match in any mission
-          5. None
+          3. Path-suffix match (file on disk registered under different name)
+          4. None — suggest ``spice-kernel-db scan`` to re-index
 
         Returns:
             (resolved_path, warnings) where warnings is a list of
@@ -504,29 +567,30 @@ class KernelDB:
                     )
                 return h["abs_path"], warnings
 
-        # --- 3. Fuzzy (alias) lookup ---
-        fuzzy = self._find_by_filename_any_alias(filename)
-        if preferred_mission and fuzzy:
+        # --- 3. Path-suffix match ---
+        path_hits = self._find_by_path_suffix(filename)
+        if preferred_mission and path_hits:
             same_mission = [
-                h for h in fuzzy
+                h for h in path_hits
                 if h["mission"].lower() == preferred_mission.lower()
                 and Path(h["abs_path"]).is_file()
             ]
             if same_mission:
                 h = same_mission[0]
-                warnings.append(
-                    f"{filename}: matched by content hash to "
-                    f"{h['canonical_name']} in [{h['mission']}]"
-                )
+                if h["canonical_name"] != filename:
+                    warnings.append(
+                        f"{filename}: found on disk, registered as "
+                        f"{h['canonical_name']} in [{h['mission']}]"
+                    )
                 return h["abs_path"], warnings
 
-        # --- 4. Fuzzy, any mission ---
-        for h in fuzzy:
+        for h in path_hits:
             if Path(h["abs_path"]).is_file():
-                warnings.append(
-                    f"{filename}: not in [{preferred_mission or '?'}] registry, "
-                    f"matched by hash to {h['canonical_name']} in [{h['mission']}]"
-                )
+                if h["canonical_name"] != filename:
+                    warnings.append(
+                        f"{filename}: found on disk, registered as "
+                        f"{h['canonical_name']} in [{h['mission']}]"
+                    )
                 return h["abs_path"], warnings
 
         return None, warnings
@@ -772,7 +836,22 @@ class KernelDB:
             )
             all_warnings.extend(warnings)
 
-            link_path = link_root / rel
+            link_path = (link_root / rel).resolve()
+
+            # Issue 9: Validate that link_path stays within link_root
+            try:
+                link_path.relative_to(link_root)
+            except ValueError:
+                logger.warning(
+                    "Path traversal in kernel relpath '%s': resolved to %s "
+                    "which is outside link_root %s. Skipping.",
+                    rel, link_path, link_root,
+                )
+                all_warnings.append(
+                    f"{fname}: path traversal — resolved outside link_root, skipped"
+                )
+                continue
+
             link_path.parent.mkdir(parents=True, exist_ok=True)
 
             if local and Path(local).is_file():
@@ -814,6 +893,48 @@ class KernelDB:
     # Acquire (remote metakernel)
     # ------------------------------------------------------------------
 
+    def _snapshot_kernel_hashes(
+        self, filenames: list[str], mission: str,
+    ) -> dict[str, set[str]]:
+        """Take a snapshot of kernel hashes for given filenames.
+
+        Returns a mapping of filename -> set of sha256 hashes.
+        Used for race condition detection (Issue 5).
+        """
+        snapshot: dict[str, set[str]] = {}
+        for fname in filenames:
+            rows = self.con.execute(
+                "SELECT sha256 FROM kernels WHERE filename = ?",
+                [fname],
+            ).fetchall()
+            snapshot[fname] = {r[0] for r in rows}
+        return snapshot
+
+    def _check_state_changed(
+        self,
+        pre_snapshot: dict[str, set[str]],
+        filenames: list[str],
+        mission: str,
+    ) -> bool:
+        """Check if kernel records changed since the pre-snapshot.
+
+        Returns True if any change detected, and logs a warning.
+        """
+        current = self._snapshot_kernel_hashes(filenames, mission)
+        changed_files = [
+            f for f in filenames
+            if pre_snapshot.get(f, set()) != current.get(f, set())
+        ]
+        if changed_files:
+            logger.warning(
+                "DB state changed during download for %d kernel(s): %s. "
+                "Another process may have modified the database.",
+                len(changed_files),
+                ", ".join(changed_files[:5]),
+            )
+            return True
+        return False
+
     def _link_existing_kernels(
         self,
         indices: list[int],
@@ -839,9 +960,30 @@ class KernelDB:
                 filenames[i], preferred_mission=mission,
             )
             if local and Path(local).is_file():
-                expected.parent.mkdir(parents=True, exist_ok=True)
-                expected.symlink_to(Path(local).resolve())
-                n_linked += 1
+                # Issue 3: Verify hash before creating symlink
+                db_row = self.con.execute(
+                    "SELECT sha256 FROM kernels WHERE filename = ?",
+                    [filenames[i]],
+                ).fetchone()
+                if db_row:
+                    actual_hash = sha256_file(local)
+                    if actual_hash != db_row[0]:
+                        logger.warning(
+                            "Hash mismatch for %s: expected %s, got %s. "
+                            "Skipping symlink.",
+                            filenames[i], db_row[0][:16], actual_hash[:16],
+                        )
+                        continue
+                # Issue 6: Wrap symlink creation in try/except
+                try:
+                    expected.parent.mkdir(parents=True, exist_ok=True)
+                    expected.symlink_to(Path(local).resolve())
+                    n_linked += 1
+                except OSError as e:
+                    logger.warning(
+                        "Could not create symlink for %s at %s: %s",
+                        filenames[i], expected, e,
+                    )
         return n_linked
 
     def get_metakernel(
@@ -850,6 +992,7 @@ class KernelDB:
         download_dir: str | Path | None = None,
         mission: str | None = None,
         yes: bool = False,
+        force: bool = False,
     ) -> dict:
         """Fetch a remote metakernel, show status, and download missing kernels.
 
@@ -859,6 +1002,7 @@ class KernelDB:
                 remote subdirectory structure (lsk/, spk/, etc.).
             mission: Override auto-detected mission name.
             yes: If True, skip the confirmation prompt.
+            force: If True, treat all kernels as missing and re-download.
 
         Returns:
             dict with keys: found, missing, downloaded, warnings
@@ -887,7 +1031,9 @@ class KernelDB:
         mk_dest.parent.mkdir(parents=True, exist_ok=True)
 
         # Resolve each PATH_VALUE relative to the mk/ directory and make absolute
+        # Validate that resolved paths stay within download_dir (Issue 1)
         mk_dir = mk_dest.parent
+        _validate_path_values(parsed.path_values, mk_dir, download_dir)
         abs_path_values = [
             str((mk_dir / v).resolve()) for v in parsed.path_values
         ]
@@ -922,15 +1068,31 @@ class KernelDB:
         # 3. Check local DB for each kernel
         found_indices: list[int] = []
         missing_indices: list[int] = []
-        for i, fname in enumerate(filenames):
-            local, _ = self.resolve_kernel(fname, preferred_mission=mission)
-            if local and Path(local).is_file():
-                found_indices.append(i)
-            else:
-                missing_indices.append(i)
+        if force:
+            # Force mode: treat everything as missing
+            missing_indices = list(range(len(filenames)))
+        else:
+            for i, fname in enumerate(filenames):
+                local, _ = self.resolve_kernel(fname, preferred_mission=mission)
+                if local and Path(local).is_file():
+                    found_indices.append(i)
+                else:
+                    missing_indices.append(i)
 
-        # 4. Query remote sizes for ALL kernels (parallel HEAD)
-        sizes = query_remote_sizes(kernel_urls)
+        # 4. Query remote sizes (parallel HEAD) — skip for --force
+        if force:
+            sizes: dict = {}
+        else:
+            # Issue 5: Snapshot kernel state before releasing lock
+            pre_snapshot = self._snapshot_kernel_hashes(filenames, mission)
+            # Release lock during network I/O so other processes aren't blocked.
+            self.release()
+            try:
+                sizes = query_remote_sizes(kernel_urls)
+            finally:
+                self.reacquire()
+            # Issue 5: Check if state changed during lock release
+            self._check_state_changed(pre_snapshot, filenames, mission)
 
         # 5. Display table
         mk_name = url.rsplit("/", 1)[-1]
@@ -1001,7 +1163,7 @@ class KernelDB:
                     "warnings": [],
                 }
 
-        # 7. Build download list, skipping files already on disk with correct size
+        # 7. Build download list, skipping files with correct size AND hash (Issue 2)
         tasks = []
         task_info: dict[str, str] = {}  # filename -> source_url
         already_on_disk: list[Path] = []
@@ -1011,7 +1173,12 @@ class KernelDB:
             dest = download_dir / mission / relpath
             fname = filenames[i]
             remote_size = sizes.get(kurl)
-            if dest.is_file() and remote_size and dest.stat().st_size == remote_size:
+            # Look up expected hash from DB
+            db_row = self.con.execute(
+                "SELECT sha256 FROM kernels WHERE filename = ?", [fname]
+            ).fetchone()
+            db_hash = db_row[0] if db_row else None
+            if _should_skip_download(dest, remote_size, db_hash, force):
                 already_on_disk.append(dest)
                 task_info[fname] = kurl
                 continue
@@ -1022,9 +1189,19 @@ class KernelDB:
             console.print(f"  [dim]Skipped: {len(already_on_disk)} already downloaded[/dim]")
             download_bytes -= sum(f.stat().st_size for f in already_on_disk)
 
-        dl_paths, warnings = download_kernels_parallel(
-            tasks, total_bytes=download_bytes,
-        )
+        # Issue 5: Snapshot before releasing for download
+        pre_dl_snapshot = self._snapshot_kernel_hashes(filenames, mission)
+        # Release the DB lock during download so other processes can
+        # run read-only queries (resolve, list, check, etc.).
+        self.release()
+        try:
+            dl_paths, warnings = download_kernels_parallel(
+                tasks, total_bytes=download_bytes,
+            )
+        finally:
+            self.reacquire()
+        # Issue 5: Check state after download reacquire
+        self._check_state_changed(pre_dl_snapshot, filenames, mission)
 
         # Register all files (downloaded + already on disk)
         downloaded: list[str] = []
@@ -1066,6 +1243,7 @@ class KernelDB:
         mission: str | None = None,
         download_dir: str | Path | None = None,
         yes: bool = False,
+        force: bool = False,
     ) -> dict:
         """Re-fetch a metakernel from its source URL and download new kernels.
 
@@ -1108,12 +1286,58 @@ class KernelDB:
                 )
                 sys.exit(1)
 
-        return self.get_metakernel(
+        result = self.get_metakernel(
             source_url,
             download_dir=download_dir,
             mission=mission,
             yes=yes,
+            force=force,
         )
+
+        # Re-scan the kernel directories referenced by the metakernel
+        # so that new/renamed files on disk get indexed.  Skip if --force
+        # was used, since get_metakernel already re-downloaded and
+        # registered everything.
+        if force:
+            return result
+
+        from spice_kernel_db import parse_metakernel as _parse_mk
+
+        # Find the local .tm — either the original mk_path or the one
+        # get_metakernel just wrote.
+        local_mk = Path(mk_path) if Path(mk_path).is_file() else None
+        if local_mk is None:
+            # get_metakernel writes to download_dir/mission/mk/filename
+            if download_dir is None:
+                download_dir = Path(
+                    "~/.local/share/spice-kernel-db/kernels"
+                ).expanduser()
+            candidate = (
+                Path(download_dir).expanduser().resolve()
+                / mission / "mk" / mk_filename
+            )
+            if candidate.is_file():
+                local_mk = candidate
+
+        if local_mk is not None:
+            try:
+                parsed_local = _parse_mk(str(local_mk))
+                # Resolve PATH_VALUES relative to the mk directory
+                mk_dir = local_mk.resolve().parent
+                scan_dirs = set()
+                for pv in parsed_local.path_values:
+                    resolved = (mk_dir / pv).resolve()
+                    if resolved.is_dir():
+                        scan_dirs.add(resolved)
+                for sd in sorted(scan_dirs):
+                    console.print(
+                        f"[dim]Re-scanning {sd} for updated kernels...[/dim]"
+                    )
+                    self.scan_directory(str(sd), mission=mission)
+            except Exception as e:
+                logger.warning("Post-update rescan failed: %s", e)
+
+        return result
 
     # ------------------------------------------------------------------
     # Metakernel listing / info

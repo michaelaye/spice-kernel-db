@@ -44,6 +44,7 @@ commands:
     {_g}update{_r}          Re-fetch a metakernel and download new kernels
 
   inspect:
+    {_g}list{_r}            List kernels contained in a metakernel
     {_g}check{_r}           Check which kernels in a metakernel are available locally
     {_g}coverage{_r}        Check SPK body coverage in a metakernel
     {_g}metakernels{_r}     List tracked metakernels or show details  (alias: {_g}mk{_r})
@@ -171,6 +172,10 @@ commands:
         "-y", "--yes", action="store_true",
         help="Skip confirmation prompt",
     )
+    p_get.add_argument(
+        "--force", action="store_true",
+        help="Re-download all kernels even if already on disk",
+    )
 
     # --- update ---
     p_update = sub.add_parser(
@@ -189,6 +194,10 @@ commands:
     p_update.add_argument(
         "-y", "--yes", action="store_true",
         help="Skip confirmation prompt",
+    )
+    p_update.add_argument(
+        "--force", action="store_true",
+        help="Re-download all kernels even if already on disk",
     )
 
     # --- browse ---
@@ -216,6 +225,21 @@ commands:
     mission_sub.add_parser("list", help="List configured missions")
     p_mission_rm = mission_sub.add_parser("remove", help="Remove a mission")
     p_mission_rm.add_argument("name", help="Mission name to remove")
+
+    # --- list ---
+    p_list = sub.add_parser(
+        "list",
+        help="List kernels contained in a metakernel",
+    )
+    p_list.add_argument(
+        "metakernel", nargs="?", default=None,
+        help="Path to .tm file (omit to select from local registry)",
+    )
+    p_list.add_argument("--mission", help="Override mission name")
+    p_list.add_argument(
+        "--type", dest="kernel_type", default=None,
+        help="Filter by kernel type (ck, spk, fk, ik, pck, lsk, sclk, dsk)",
+    )
 
     # --- coverage ---
     p_cov = sub.add_parser(
@@ -281,7 +305,11 @@ commands:
         return
 
     # --- All other commands need a DB connection ---
-    db = KernelDB(args.db)
+    # Read-only commands can share the DB with a running writer.
+    read_only_commands = {"stats", "duplicates", "check", "list", "resolve",
+                          "metakernels", "mk", "coverage"}
+    read_only = args.command in read_only_commands
+    db = KernelDB(args.db, read_only=read_only)
     try:
         if args.command == "scan":
             archive_dir = config.kernel_dir if args.archive else None
@@ -301,6 +329,12 @@ commands:
 
         elif args.command == "duplicates":
             db.report_duplicates()
+
+        elif args.command == "list":
+            metakernel = _require_metakernel(args.metakernel, db, args.mission)
+            if metakernel is None:
+                return
+            _list_kernels(metakernel, kernel_type=args.kernel_type)
 
         elif args.command == "check":
             metakernel = _require_metakernel(args.metakernel, db, args.mission)
@@ -329,6 +363,11 @@ commands:
                 print(path)
             else:
                 print(f"Not found: {args.filename}", file=sys.stderr)
+                print(
+                    f"  Hint: the kernel may exist on disk but not in the database.\n"
+                    f"  Run 'spice-kernel-db scan <directory>' to re-index.",
+                    file=sys.stderr,
+                )
             for w in warnings:
                 print(f"  ⚠ {w}", file=sys.stderr)
 
@@ -382,6 +421,7 @@ commands:
                 download_dir=args.download_dir,
                 mission=args.mission,
                 yes=args.yes,
+                force=args.force,
             )
 
         elif args.command == "update":
@@ -393,6 +433,7 @@ commands:
                 mission=args.mission,
                 download_dir=args.download_dir,
                 yes=args.yes,
+                force=args.force,
             )
 
         elif args.command == "browse":
@@ -449,6 +490,54 @@ commands:
 
     finally:
         db.close()
+
+
+def _list_kernels(metakernel: str, kernel_type: str | None = None):
+    """Parse a metakernel and list its kernels in a rich table."""
+    from spice_kernel_db import parse_metakernel
+
+    parsed = parse_metakernel(metakernel)
+
+    # Classify kernels by directory (ck/, spk/, fk/, etc.)
+    kernels = parsed.kernels
+    if kernel_type:
+        kt = kernel_type.lower()
+        kernels = [k for k in kernels if f"/{kt}/" in k.lower()]
+
+    # Count by type
+    type_counts: dict[str, int] = {}
+    for k in parsed.kernels:
+        parts = k.replace("\\", "/").split("/")
+        for part in parts:
+            if part in ("ck", "spk", "fk", "ik", "pck", "lsk", "sclk", "dsk"):
+                type_counts[part] = type_counts.get(part, 0) + 1
+                break
+
+    console.print(f"\n[bold]Metakernel:[/bold] {metakernel}")
+    console.print(f"[bold]Kernels:[/bold] {len(parsed.kernels)} total")
+    if type_counts:
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(type_counts.items()))
+        console.print(f"[dim]({summary})[/dim]")
+    console.print()
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Type", style="bold")
+    table.add_column("Kernel")
+
+    for i, k in enumerate(kernels, 1):
+        # Extract type from path
+        parts = k.replace("\\", "/").split("/")
+        ktype = ""
+        for part in parts:
+            if part in ("ck", "spk", "fk", "ik", "pck", "lsk", "sclk", "dsk"):
+                ktype = part
+                break
+        # Show just the filename
+        filename = parts[-1] if parts else k
+        table.add_row(str(i), ktype, filename)
+
+    console.print(table)
 
 
 def _print_coverage_table(results, body_id: int, metakernel: str):

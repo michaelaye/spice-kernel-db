@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-03-20
+
+### ⚠️ CRITICAL UPDATE — Data Corruption Bug
+
+**All users should update immediately.** Versions prior to 0.10.0 contained a
+fuzzy filename matching algorithm in `resolve_kernel()` that could silently
+create symlinks between completely different SPICE kernel files. This caused
+**silent scientific data corruption** — SPICE loaded valid but *wrong* kernel
+data (e.g., a different mission trajectory), producing plausible but incorrect
+results with no error messages. The bug was triggered during `get` and `update`
+operations when kernel filenames shared a common prefix (e.g., all JUICE kernels
+start with `juice_`).
+
+**Impact:** Any kernel directory managed by `spice-kernel-db` prior to 0.10.0
+may contain corrupted symlinks. After updating, run:
+
+```bash
+# 1. Remove all symlinks (they may point to wrong kernels)
+find /path/to/your/kernels -type l -delete
+# 2. Re-download missing kernels
+spice-kernel-db update
+# 3. Verify all kernels load correctly
+spice-kernel-db check <your-metakernel.tm>
+```
+
+### Security
+
+- **CRITICAL: Path traversal via metakernel PATH_VALUES** — `get_metakernel()` and `update_metakernel()` now validate that resolved PATH_VALUES stay within the download directory. Malicious metakernels with paths like `/../../../tmp/evil` are rejected with a `ValueError`. New `_validate_path_values()` helper.
+- **CRITICAL: Size-only skip check for existing files** — Step 7 of `get_metakernel()` now verifies SHA-256 hash in addition to file size before skipping a download. A file with correct size but wrong content is no longer silently accepted. New `_should_skip_download()` helper.
+- **CRITICAL: Symlink creation without hash validation** — `_link_existing_kernels()` now computes the SHA-256 of the resolved file and verifies it matches the database record before creating a symlink. Mismatched files are skipped with a warning.
+- **CRITICAL: No partial download detection** — `download_kernel()` now tracks bytes written vs the `Content-Length` header. Incomplete downloads raise `IOError` and the partial file is deleted. Zero-byte downloads are also rejected.
+- **HIGH: Race condition — DB state change during download** — After each `release()`/`reacquire()` cycle in `get_metakernel()`, kernel records are compared to a pre-release snapshot. A warning is logged if another process modified the database during the lock release.
+- **HIGH: Symlink creation errors silently ignored** — `_link_existing_kernels()` now wraps `symlink_to()` in `try/except OSError`. Failed symlinks log a warning and do not increment the link counter.
+- **HIGH: No pre-registration hash verification** — `register_file()` accepts an optional `expected_hash` parameter. When provided, the computed hash is verified before storing. Raises `ValueError` on mismatch.
+- **MEDIUM: Broad except Exception masks real errors** — `scan_directory()` now catches `OSError` specifically (excluding `PermissionError`) and re-raises unexpected exceptions. Error count is reported at the end of the scan.
+- **MEDIUM: Path traversal in rewrite_metakernel** — `rewrite_metakernel()` now validates that each resolved link path stays within `link_root`. Paths that escape are skipped with a warning.
+- **MEDIUM: Thread pool download failures — no severity distinction** — `download_kernels_parallel()` now classifies exceptions by severity: `[FATAL]` for HTTP 403/404, `[RETRIABLE]` for HTTP 5xx and network errors, `[ERROR]` for disk/IO problems.
+- **MEDIUM: Same filename, different hash silently ignored** — `register_file()` now detects when a filename already exists with a different hash and inserts a new record for the updated content. The old hash record is preserved for history. A warning is logged about the version change.
+
+### Added
+
+- **`list` command** — `spice-kernel-db list [metakernel]` lists all kernels in a metakernel, grouped by type. Supports `--type` filter. Without arguments, shows a picker from registered metakernels.
+- **`--force` flag** for `get` and `update` — re-downloads all kernels regardless of what's on disk, skipping DB lookups and remote size queries for faster startup.
+- **DB lock release during downloads** — the DuckDB connection is released during network I/O (size queries and file downloads), allowing other processes to run read-only commands (`resolve`, `list`, `check`, `stats`) while a download is in progress.
+- **Read-only DB mode** — read-only commands now open the database in read-only mode for better concurrent access.
+- **Post-update rescan** — `update` now automatically rescans the kernel directories referenced by the metakernel's PATH_VALUES, so newly downloaded kernels are immediately indexed without manual `scan`.
+- **Resolve failure hint** — `resolve` now suggests running `scan` when a kernel is not found.
+
+### Removed
+
+- **Fuzzy filename matching** — the `_find_by_filename_any_alias()` method has been removed entirely. `resolve_kernel()` now uses exact filename match and path-suffix match only. This eliminates the class of bugs where unrelated kernels with similar name prefixes were incorrectly linked.
+
+### Changed
+
+- Test suite expanded from 114 to 136 tests.
+- Warning messages in `resolve_kernel()` now correctly say "matched by filename prefix" instead of the misleading "matched by hash".
+
 ## [0.9.1] - 2026-02-20
 
 ### Added
@@ -221,6 +278,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.10.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.8.0...v0.8.1

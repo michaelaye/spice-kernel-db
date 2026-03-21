@@ -4,6 +4,13 @@
 
 Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives.
 
+> **⚠️ CRITICAL: Update to v0.10.0 or later.** Versions before 0.10.0 contained a
+> fuzzy filename matching bug that could silently create symlinks between
+> *completely different* SPICE kernel files, causing **silent scientific data
+> corruption** — SPICE loads valid but *wrong* data with no errors. After updating,
+> remove all symlinks in your kernel directories and re-run `spice-kernel-db update`.
+> See [CHANGELOG.md](CHANGELOG.md) for details and recovery steps.
+
 ## What this tool does
 
 1. **Mission setup**: Configure missions from NASA NAIF or ESA SPICE servers with an interactive dialog.

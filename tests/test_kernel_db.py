@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import shutil
 import textwrap
 import urllib.error
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
-
-from unittest.mock import MagicMock, patch
 
 from spice_kernel_db import KernelDB, parse_metakernel
 from spice_kernel_db.config import Config, load_config, save_config, show_config
@@ -1868,3 +1869,475 @@ class TestBodyNameResolution:
         ids = {r[0] for r in result}
         assert 1004083 in ids   # Horizons SPK ID
         assert 90004923 in ids  # Horizons record ID
+
+
+# ===========================================================================
+# Security / correctness fixes (Issues 1-11)
+# ===========================================================================
+
+
+class TestIssue1PathTraversalPathValues:
+    """Issue 1: PATH_VALUES like /../../../tmp/evil could escape download dir."""
+
+    def test_path_traversal_in_path_values_raises(self, tmp_path):
+        """PATH_VALUES that resolve outside download_dir must raise ValueError."""
+        from spice_kernel_db.db import _validate_path_values
+        download_dir = tmp_path / "kernels"
+        download_dir.mkdir()
+        # This resolves to /tmp/evil, outside download_dir
+        with pytest.raises(ValueError, match="outside.*download"):
+            _validate_path_values(
+                ["/../../../tmp/evil"],
+                mk_dir=download_dir / "JUICE" / "mk",
+                download_dir=download_dir,
+            )
+
+    def test_safe_path_values_accepted(self, tmp_path):
+        """PATH_VALUES that stay within download_dir should pass."""
+        from spice_kernel_db.db import _validate_path_values
+        download_dir = tmp_path / "kernels"
+        mk_dir = download_dir / "JUICE" / "mk"
+        mk_dir.mkdir(parents=True)
+        # '..' from mk/ goes to JUICE/, still within download_dir
+        _validate_path_values(
+            [".."],
+            mk_dir=mk_dir,
+            download_dir=download_dir,
+        )
+
+
+class TestIssue2SizeOnlySkipCheck:
+    """Issue 2: Files skipped when size matches but hash may differ."""
+
+    def test_same_size_wrong_hash_not_skipped(self, tmp_path):
+        """A file on disk with matching size but wrong hash should be re-downloaded."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Create a file on disk at the expected destination
+        dest = tmp_path / "JUICE" / "lsk" / "naif0012.tls"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"WRONG CONTENT!!")  # same size as correct
+
+        correct_content = b"CORRECT CONTENT"
+        assert len(correct_content) == dest.stat().st_size
+
+        # The DB has no record of this file, so resolve_kernel returns None.
+        # The key behavior: when dest.is_file() and size matches remote,
+        # it should also check hash. Since there's no DB hash to compare,
+        # it should still download.
+        # We test the _should_skip_download helper directly.
+        from spice_kernel_db.db import _should_skip_download
+        skip = _should_skip_download(
+            dest=dest,
+            remote_size=len(correct_content),
+            db_hash="abcdef1234567890" * 4,  # known hash from DB
+            force=False,
+        )
+        assert skip is False, "Should not skip when hash mismatches"
+        db.close()
+
+    def test_same_size_correct_hash_skipped(self, tmp_path):
+        """A file on disk with matching size AND hash should be skipped."""
+        from spice_kernel_db.db import _should_skip_download
+        dest = tmp_path / "naif0012.tls"
+        dest.write_bytes(b"CORRECT CONTENT")
+        real_hash = sha256_file(dest)
+
+        skip = _should_skip_download(
+            dest=dest,
+            remote_size=dest.stat().st_size,
+            db_hash=real_hash,
+            force=False,
+        )
+        assert skip is True, "Should skip when both size and hash match"
+
+
+class TestIssue3SymlinkWithoutHashValidation:
+    """Issue 3: Symlinks created without verifying resolved file's hash."""
+
+    def test_link_existing_skips_hash_mismatch(self, tmp_path):
+        """_link_existing_kernels should not create symlink when hash mismatches."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a kernel file
+        kernel = tmp_path / "JUICE" / "kernels" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("CORRECT LSK CONTENT")
+        h = db.register_file(kernel, mission="JUICE")
+
+        # Now corrupt the file on disk (different content, same location)
+        kernel.write_text("CORRUPTED CONTENT!!")
+
+        # Try to link — should skip because hash of file on disk != DB hash
+        download_dir = tmp_path / "download"
+        download_dir.mkdir()
+        n_linked = db._link_existing_kernels(
+            indices=[0],
+            filenames=["naif0012.tls"],
+            relpaths=["lsk/naif0012.tls"],
+            download_dir=download_dir,
+            mission="JUICE",
+        )
+        assert n_linked == 0, "Should not link file with hash mismatch"
+        db.close()
+
+
+class TestIssue4PartialDownloadDetection:
+    """Issue 4: Partial downloads not detected."""
+
+    def test_partial_download_raises(self, tmp_path):
+        """download_kernel should raise if bytes written < Content-Length."""
+        from spice_kernel_db.remote import download_kernel
+
+        dest = tmp_path / "test.bsp"
+
+        # Mock a response that claims 1000 bytes but only delivers 500
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": "1000"}
+        mock_resp.read = MagicMock(side_effect=[b"x" * 500, b""])
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", return_value=mock_resp):
+            with pytest.raises(IOError, match="[Pp]artial|[Ii]ncomplete"):
+                download_kernel("http://example.com/test.bsp", dest)
+
+        # Partial file should be cleaned up
+        assert not dest.exists(), "Partial file should be deleted"
+
+    def test_zero_byte_download_raises(self, tmp_path):
+        """download_kernel should raise on zero-byte downloads."""
+        from spice_kernel_db.remote import download_kernel
+
+        dest = tmp_path / "test.bsp"
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": "1000"}
+        mock_resp.read = MagicMock(return_value=b"")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", return_value=mock_resp):
+            with pytest.raises(IOError):
+                download_kernel("http://example.com/test.bsp", dest)
+
+    def test_successful_download_no_error(self, tmp_path):
+        """A complete download should succeed without error."""
+        from spice_kernel_db.remote import download_kernel
+
+        dest = tmp_path / "test.bsp"
+        content = b"x" * 1000
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": "1000"}
+        mock_resp.read = MagicMock(side_effect=[content, b""])
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", return_value=mock_resp):
+            result = download_kernel("http://example.com/test.bsp", dest)
+
+        assert result == dest
+        assert dest.read_bytes() == content
+
+
+class TestIssue5RaceConditionDBState:
+    """Issue 5: DB state can change during download while lock released."""
+
+    def test_state_change_warning_logged(self, tmp_path, caplog):
+        """After reacquire, a warning should be logged if kernel records changed."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a kernel
+        kernel = tmp_path / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("LSK CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        # Take a snapshot of kernel hashes
+        pre_snapshot = db._snapshot_kernel_hashes(["naif0012.tls"], "JUICE")
+
+        # Simulate state change: modify the file and re-register
+        kernel.write_text("UPDATED LSK CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        # Verify state change is detected
+        with caplog.at_level(logging.WARNING):
+            changed = db._check_state_changed(
+                pre_snapshot, ["naif0012.tls"], "JUICE",
+            )
+        assert changed is True
+        db.close()
+
+
+class TestIssue6SymlinkCreationErrorsSilent:
+    """Issue 6: Symlink creation errors silently ignored, counter wrong."""
+
+    def test_symlink_failure_not_counted(self, tmp_path):
+        """If symlink_to() fails, n_linked should NOT be incremented."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a kernel file
+        kernel = tmp_path / "JUICE" / "kernels" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("CORRECT LSK CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        download_dir = tmp_path / "download"
+        download_dir.mkdir()
+
+        # Patch symlink_to to raise OSError
+        with patch.object(Path, "symlink_to", side_effect=OSError("Permission denied")):
+            n_linked = db._link_existing_kernels(
+                indices=[0],
+                filenames=["naif0012.tls"],
+                relpaths=["lsk/naif0012.tls"],
+                download_dir=download_dir,
+                mission="JUICE",
+            )
+        assert n_linked == 0, "Should not count failed symlink"
+        db.close()
+
+    def test_symlink_failure_logs_warning(self, tmp_path, caplog):
+        """Symlink failure should log a warning."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        kernel = tmp_path / "JUICE" / "kernels" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("CORRECT LSK CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        download_dir = tmp_path / "download"
+        download_dir.mkdir()
+
+        with patch.object(Path, "symlink_to", side_effect=OSError("Permission denied")):
+            with caplog.at_level(logging.WARNING):
+                db._link_existing_kernels(
+                    indices=[0],
+                    filenames=["naif0012.tls"],
+                    relpaths=["lsk/naif0012.tls"],
+                    download_dir=download_dir,
+                    mission="JUICE",
+                )
+        assert any("symlink" in r.message.lower() or "Permission" in r.message
+                    for r in caplog.records)
+        db.close()
+
+
+class TestIssue7PreRegistrationHashVerification:
+    """Issue 7: register_file should optionally verify expected hash."""
+
+    def test_expected_hash_mismatch_raises(self, tmp_path):
+        """register_file with wrong expected_hash should raise ValueError."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("LSK CONTENT")
+
+        with pytest.raises(ValueError, match="[Hh]ash mismatch"):
+            db.register_file(
+                kernel, mission="JUICE",
+                expected_hash="0000000000000000" * 4,
+            )
+        db.close()
+
+    def test_expected_hash_match_succeeds(self, tmp_path):
+        """register_file with correct expected_hash should succeed."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("LSK CONTENT")
+        correct_hash = sha256_file(kernel)
+
+        h = db.register_file(
+            kernel, mission="JUICE",
+            expected_hash=correct_hash,
+        )
+        assert h == correct_hash
+        db.close()
+
+    def test_no_expected_hash_still_works(self, tmp_path):
+        """register_file without expected_hash should work as before."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("LSK CONTENT")
+
+        h = db.register_file(kernel, mission="JUICE")
+        assert h == sha256_file(kernel)
+        db.close()
+
+
+class TestIssue8BroadExceptMasksErrors:
+    """Issue 8: Broad except Exception masks real errors like PermissionError."""
+
+    def test_permission_error_in_scan_reraised(self, tmp_path):
+        """PermissionError during scan should be re-raised, not swallowed."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Create a file that will trigger PermissionError during registration
+        kernel_dir = tmp_path / "JUICE" / "kernels" / "lsk"
+        kernel_dir.mkdir(parents=True)
+        kernel = kernel_dir / "naif0012.tls"
+        kernel.write_text("LSK CONTENT")
+
+        with patch.object(
+            db, "register_file",
+            side_effect=PermissionError("Permission denied"),
+        ):
+            with pytest.raises(PermissionError):
+                db.scan_directory(kernel_dir)
+        db.close()
+
+    def test_os_error_in_scan_collected(self, tmp_path):
+        """OSError during scan should be collected, not re-raised."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        kernel_dir = tmp_path / "JUICE" / "kernels" / "lsk"
+        kernel_dir.mkdir(parents=True)
+        kernel = kernel_dir / "naif0012.tls"
+        kernel.write_text("LSK CONTENT")
+
+        with patch.object(
+            db, "register_file",
+            side_effect=OSError("Disk full"),
+        ):
+            # OSError should be caught and collected, not re-raised
+            count, _ = db.scan_directory(kernel_dir)
+        assert count == 0
+        db.close()
+
+
+class TestIssue9PathTraversalRewriteMetakernel:
+    """Issue 9: Path traversal in rewrite_metakernel via ../."""
+
+    def test_path_escape_in_relpath_skipped(self, tmp_path):
+        """Kernel relpaths containing ../ that escape link_root should be skipped."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a kernel so resolve_kernel finds it
+        kernel = tmp_path / "JUICE" / "kernels" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("LSK CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        # Create a metakernel with a path-traversal relpath
+        mk = tmp_path / "evil.tm"
+        mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '.' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = (
+                '$KERNELS/../../etc/naif0012.tls'
+              )
+            \\begintext
+        """))
+
+        output = tmp_path / "output.tm"
+        link_root = tmp_path / "links"
+
+        _, warnings = db.rewrite_metakernel(
+            mk, output, mission="JUICE", link_root=str(link_root),
+        )
+        # The path-traversal entry should generate a warning
+        assert any("outside" in w.lower() or "escape" in w.lower() or "traversal" in w.lower()
+                    for w in warnings)
+        db.close()
+
+
+class TestIssue10ThreadPoolSeverityDistinction:
+    """Issue 10: Download failures should distinguish retriable from fatal."""
+
+    def test_403_classified_as_fatal(self, tmp_path):
+        """403 Forbidden should be classified as FATAL in warnings."""
+        from spice_kernel_db.remote import download_kernels_parallel
+
+        def mock_download(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "http://example.com/test.bsp", 403, "Forbidden", {}, None
+            )
+
+        tasks = [("http://example.com/test.bsp", tmp_path / "test.bsp", "test.bsp")]
+        with patch("spice_kernel_db.remote.download_kernel", side_effect=mock_download):
+            _, warnings = download_kernels_parallel(tasks)
+
+        assert len(warnings) == 1
+        assert "FATAL" in warnings[0] or "403" in warnings[0]
+
+    def test_500_classified_as_retriable(self, tmp_path):
+        """500 Server Error should be classified as RETRIABLE in warnings."""
+        from spice_kernel_db.remote import download_kernels_parallel
+
+        def mock_download(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "http://example.com/test.bsp", 500, "Internal Server Error", {}, None
+            )
+
+        tasks = [("http://example.com/test.bsp", tmp_path / "test.bsp", "test.bsp")]
+        with patch("spice_kernel_db.remote.download_kernel", side_effect=mock_download):
+            _, warnings = download_kernels_parallel(tasks)
+
+        assert len(warnings) == 1
+        assert "RETRIABLE" in warnings[0] or "retry" in warnings[0].lower()
+
+
+class TestIssue11SameFilenameDifferentHash:
+    """Issue 11: Re-registering same filename with different content should update hash."""
+
+    def test_reregister_updates_hash(self, tmp_path):
+        """Registering a file with same name but different content should update the hash."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("ORIGINAL CONTENT")
+        h1 = db.register_file(kernel, mission="JUICE")
+
+        # Change content (simulates updated kernel)
+        kernel.write_text("UPDATED CONTENT!")
+        h2 = db.register_file(kernel, mission="JUICE")
+
+        assert h1 != h2, "Hashes should differ for different content"
+
+        # The kernels table should now have the new hash with this filename
+        row = db.con.execute(
+            "SELECT sha256 FROM kernels WHERE filename = ?",
+            ["naif0012.tls"],
+        ).fetchall()
+        hashes = {r[0] for r in row}
+        assert h2 in hashes, "New hash should be in kernels table"
+
+        db.close()
+
+    def test_reregister_logs_warning(self, tmp_path, caplog):
+        """Hash change for same filename should log a warning."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("ORIGINAL CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        kernel.write_text("UPDATED CONTENT!")
+        with caplog.at_level(logging.WARNING):
+            db.register_file(kernel, mission="JUICE")
+
+        assert any("naif0012.tls" in r.message for r in caplog.records)
+        db.close()
+
+    def test_old_location_preserved(self, tmp_path):
+        """Old location entry should still exist after hash update."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("ORIGINAL CONTENT")
+        h1 = db.register_file(kernel, mission="JUICE")
+
+        kernel.write_text("UPDATED CONTENT!")
+        h2 = db.register_file(kernel, mission="JUICE")
+
+        # Both hashes should have location entries
+        locs_h1 = db.find_by_hash(h1)
+        # The old location entry is overwritten because same abs_path
+        # but the old hash record in kernels table should still exist
+        old_kernel = db.con.execute(
+            "SELECT filename FROM kernels WHERE sha256 = ?", [h1]
+        ).fetchone()
+        assert old_kernel is not None, "Old hash record should still exist in kernels table"
+        db.close()

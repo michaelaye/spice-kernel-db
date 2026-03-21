@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -261,17 +262,40 @@ def download_kernel(
 
     Creates parent directories as needed. If *progress* and *task_id*
     are given, updates the progress bar with bytes written. Returns *dest*.
+
+    Raises IOError if the download is incomplete (bytes written does not
+    match Content-Length) or if zero bytes are received.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as resp:
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(64 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                if progress is not None and task_id is not None:
-                    progress.advance(task_id, len(chunk))
+    bytes_written = 0
+    try:
+        with urllib.request.urlopen(url) as resp:
+            content_length = resp.headers.get("Content-Length")
+            expected_size = int(content_length) if content_length else None
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+                    if progress is not None and task_id is not None:
+                        progress.advance(task_id, len(chunk))
+        # Verify download completeness (Issue 4)
+        if bytes_written == 0:
+            raise IOError(
+                f"Zero-byte download from {url}"
+            )
+        if expected_size is not None and bytes_written != expected_size:
+            raise IOError(
+                f"Incomplete download from {url}: "
+                f"got {bytes_written} bytes, expected {expected_size}"
+            )
+    except Exception:
+        # Clean up partial file on any error
+        if dest.exists():
+            dest.unlink()
+        raise
     return dest
 
 
@@ -328,8 +352,22 @@ def download_kernels_parallel(
                 if not total_bytes:
                     progress.advance(pid)
                 return filename, dest, None
+            except urllib.error.HTTPError as e:
+                # Issue 10: Classify HTTP errors by code (must be before OSError)
+                if e.code in (403, 404, 410):
+                    return filename, None, f"[FATAL] HTTP {e.code}: {e.reason}"
+                elif e.code >= 500:
+                    return filename, None, f"[RETRIABLE] HTTP {e.code}: {e.reason}"
+                else:
+                    return filename, None, f"[ERROR] HTTP {e.code}: {e.reason}"
+            except urllib.error.URLError as e:
+                # Network errors — potentially retriable
+                return filename, None, f"[RETRIABLE] {e.reason}"
+            except (IOError, OSError) as e:
+                # Issue 10: Disk/IO problems — ERROR severity
+                return filename, None, f"[ERROR] {e}"
             except Exception as e:
-                return filename, None, str(e)
+                return filename, None, f"[WARNING] {e}"
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_do, t): t for t in tasks}
