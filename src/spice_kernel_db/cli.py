@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from importlib.metadata import version as pkg_version
+
 from rich.console import Console
 from rich.table import Table
 
@@ -28,8 +30,6 @@ console = Console()
 
 
 def main(argv: list[str] | None = None):
-    config = ensure_config()
-
     # ANSI green for command names when outputting to a terminal
     if sys.stdout.isatty():
         _g, _r = "\033[1;32m", "\033[0m"
@@ -71,8 +71,12 @@ commands:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--db", default=config.db_path,
-        help=f"Path to DuckDB database file (default: {config.db_path})",
+        "--version", action="version",
+        version=f"%(prog)s {pkg_version('spice-kernel-db')}",
+    )
+    parser.add_argument(
+        "--db", default=None,
+        help="Path to DuckDB database file (default: from config)",
     )
     sub = parser.add_subparsers(dest="command", metavar="{command}", help=argparse.SUPPRESS)
 
@@ -164,8 +168,8 @@ commands:
         help="URL or filename of a .tm metakernel (omit to select interactively)",
     )
     p_get.add_argument(
-        "--download-dir", default=config.kernel_dir,
-        help=f"Directory for downloaded kernels (default: {config.kernel_dir})",
+        "--download-dir", default=None,
+        help="Directory for downloaded kernels (default: from config)",
     )
     p_get.add_argument("--mission", help="Override auto-detected mission name")
     p_get.add_argument(
@@ -188,8 +192,8 @@ commands:
     )
     p_update.add_argument("--mission", help="Override mission name")
     p_update.add_argument(
-        "--download-dir", default=config.kernel_dir,
-        help=f"Directory for downloaded kernels (default: {config.kernel_dir})",
+        "--download-dir", default=None,
+        help="Directory for downloaded kernels (default: from config)",
     )
     p_update.add_argument(
         "-y", "--yes", action="store_true",
@@ -273,8 +277,16 @@ commands:
     args = parser.parse_args(argv)
 
     if not args.command:
-        parser.print_help()
+        # No subcommand — show a useful summary if possible, else help.
+        _show_default_summary()
         return
+
+    # --- Load config (deferred past --help / --version / no-args) ---
+    config = ensure_config()
+    if args.db is None:
+        args.db = config.db_path
+    if hasattr(args, "download_dir") and args.download_dir is None:
+        args.download_dir = config.kernel_dir
 
     # --- Commands that don't need a DB connection ---
     if args.command == "config":
@@ -428,13 +440,17 @@ commands:
             metakernel = _require_metakernel(args.metakernel, db, args.mission)
             if metakernel is None:
                 return
-            db.update_metakernel(
-                metakernel,
-                mission=args.mission,
-                download_dir=args.download_dir,
-                yes=args.yes,
-                force=args.force,
-            )
+            try:
+                db.update_metakernel(
+                    metakernel,
+                    mission=args.mission,
+                    download_dir=args.download_dir,
+                    yes=args.yes,
+                    force=args.force,
+                )
+            except LookupError as e:
+                print(str(e), file=sys.stderr)
+                sys.exit(1)
 
         elif args.command == "browse":
             if args.url:
@@ -490,6 +506,69 @@ commands:
 
     finally:
         db.close()
+
+
+def _show_default_summary():
+    """Show a useful summary when invoked with no subcommand.
+
+    Lists locally acquired metakernels if any exist, otherwise prints
+    a quick-start guide.
+    """
+    from spice_kernel_db.config import load_config
+
+    console.print(
+        f"[bold]spice-kernel-db[/bold] {pkg_version('spice-kernel-db')}\n"
+    )
+
+    config = load_config()
+    if not config:
+        console.print(
+            "No configuration found. Run [bold]spice-kernel-db config --setup[/bold] to get started.\n"
+        )
+        return
+
+    db_path = Path(config.db_path).expanduser()
+    if not db_path.is_file():
+        console.print(
+            "No database yet. Quick start:\n"
+            "  [bold]spice-kernel-db mission add[/bold]    # configure a mission\n"
+            "  [bold]spice-kernel-db browse[/bold] MISSION  # see available metakernels\n"
+            "  [bold]spice-kernel-db get[/bold]             # download one interactively\n"
+        )
+        return
+
+    db = KernelDB(db_path, read_only=True)
+    try:
+        rows = db.con.execute("""
+            SELECT r.mk_path, r.filename, r.mission, r.acquired_at
+            FROM metakernel_registry r
+            ORDER BY r.mission, r.filename
+        """).fetchall()
+    finally:
+        db.close()
+
+    if rows:
+        table = Table(title="Local metakernels")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Filename")
+        table.add_column("Mission")
+        table.add_column("Acquired")
+        for i, (mk_path, filename, mission, acquired) in enumerate(rows, 1):
+            acq_str = str(acquired)[:16] if acquired else ""
+            table.add_row(str(i), filename, mission, acq_str)
+        console.print(table)
+        console.print(
+            "\n[dim]Use 'spice-kernel-db check <filename>' to verify kernel availability.\n"
+            "Use 'spice-kernel-db resolve <kernel>' to get a kernel's local path.\n"
+            "Use 'spice-kernel-db update <filename>' to fetch the latest version.\n"
+            "Run 'spice-kernel-db --help' for all commands.[/dim]\n"
+        )
+    else:
+        console.print(
+            "Database exists but no metakernels acquired yet.\n\n"
+            "  [bold]spice-kernel-db browse[/bold] MISSION  # see available metakernels\n"
+            "  [bold]spice-kernel-db get[/bold]             # download one interactively\n"
+        )
 
 
 def _list_kernels(metakernel: str, kernel_type: str | None = None):
@@ -615,7 +694,6 @@ def _resolve_body_interactive(name_or_id: str) -> int | None:
     """Resolve a body name/ID string to a single NAIF ID, prompting if ambiguous.
 
     Returns the integer body ID, or None on failure / user cancellation.
-    Calls ``sys.exit(1)`` for unknown names.
     """
     from spice_kernel_db.coverage import resolve_body_id
 
@@ -626,7 +704,7 @@ def _resolve_body_interactive(name_or_id: str) -> int | None:
             f"Use a NAIF ID (e.g. 399) or a known name (e.g. Earth).",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return None
 
     if len(candidates) == 1:
         return candidates[0][0]
@@ -648,7 +726,7 @@ def _resolve_body_interactive(name_or_id: str) -> int | None:
     except ValueError:
         pass
     print("Invalid selection.", file=sys.stderr)
-    sys.exit(1)
+    return None
 
 
 def _select_local_metakernel(

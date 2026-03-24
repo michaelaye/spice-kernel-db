@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -1280,8 +1279,9 @@ class KernelDB:
         """, [str(mk_path_or_name), str(mk_path_or_name)]).fetchone()
 
         if not row:
-            print(f"Metakernel not found in registry: {mk_path_or_name}", file=sys.stderr)
-            sys.exit(1)
+            raise LookupError(
+                f"Metakernel not found in registry: {mk_path_or_name}"
+            )
 
         mk_path, source_url, mk_filename, reg_mission = row
         mission = mission or reg_mission
@@ -1292,12 +1292,10 @@ class KernelDB:
             if m and m.get("mk_dir_url"):
                 source_url = m["mk_dir_url"] + mk_filename
             else:
-                print(
-                    f"This metakernel was added via scan, not downloaded. "
-                    f"Use 'get' with a URL.",
-                    file=sys.stderr,
+                raise LookupError(
+                    "This metakernel was added via scan, not downloaded. "
+                    "Use 'get' with a URL."
                 )
-                sys.exit(1)
 
         result = self.get_metakernel(
             source_url,

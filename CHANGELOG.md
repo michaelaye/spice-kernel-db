@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-03-24
+
+### Added
+
+- **`--version` flag** — `spice-kernel-db --version` now prints the installed version.
+- **`skd` short alias** — `skd` is now a second entry point for `spice-kernel-db`, for quicker invocation.
+- **No-args summary** — running `spice-kernel-db` (or `skd`) with no subcommand now shows locally acquired metakernels and a quick-start guide instead of just the help text.
+- **Pre-release review document** — `docs/review.qmd` captures the full CLI/API/docs audit.
+
+### Changed
+
+- **Deferred config loading** — `ensure_config()` is no longer called before argument parsing. `--help`, `--version`, and no-args invocation now work on a fresh install without triggering the interactive setup wizard.
+- **`update_metakernel()` raises `LookupError`** instead of calling `sys.exit(1)`. The library layer (`db.py`) no longer calls `sys.exit()` — all exit decisions are made in the CLI layer (`cli.py`). This makes `KernelDB` safe to use as a Python API.
+- **`_resolve_body_interactive()` returns `None`** on unknown bodies and invalid selections instead of calling `sys.exit(1)`.
+- Test suite expanded from 136 to 145 tests.
+
+## [0.10.1] - 2026-03-20
+
+### Fixed
+
+- **Dedup flag now enforced** — `_link_existing_kernels()` in `get_metakernel()` now checks the per-mission `dedup` setting before creating symlinks. Previously the dedup flag was ignored, and symlinks were created unconditionally for all missions.
+- **Corrected warning text** — warnings in `get_metakernel()` and `update_metakernel()` now accurately describe the operation being performed.
+
 ## [0.10.0] - 2026-03-20
 
 ### ⚠️ CRITICAL UPDATE — Data Corruption Bug
@@ -285,6 +308,8 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.11.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.1...v0.11.0
+[0.10.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.8.1...v0.9.0

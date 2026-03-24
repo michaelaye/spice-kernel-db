@@ -2341,3 +2341,102 @@ class TestIssue11SameFilenameDifferentHash:
         ).fetchone()
         assert old_kernel is not None, "Old hash record should still exist in kernels table"
         db.close()
+
+
+class TestCLIVersion:
+    """Tests for --version flag and deferred config."""
+
+    def test_version_flag(self):
+        """--version should print the version and exit."""
+        from spice_kernel_db.cli import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--version"])
+        assert exc_info.value.code == 0
+
+    def test_help_flag(self):
+        """--help should work without triggering config setup."""
+        from spice_kernel_db.cli import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+        assert exc_info.value.code == 0
+
+    def test_no_args_does_not_crash(self, tmp_path):
+        """Invoking with no args should not crash."""
+        from spice_kernel_db.cli import main
+
+        # Should not raise — either shows summary or quick-start guide
+        main([])
+
+
+class TestCLINoArgs:
+    """Tests for the no-args default summary behavior."""
+
+    def test_no_args_with_metakernels(self, tmp_path, capsys):
+        """No-args should list metakernels when some exist."""
+        from spice_kernel_db.cli import main
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission("JUICE", "https://example.com/", "https://example.com/JUICE/kernels/mk/")
+        db.con.execute("""
+            INSERT INTO metakernel_registry (mk_path, filename, mission, source_url, acquired_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, ["/tmp/juice_ops.tm", "juice_ops.tm", "JUICE", "https://example.com/juice_ops.tm"])
+        db.close()
+
+        with patch("spice_kernel_db.config.load_config", return_value=Config(
+            db_path=str(tmp_path / "test.duckdb"),
+            kernel_dir=str(tmp_path / "kernels"),
+        )):
+            main([])
+
+        captured = capsys.readouterr()
+        assert "juice_ops.tm" in captured.out
+
+    def test_no_args_without_config(self, capsys):
+        """No-args without config should show setup hint."""
+        from spice_kernel_db.cli import main
+
+        with patch("spice_kernel_db.config.load_config", return_value=None):
+            main([])
+
+        captured = capsys.readouterr()
+        assert "config --setup" in captured.out
+
+
+class TestUpdateMetakernelRaisesLookupError:
+    """update_metakernel raises LookupError instead of sys.exit."""
+
+    def test_not_found_raises(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        with pytest.raises(LookupError, match="not found in registry"):
+            db.update_metakernel("nonexistent.tm")
+        db.close()
+
+    def test_scan_only_no_source_url_raises(self, tmp_path):
+        """Metakernel added via scan (no source_url) should raise LookupError."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.con.execute("""
+            INSERT INTO metakernel_registry (mk_path, filename, mission, source_url, acquired_at)
+            VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP)
+        """, ["/tmp/test.tm", "test.tm", "TEST"])
+        with pytest.raises(LookupError, match="added via scan"):
+            db.update_metakernel("test.tm")
+        db.close()
+
+
+class TestResolveBodyInteractiveReturnsNone:
+    """_resolve_body_interactive returns None instead of sys.exit."""
+
+    def test_unknown_body_returns_none(self):
+        from spice_kernel_db.cli import _resolve_body_interactive
+        result = _resolve_body_interactive("ZZZZNOTABODY999")
+        assert result is None
+
+    def test_invalid_selection_returns_none(self):
+        from spice_kernel_db.cli import _resolve_body_interactive
+        # "earth" is ambiguous (center vs barycenter) — give invalid input
+        with patch("builtins.input", return_value="999"):
+            result = _resolve_body_interactive("earth")
+        assert result is None
