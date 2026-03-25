@@ -42,7 +42,15 @@ erDiagram
         BOOLEAN dedup
         TIMESTAMP added_at
     }
+    kernel_coverage {
+        VARCHAR sha256 PK
+        INTEGER body_id PK
+        DOUBLE et_start
+        DOUBLE et_end
+        VARCHAR source
+    }
     kernels ||--o{ locations : "one hash → many locations"
+    kernels ||--o{ kernel_coverage : "one hash → many coverage intervals"
     metakernel_registry ||--o{ metakernel_entries : "one .tm → many entries"
 ```
 
@@ -101,17 +109,14 @@ flowchart TD
     B -->|Yes| C["✅ Return path<br/>(no warning)"]
     B -->|No| D{Exact filename<br/>in any mission?}
     D -->|Yes| E["⚠️ Return path + warning:<br/>'not found in [MISSION],<br/>using copy from [OTHER]'"]
-    D -->|No| F{Fuzzy match<br/>in preferred mission?}
-    F -->|Yes| G["⚠️ Return path + warning:<br/>'matched by content hash<br/>to [canonical_name]'"]
-    F -->|No| H{Fuzzy match<br/>in any mission?}
-    H -->|Yes| I["⚠️ Return path + warning:<br/>'matched by hash to<br/>[name] in [OTHER]'"]
-    H -->|No| J["❌ Return None"]
+    D -->|No| F{Path-suffix match<br/>on disk?}
+    F -->|Yes| G["⚠️ Return path + warning:<br/>'found on disk, registered as<br/>[name] in [MISSION]'"]
+    F -->|No| H["❌ Return None<br/>+ suggest 'scan' to re-index"]
 
     style C fill:#d4edda
     style E fill:#fff3cd
     style G fill:#fff3cd
-    style I fill:#fff3cd
-    style J fill:#f8d7da
+    style H fill:#f8d7da
 ```
 
 ### Why mission preference matters
@@ -120,20 +125,14 @@ Consider a scenario where both JUICE and generic_kernels have `pck00011.tpc`. Th
 
 By always checking the preferred mission first, the tool naturally handles this: it uses the mission's own copy when available, and only falls back to other sources when necessary — always with a warning so you know what happened.
 
-### Fuzzy matching for filename aliases
+### Path-suffix matching
 
-The "fuzzy match" steps handle cases where a metakernel requests a file under a name that doesn't exist in the database, but the *content* does exist under a different name.
+The third resolution step handles cases where a kernel exists on disk and is registered in the database, but under a different canonical name. This uses a path-suffix match: if the requested filename appears as the last component of any registered `abs_path`, it's considered a match.
 
-The fuzzy match works by progressively stripping underscore-delimited suffixes from the filename stem. For `jup365_19900101_20500101.bsp`:
-
-1. Try `jup365_19900101_20500101%` → no match
-2. Try `jup365_19900101%` → no match
-3. Try `jup365%` → matches `jup365.bsp` ✅
-
-If a match is found, the tool checks that it refers to a file that actually exists on disk, then returns it with a warning noting the alias.
+For example, if `jup365_19900101_20500101.bsp` is requested and the file exists on disk at `.../spk/jup365_19900101_20500101.bsp` but was registered under the canonical name `jup365.bsp` (because the content was first seen under that name), the path-suffix match finds it.
 
 ::: {.callout-note}
-Fuzzy matching is a fallback for convenience. The authoritative identity check is always the SHA-256 hash. If you download the file the metakernel asks for and it turns out to have the same hash as something already in the database, the tool will detect that at scan time — no fuzzy matching needed.
+Prior to v0.10.0, the tool used fuzzy prefix matching that progressively stripped underscore-delimited suffixes. This was removed because it could match completely unrelated kernels that happened to share a common prefix (e.g., all JUICE kernels start with `juice_`). Path-suffix matching is safer because it requires the exact filename to exist on disk.
 :::
 
 
@@ -212,7 +211,7 @@ The tool supports downloading kernels from remote SPICE servers, starting with N
 Mission configurations are stored in the `missions` table with:
 
 - `name`: Mission identifier (e.g., `JUICE`, `MRO`)
-- `server_url`: Base server URL (e.g., `https://spice.esac.esa.int/`)
+- `server_url`: Base server URL (e.g., `https://spiftp.esac.esa.int/data/SPICE/`)
 - `mk_dir_url`: Directory containing mission metakernels (e.g., `data/SPICE/JUICE/kernels/mk/`)
 - `dedup`: Whether to deduplicate downloaded kernels (defaults to `True` for backwards compatibility)
 - `added_at`: Timestamp of mission registration
@@ -248,7 +247,7 @@ This mirrors how SPICE itself would resolve paths if the metakernel were used in
 
 ### Parallel downloads
 
-Kernel downloads are performed in parallel using `tqdm.contrib.concurrent.thread_map()`, with progress bars for both individual file progress and overall batch progress. Each download:
+Kernel downloads are performed in parallel using `ThreadPoolExecutor` with `rich.progress` bars for both individual file progress and overall batch progress. Each download:
 
 - Computes SHA-256 during streaming to disk
 - Checks the database for existing copies with the same hash (deduplication)

@@ -14,17 +14,12 @@ The main class. Wraps a DuckDB database and provides all scanning, lookup, and r
 ### Constructor
 
 ```python
-KernelDB(db_path: str | Path = "~/.spice_kernels.duckdb")
+KernelDB(db_path: str | Path | None = None, read_only: bool = False)
 ```
 
-Opens (or creates) the database at the given path. The schema is initialized automatically.
+Opens (or creates) the database at the given path. When `db_path` is `None` (the default), the path is loaded from `~/.config/spice-kernel-db/config.toml`. The schema is initialized automatically (unless `read_only=True`).
 
-Supports context manager usage:
-
-```python
-with KernelDB() as db:
-    ...
-```
+Set `read_only=True` for commands that only query the database — this allows concurrent access while another process holds a write lock.
 
 ---
 
@@ -79,10 +74,13 @@ db.scan_directory(
     mission: str | None = None,
     extensions: set[str] | None = None,
     verbose: bool = False,
-) -> int
+    archive_dir: str | Path | None = None,
+) -> tuple[int, set[str]]
 ```
 
-Recursively scan a directory tree and register all kernel files. Returns the number of files registered.
+Recursively scan a directory tree and register all kernel files. Returns `(count, missions_found)` — the number of files registered and a set of detected mission names.
+
+If `archive_dir` is provided, files are moved into `{archive_dir}/{mission}/{type}/{filename}` and symlinks are left at the original locations.
 
 If `mission` is not provided, it's auto-detected from the path structure (looks for `.../<MISSION>/kernels/...`).
 
@@ -95,10 +93,14 @@ db.register_file(
     path: str | Path,
     mission: str | None = None,
     source_url: str | None = None,
+    archive_dir: str | Path | None = None,
+    expected_hash: str | None = None,
 ) -> str
 ```
 
 Register a single kernel file. Returns its SHA-256 hash.
+
+If `archive_dir` is provided, the file is moved into the archive and a symlink is left at the original location. If `expected_hash` is provided, the computed hash is verified before storing — raises `ValueError` on mismatch.
 
 If the file's content already exists in the database under a different filename, the new location is recorded pointing to the same hash. This is logged at the `INFO` level.
 
@@ -143,9 +145,8 @@ Returns `(path, warnings)` where `path` is the resolved absolute path (or `None`
 
 1. Exact filename match in `preferred_mission` → no warning
 2. Exact filename match in any mission → warning
-3. Fuzzy match (prefix-based) in `preferred_mission` → warning
-4. Fuzzy match in any mission → warning
-5. Not found → `(None, [])`
+3. Path-suffix match (file on disk registered under different name) → warning
+4. Not found → `(None, [])` + hint to run `scan`
 
 ---
 
@@ -157,6 +158,7 @@ Returns `(path, warnings)` where `path` is the resolved absolute path (or `None`
 db.check_metakernel(
     mk_path: str | Path,
     mission: str | None = None,
+    verbose: bool = False,
 ) -> dict
 ```
 
@@ -196,6 +198,7 @@ db.get_metakernel(
     download_dir: str | Path | None = None,
     mission: str | None = None,
     yes: bool = False,
+    force: bool = False,
 ) -> dict
 ```
 
@@ -213,6 +216,26 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 `download_dir` defaults to the configured `kernel_dir` from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
 
 Returns a dict with keys: `found`, `missing`, `downloaded`, `warnings`.
+
+#### `update_metakernel`
+
+```python
+db.update_metakernel(
+    mk_path_or_name: str | Path,
+    mission: str | None = None,
+    download_dir: str | Path | None = None,
+    yes: bool = False,
+    force: bool = False,
+) -> dict
+```
+
+Re-fetch a metakernel from its source URL and download new or missing kernels. Looks up the source URL from the `metakernel_registry`, falling back to the mission's `mk_dir_url` + filename if no source URL is stored.
+
+Raises `LookupError` if the metakernel is not found in the registry or was added via scan without a source URL.
+
+After downloading, automatically rescans the kernel directories referenced by the metakernel so newly downloaded files are immediately indexed.
+
+Returns the same dict as `get_metakernel`.
 
 #### `index_metakernel`
 
@@ -248,6 +271,7 @@ Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `m
 db.browse_remote_metakernels(
     mk_dir_url: str,
     mission: str | None = None,
+    show_versioned: bool = False,
 ) -> list[dict]
 ```
 

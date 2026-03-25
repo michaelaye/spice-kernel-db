@@ -121,7 +121,7 @@ Both use the same `<server>/<MISSION>/kernels/mk/` directory structure.
 
 ## Dependencies
 
-- Python >= 3.10
+- Python >= 3.11
 - [DuckDB](https://duckdb.org/) >= 1.0
 - [rich](https://rich.readthedocs.io/) >= 13.0
 

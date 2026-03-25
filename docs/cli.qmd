@@ -201,15 +201,16 @@ When no `name` is given, prints a summary table with kernel counts and availabil
 Fetch a remote metakernel, show which kernels are needed, and download missing ones.
 
 ```bash
-spice-kernel-db get <url> [--download-dir DIR] [--mission NAME] [-y]
+spice-kernel-db get [url] [--download-dir DIR] [--mission NAME] [-y] [--force]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `url` | URL to a remote `.tm` metakernel, or just a filename (e.g. `juice_ops.tm`) |
+| `url` | URL to a remote `.tm` metakernel, or just a filename (e.g. `juice_ops.tm`). **Omit to select interactively.** |
 | `--download-dir` | Override default kernel storage directory |
 | `--mission` | Override auto-detected mission name (required if multiple missions known and using filename) |
 | `-y, --yes` | Skip confirmation prompt |
+| `--force` | Re-download all kernels even if already on disk (skips DB lookups and remote size queries) |
 
 ```bash
 # By filename (after browsing a mission at least once)
@@ -235,7 +236,7 @@ The tool fetches the remote metakernel, resolves each kernel entry to a full URL
 Re-fetch a metakernel from its source URL and download any new or missing kernels.
 
 ```bash
-spice-kernel-db update [metakernel] [--mission NAME] [--download-dir DIR] [-y]
+spice-kernel-db update [metakernel] [--mission NAME] [--download-dir DIR] [-y] [--force]
 ```
 
 | Option | Description |
@@ -244,6 +245,7 @@ spice-kernel-db update [metakernel] [--mission NAME] [--download-dir DIR] [-y]
 | `--mission` | Override mission name |
 | `--download-dir` | Override default kernel storage directory |
 | `-y, --yes` | Skip confirmation prompt |
+| `--force` | Re-download all kernels even if already on disk |
 
 ```bash
 # Interactive selection
@@ -285,17 +287,18 @@ spice-kernel-db browse bepi    # matches BEPICOLOMBO
 spice-kernel-db browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
 ```
 
-**Without a URL**, lists all remote `mk/` directories known from the `missions` table and previous `get` commands, along with how many metakernels have been fetched from each:
+**Without a URL**, lists configured missions from the `missions` table:
 
 ```
-Known remote metakernel directories:
+Configured missions
 
-  Mission  URL                                                        Acquired
-  ───────  ─────────────────────────────────────────────────────────  ────────
-  JUICE    https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/            3
-  MRO      https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/             1
+  Mission  mk/ URL
+  ───────  ──────────────────────────────────────────────────────────
+  JUICE    https://spiftp.esac.esa.int/data/SPICE/JUICE/kernels/mk/
+  MRO      https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/
 
-Use 'spice-kernel-db browse <url>' to scan a specific directory.
+Use 'spice-kernel-db browse <mission>' to scan a specific directory.
+Use 'spice-kernel-db mission add' to add another mission.
 ```
 
 **With a URL**, fetches the Apache directory listing, parses `.tm` file entries, groups them by base name (stripping version tags like `_v461_20251127_001`), and displays a compact summary:

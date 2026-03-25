@@ -25,13 +25,14 @@ There is no linter or formatter configured. CI runs pytest across Python 3.11–
 
 Content-addressed SPICE kernel database. Every kernel file is identified by its SHA-256 hash, not its filename. Multiple filesystem locations (across missions) can reference the same hash, enabling deduplication and cross-mission reuse.
 
-### DuckDB Schema (5 tables)
+### DuckDB Schema (6 tables)
 
 - **`kernels`** — unique file content: `(sha256 PK, filename, kernel_type, size_bytes)`
 - **`locations`** — where files live on disk: `(sha256 + abs_path PK, mission, source_url, scanned_at)` → references `kernels`
 - **`metakernel_entries`** — kernel entries within a `.tm` file: `(mk_path + entry_index PK, raw_entry, filename)`
 - **`metakernel_registry`** — tracked metakernel files: `(mk_path PK, mission, source_url, filename, acquired_at)`
 - **`missions`** — configured missions: `(name PK, server_url, mk_dir_url, dedup, added_at)`
+- **`kernel_coverage`** — cached SPK body coverage intervals: `(sha256 + body_id PK, et_start, et_end, source)`
 
 ### Module Responsibilities
 
@@ -46,13 +47,12 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 
 ### Key Design Decisions
 
-**Mission-aware resolution** (`resolve_kernel`) uses a 4-step fallback:
+**Mission-aware resolution** (`resolve_kernel`) uses a 3-step fallback:
 1. Exact filename in preferred mission
 2. Exact filename in any mission
-3. Fuzzy prefix match in preferred mission
-4. Fuzzy prefix match in any mission
+3. Path-suffix match (file exists on disk under a different canonical name)
 
-Each fallback step emits a warning. Fuzzy matching handles NAIF naming variations like `jup365.bsp` vs `jup365_19900101_20500101.bsp`.
+Each fallback step emits a warning. Fuzzy prefix matching was removed in v0.10.0 due to silent data corruption risk.
 
 **Metakernel rewriting** only modifies `PATH_VALUES` — the header, `PATH_SYMBOLS`, `KERNELS_TO_LOAD`, and all comments are preserved verbatim. A symlink tree bridges between where the metakernel expects files and where they actually live.
 

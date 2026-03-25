@@ -4,7 +4,7 @@ project:
 
 website:
   title: "spice-kernel-db"
-  description: "Content-addressed SPICE kernel database for deduplication and metakernel rewriting"
+  description: "Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives"
   repo-url: https://github.com/michaelaye/spice-kernel-db
   repo-actions: [edit, issue]
   navbar:
