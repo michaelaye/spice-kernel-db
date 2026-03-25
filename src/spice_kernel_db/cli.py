@@ -56,6 +56,7 @@ commands:
     {_g}scan{_r}            Scan a directory for kernel files
     {_g}rewrite{_r}         Rewrite a metakernel with a local symlink tree
     {_g}dedup{_r}           Deduplicate kernel files using symlinks
+    {_g}prune{_r}           Remove stale DB entries for deleted files
 
   configure:
     {_g}mission{_r}         Manage configured missions
@@ -140,6 +141,15 @@ commands:
         help="Actually replace files (default: dry run)",
     )
 
+    # --- prune ---
+    p_prune = sub.add_parser(
+        "prune", help="Remove stale DB entries for files no longer on disk"
+    )
+    p_prune.add_argument(
+        "--execute", action="store_true",
+        help="Actually remove entries (default: dry run)",
+    )
+
     # --- resolve ---
     p_resolve = sub.add_parser(
         "resolve", help="Find local path for a kernel filename"
@@ -157,6 +167,10 @@ commands:
         help="Show info for a specific metakernel (by filename)",
     )
     p_mk.add_argument("--mission", help="Filter by mission name")
+    p_mk.add_argument(
+        "--remove", action="store_true",
+        help="Remove the named metakernel from the registry (does not delete files)",
+    )
 
     # --- get ---
     p_get = sub.add_parser(
@@ -367,6 +381,9 @@ commands:
         elif args.command == "dedup":
             db.deduplicate_with_symlinks(dry_run=not args.execute)
 
+        elif args.command == "prune":
+            db.prune(dry_run=not args.execute)
+
         elif args.command == "resolve":
             path, warnings = db.resolve_kernel(
                 args.filename, preferred_mission=args.mission,
@@ -384,7 +401,15 @@ commands:
                 print(f"  ⚠ {w}", file=sys.stderr)
 
         elif args.command in ("metakernels", "mk"):
-            if args.name:
+            if args.remove:
+                if not args.name:
+                    print("Usage: spice-kernel-db mk --remove <name>", file=sys.stderr)
+                    sys.exit(1)
+                if db.remove_metakernel(args.name):
+                    print(f"Metakernel '{args.name}' removed from registry.")
+                else:
+                    print(f"Metakernel '{args.name}' not found.", file=sys.stderr)
+            elif args.name:
                 db.info_metakernel(args.name)
             else:
                 db.list_metakernels(mission=args.mission)
@@ -484,22 +509,55 @@ commands:
                     else:
                         raise
             else:
-                # No args — list configured missions
+                # No args — pick a mission to browse interactively
                 missions = db.list_missions()
                 if not missions:
                     print("No configured missions.")
                     print("Use 'spice-kernel-db mission add' to set one up.")
                     return
-                table = Table(title="Configured missions")
-                table.add_column("Mission")
-                table.add_column("mk/ URL")
-                for m in missions:
-                    table.add_row(m["name"], m["mk_dir_url"])
-                console.print(table)
-                console.print(
-                    "\n[dim]Use 'spice-kernel-db browse <mission>' to scan a specific directory.\n"
-                    "Use 'spice-kernel-db mission add' to add another mission.[/dim]"
-                )
+                if len(missions) == 1:
+                    m = missions[0]
+                    console.print(
+                        f"Browsing [bold]{m['name']}[/bold]...\n"
+                    )
+                    db.browse_remote_metakernels(
+                        m["mk_dir_url"],
+                        mission=m["name"],
+                        show_versioned=args.show_versioned,
+                    )
+                else:
+                    table = Table(title="Select a mission to browse")
+                    table.add_column("#", justify="right", style="bold")
+                    table.add_column("Mission")
+                    table.add_column("mk/ URL")
+                    for i, m in enumerate(missions, 1):
+                        table.add_row(str(i), m["name"], m["mk_dir_url"])
+                    console.print(table)
+                    try:
+                        raw = input(
+                            f"\nSelect mission [1-{len(missions)}]: "
+                        ).strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        return
+                    try:
+                        idx = int(raw)
+                        if 1 <= idx <= len(missions):
+                            m = missions[idx - 1]
+                            console.print(
+                                f"\nBrowsing [bold]{m['name']}[/bold]...\n"
+                            )
+                            db.browse_remote_metakernels(
+                                m["mk_dir_url"],
+                                mission=m["name"],
+                                show_versioned=args.show_versioned,
+                            )
+                            return
+                    except ValueError:
+                        pass
+                    console.print(
+                        "[red]Invalid selection.[/red]", stderr=True,
+                    )
 
         elif args.command == "mission":
             _handle_mission(db, args)

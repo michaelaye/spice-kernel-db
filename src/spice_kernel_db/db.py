@@ -1538,6 +1538,32 @@ class KernelDB:
             "n_missing": n_missing,
         }
 
+    def remove_metakernel(self, name: str) -> bool:
+        """Remove a metakernel from the registry and its entries.
+
+        Looks up by filename or mk_path (case-insensitive prefix match on
+        filename). Does NOT delete the .tm file from disk.
+
+        Returns True if found and removed, False if not found.
+        """
+        row = self.con.execute("""
+            SELECT mk_path, filename FROM metakernel_registry
+            WHERE filename = ? OR mk_path = ?
+               OR LOWER(filename) LIKE LOWER(?) || '%'
+        """, [name, name, name]).fetchone()
+
+        if not row:
+            return False
+
+        mk_path, filename = row
+        self.con.execute(
+            "DELETE FROM metakernel_entries WHERE mk_path = ?", [mk_path],
+        )
+        self.con.execute(
+            "DELETE FROM metakernel_registry WHERE mk_path = ?", [mk_path],
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Browse remote metakernels
     # ------------------------------------------------------------------
@@ -1831,6 +1857,57 @@ class KernelDB:
         action = "Would save" if dry_run else "Saved"
         print(f"\n{action}: {total_saved / 1e6:.1f} MB")
         return plan
+
+    def prune(self, dry_run: bool = True) -> list[str]:
+        """Remove stale locations where the file no longer exists on disk.
+
+        Also removes kernels that have zero remaining locations after pruning.
+
+        Args:
+            dry_run: If True (default), only report what would be removed.
+
+        Returns:
+            List of pruned abs_path strings.
+        """
+        rows = self.con.execute(
+            "SELECT sha256, abs_path FROM locations"
+        ).fetchall()
+
+        stale: list[tuple[str, str]] = []
+        for sha256, abs_path in rows:
+            if not Path(abs_path).exists():
+                stale.append((sha256, abs_path))
+
+        if not stale:
+            print("No stale locations found.")
+            return []
+
+        action = "Would remove" if dry_run else "Removed"
+        pruned_paths = []
+        for sha256, abs_path in stale:
+            print(f"  {action}: {abs_path}")
+            pruned_paths.append(abs_path)
+            if not dry_run:
+                self.con.execute(
+                    "DELETE FROM locations WHERE sha256 = ? AND abs_path = ?",
+                    [sha256, abs_path],
+                )
+
+        # Remove orphaned kernels (no remaining locations)
+        if not dry_run:
+            orphaned = self.con.execute("""
+                SELECT k.sha256, k.filename FROM kernels k
+                LEFT JOIN locations l ON k.sha256 = l.sha256
+                WHERE l.sha256 IS NULL
+            """).fetchall()
+            for sha256, filename in orphaned:
+                self.con.execute(
+                    "DELETE FROM kernels WHERE sha256 = ?", [sha256],
+                )
+                print(f"  Removed orphaned kernel record: {filename}")
+
+        print(f"\n{action}: {len(stale)} stale location(s)")
+        return pruned_paths
 
     # ------------------------------------------------------------------
     # Coverage analysis

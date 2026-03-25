@@ -2440,3 +2440,85 @@ class TestResolveBodyInteractiveReturnsNone:
         with patch("builtins.input", return_value="999"):
             result = _resolve_body_interactive("earth")
         assert result is None
+
+
+class TestRemoveMetakernel:
+    """Tests for mk --remove / remove_metakernel."""
+
+    def test_remove_by_filename(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.con.execute("""
+            INSERT INTO metakernel_registry (mk_path, filename, mission, source_url, acquired_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, ["/tmp/juice_ops.tm", "juice_ops.tm", "JUICE", "https://example.com/juice_ops.tm"])
+        db.con.execute("""
+            INSERT INTO metakernel_entries (mk_path, entry_index, raw_entry, filename)
+            VALUES (?, 0, '$KERNELS/lsk/naif0012.tls', 'naif0012.tls')
+        """, ["/tmp/juice_ops.tm"])
+
+        assert db.remove_metakernel("juice_ops.tm") is True
+        # Registry and entries should be empty
+        assert db.con.execute("SELECT COUNT(*) FROM metakernel_registry").fetchone()[0] == 0
+        assert db.con.execute("SELECT COUNT(*) FROM metakernel_entries").fetchone()[0] == 0
+        db.close()
+
+    def test_remove_not_found(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        assert db.remove_metakernel("nonexistent.tm") is False
+        db.close()
+
+    def test_remove_by_prefix(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.con.execute("""
+            INSERT INTO metakernel_registry (mk_path, filename, mission, source_url, acquired_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, ["/tmp/juice_ops.tm", "juice_ops.tm", "JUICE", "https://example.com/juice_ops.tm"])
+
+        assert db.remove_metakernel("juice_ops") is True
+        assert db.con.execute("SELECT COUNT(*) FROM metakernel_registry").fetchone()[0] == 0
+        db.close()
+
+
+class TestPrune:
+    """Tests for prune command."""
+
+    def test_prune_removes_stale_locations(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Create a real file and register it
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("FAKE LSK")
+        h = db.register_file(kernel, mission="TEST")
+
+        # Verify it's registered
+        locs = db.find_by_hash(h)
+        assert len(locs) == 1
+
+        # Delete the file from disk
+        kernel.unlink()
+
+        # Dry run — should report but not delete
+        pruned = db.prune(dry_run=True)
+        assert len(pruned) == 1
+        assert db.con.execute("SELECT COUNT(*) FROM locations").fetchone()[0] == 1
+
+        # Execute — should actually delete
+        pruned = db.prune(dry_run=False)
+        assert len(pruned) == 1
+        assert db.con.execute("SELECT COUNT(*) FROM locations").fetchone()[0] == 0
+        # Orphaned kernel should also be removed
+        assert db.con.execute("SELECT COUNT(*) FROM kernels").fetchone()[0] == 0
+        db.close()
+
+    def test_prune_nothing_to_do(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Create a real file and register it
+        kernel = tmp_path / "naif0012.tls"
+        kernel.write_text("FAKE LSK")
+        db.register_file(kernel, mission="TEST")
+
+        # File still exists — nothing to prune
+        pruned = db.prune(dry_run=False)
+        assert len(pruned) == 0
+        db.close()
