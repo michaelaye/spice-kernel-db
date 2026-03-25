@@ -1,7 +1,7 @@
 ---
 title: "Pre-Release Review"
-subtitle: "CLI, API & Documentation audit — v0.10.1"
-date: 2026-03-24
+subtitle: "CLI, API & Documentation audit — v0.10.1 → v0.11.0"
+date: 2026-03-25
 ---
 
 This page summarises a comprehensive review of the CLI surface, Python API, and documentation conducted before the v0.11 workgroup release.
@@ -15,7 +15,7 @@ Issues are categorised by severity (**important** = should fix before release, *
 |---|-------|----------|--------|
 | C1 | `--mission` means "override" on `scan`/`get`/`update` but "filter" on `check`/`list`/`mk`/`browse` — help text doesn't distinguish | important | |
 | C2 | `-y/--yes` on `get`/`update`/`reset` but not on `dedup --execute` (which replaces files with symlinks) | minor | |
-| C3 | `sys.exit(1)` called inside `db.py` (`update_metakernel`, `_resolve_body_interactive`) — library code should raise exceptions | important | |
+| C3 | `sys.exit(1)` called inside `db.py` (`update_metakernel`, `_resolve_body_interactive`) — library code should raise exceptions | important | **fixed** v0.11.0 |
 | C4 | Mixed `print()` vs `console.print()` within the same command flow | minor | |
 | C5 | `-v/--verbose` only on `scan` and `check` — `get`/`update` have no verbosity control | minor | |
 
@@ -23,7 +23,7 @@ Issues are categorised by severity (**important** = should fix before release, *
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
-| R1 | `browse` (no args) duplicates `mission list` — both show a mission table | important | |
+| R1 | `browse` (no args) duplicates `mission list` — both show a mission table | important | **fixed** v0.11.0 |
 | R2 | `mk <name>`, `check <mk>`, `list <mk>` all parse the same metakernel with slightly different columns | minor | |
 | R3 | `get` and `update` share nearly identical flag sets — relationship could be clearer in help text | minor | |
 
@@ -31,15 +31,15 @@ Issues are categorised by severity (**important** = should fix before release, *
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
-| G1 | No `--version` flag — users can't report which version they're running | important | |
+| G1 | No `--version` flag — users can't report which version they're running | important | **fixed** v0.11.0 |
 | G2 | `resolve` requires a filename — no batch mode or `--metakernel` option | important | |
-| G3 | No way to remove a metakernel from the registry (`mk remove`) | important | |
-| G4 | No `prune` / `gc` command to clean stale locations where files were deleted from disk | important | |
-| G5 | `ensure_config()` runs before arg parsing — `--help` on a fresh install triggers interactive setup | important | |
+| G3 | No way to remove a metakernel from the registry (`mk remove`) | important | **fixed** v0.11.0 (`mk --remove`) |
+| G4 | No `prune` / `gc` command to clean stale locations where files were deleted from disk | important | **fixed** v0.11.0 |
+| G5 | `ensure_config()` runs before arg parsing — `--help` on a fresh install triggers interactive setup | important | **fixed** v0.11.0 |
 | G6 | No non-interactive `config set <key> <value>` for scripted use | minor | |
 | G7 | `coverage` positional named `body_id` but accepts names — misleading | minor | |
 | G8 | `rewrite -o` is required but could default to `<stem>_local.tm` | minor | |
-| G9 | No `skd` short alias — `spice-kernel-db` is long for frequent use | minor | |
+| G9 | No `skd` short alias — `spice-kernel-db` is long for frequent use | minor | **fixed** v0.11.0 |
 
 ### Discoverability
 
@@ -64,47 +64,47 @@ Issues are categorised by severity (**important** = should fix before release, *
 
 | # | Issue | File(s) | Status |
 |---|-------|---------|--------|
-| DOC-1 | CHANGELOG missing v0.10.1 entry | `CHANGELOG.md` | |
-| DOC-2 | CLAUDE.md and design.qmd describe removed 4-step fuzzy matching as if it still exists | `CLAUDE.md`, `docs/design.qmd` | |
-| DOC-3 | API Reference documents wrong `resolve_kernel` steps (fuzzy match) | `docs/api.qmd` | |
-| DOC-4 | API Reference wrong `KernelDB` constructor default (`~/.spice_kernels.duckdb` vs `None`) and missing `read_only` param | `docs/api.qmd` | |
-| DOC-5 | API Reference `scan_directory` return type wrong (`int` vs `tuple[int, set[str]]`), missing `archive_dir` param | `docs/api.qmd` | |
-| DOC-6 | API Reference `get_metakernel` missing `force` parameter | `docs/api.qmd` | |
-| DOC-7 | API Reference `browse_remote_metakernels` missing `show_versioned` parameter | `docs/api.qmd` | |
-| DOC-8 | API Reference `check_metakernel` missing `verbose` parameter | `docs/api.qmd` | |
-| DOC-9 | README says Python >= 3.10, pyproject.toml says >= 3.11 | `README.md` | |
-| DOC-10 | design.qmd says parallel downloads use `tqdm` — replaced by `rich` in v0.6.0 | `docs/design.qmd` | |
-| DOC-11 | design.qmd `server_url` example is wrong ESA URL | `docs/design.qmd` | |
+| DOC-1 | CHANGELOG missing v0.10.1 entry | `CHANGELOG.md` | **fixed** v0.11.0 |
+| DOC-2 | CLAUDE.md and design.qmd describe removed 4-step fuzzy matching as if it still exists | `CLAUDE.md`, `docs/design.qmd` | **fixed** v0.11.0 |
+| DOC-3 | API Reference documents wrong `resolve_kernel` steps (fuzzy match) | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-4 | API Reference wrong `KernelDB` constructor default (`~/.spice_kernels.duckdb` vs `None`) and missing `read_only` param | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-5 | API Reference `scan_directory` return type wrong (`int` vs `tuple[int, set[str]]`), missing `archive_dir` param | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-6 | API Reference `get_metakernel` missing `force` parameter | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-7 | API Reference `browse_remote_metakernels` missing `show_versioned` parameter | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-8 | API Reference `check_metakernel` missing `verbose` parameter | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-9 | README says Python >= 3.10, pyproject.toml says >= 3.11 | `README.md` | **fixed** v0.11.0 |
+| DOC-10 | design.qmd says parallel downloads use `tqdm` — replaced by `rich` in v0.6.0 | `docs/design.qmd` | **fixed** v0.11.0 |
+| DOC-11 | design.qmd `server_url` example is wrong ESA URL | `docs/design.qmd` | **fixed** v0.11.0 |
 
 ### Moderate (Incomplete / Inconsistent)
 
 | # | Issue | File(s) | Status |
 |---|-------|---------|--------|
-| DOC-12 | CLI docs `get` and `update` missing `--force` flag | `docs/cli.qmd` | |
-| DOC-13 | `browse` (no args) output format in docs doesn't match code | `docs/cli.qmd` | |
-| DOC-14 | `update_metakernel` API method not documented at all | `docs/api.qmd` | |
-| DOC-15 | Quarto site description outdated ("deduplication and metakernel rewriting") | `docs/_quarto.yml` | |
+| DOC-12 | CLI docs `get` and `update` missing `--force` flag | `docs/cli.qmd` | **fixed** v0.11.0 |
+| DOC-13 | `browse` (no args) output format in docs doesn't match code | `docs/cli.qmd` | **fixed** v0.11.0 |
+| DOC-14 | `update_metakernel` API method not documented at all | `docs/api.qmd` | **fixed** v0.11.0 |
+| DOC-15 | Quarto site description outdated ("deduplication and metakernel rewriting") | `docs/_quarto.yml` | **fixed** v0.11.0 |
 | DOC-16 | Usage guide `browse` output format doesn't match CLI docs version | `docs/usage.qmd` | |
 | DOC-17 | `list` command not mentioned in usage guide (added in v0.10.0) | `docs/usage.qmd` | |
-| DOC-18 | `register_file` API docs missing `archive_dir` and `expected_hash` parameters | `docs/api.qmd` | |
+| DOC-18 | `register_file` API docs missing `archive_dir` and `expected_hash` parameters | `docs/api.qmd` | **fixed** v0.11.0 |
 
 ### Minor (Polish)
 
 | # | Issue | File(s) | Status |
 |---|-------|---------|--------|
-| DOC-19 | pyproject.toml still says "Development Status :: 3 - Alpha" — consider "4 - Beta" | `pyproject.toml` | |
-| DOC-20 | `kernel_coverage` table missing from schema docs (listed as "5 tables" but there are 6) | `CLAUDE.md`, `docs/design.qmd` | |
-| DOC-21 | CLI docs `get` usage shows `<url>` as required but it's optional | `docs/cli.qmd` | |
+| DOC-19 | pyproject.toml still says "Development Status :: 3 - Alpha" — consider "4 - Beta" | `pyproject.toml` | **fixed** v0.11.0 |
+| DOC-20 | `kernel_coverage` table missing from schema docs (listed as "5 tables" but there are 6) | `CLAUDE.md`, `docs/design.qmd` | **fixed** v0.11.0 |
+| DOC-21 | CLI docs `get` usage shows `<url>` as required but it's optional | `docs/cli.qmd` | **fixed** v0.11.0 |
 | DOC-22 | No troubleshooting section anywhere | — | |
 
 
 ## Recommended Fix Priority
 
-1. Add `--version` flag (G1)
-2. Add `skd` alias + useful no-args behavior (G9)
-3. Move `sys.exit()` out of `db.py` into CLI layer (C3)
-4. Defer `ensure_config()` past `--help` / `--version` (G5)
-5. Add CHANGELOG v0.10.1 entry (DOC-1)
-6. Fix design.qmd / api.qmd stale fuzzy-matching docs (DOC-2, DOC-3)
-7. Add `mk remove` and `prune` commands (G3, G4)
-8. Consolidate `browse` (no args) with `mission list` (R1)
+1. ~~Add `--version` flag (G1)~~ **done**
+2. ~~Add `skd` alias + useful no-args behavior (G9)~~ **done**
+3. ~~Move `sys.exit()` out of `db.py` into CLI layer (C3)~~ **done**
+4. ~~Defer `ensure_config()` past `--help` / `--version` (G5)~~ **done**
+5. ~~Add CHANGELOG v0.10.1 entry (DOC-1)~~ **done**
+6. ~~Fix design.qmd / api.qmd stale fuzzy-matching docs (DOC-2, DOC-3)~~ **done**
+7. ~~Add `mk remove` and `prune` commands (G3, G4)~~ **done**
+8. ~~Consolidate `browse` (no args) with `mission list` (R1)~~ **done**

@@ -5,13 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.0] - 2026-03-24
+## [0.11.0] - 2026-03-25
 
 ### Added
 
 - **`--version` flag** — `spice-kernel-db --version` now prints the installed version.
 - **`skd` short alias** — `skd` is now a second entry point for `spice-kernel-db`, for quicker invocation.
 - **No-args summary** — running `spice-kernel-db` (or `skd`) with no subcommand now shows locally acquired metakernels and a quick-start guide instead of just the help text.
+- **`mk --remove` flag** — `spice-kernel-db mk --remove <name>` removes a metakernel from the registry and its entries. Does not delete files from disk.
+- **`prune` command** — `spice-kernel-db prune` finds and removes stale DB entries for files that no longer exist on disk. Also cleans up orphaned kernel records with no remaining locations. Dry-run by default (`--execute` to apply).
 - **Pre-release review document** — `docs/review.qmd` captures the full CLI/API/docs audit.
 
 ### Changed
@@ -19,7 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Deferred config loading** — `ensure_config()` is no longer called before argument parsing. `--help`, `--version`, and no-args invocation now work on a fresh install without triggering the interactive setup wizard.
 - **`update_metakernel()` raises `LookupError`** instead of calling `sys.exit(1)`. The library layer (`db.py`) no longer calls `sys.exit()` — all exit decisions are made in the CLI layer (`cli.py`). This makes `KernelDB` safe to use as a Python API.
 - **`_resolve_body_interactive()` returns `None`** on unknown bodies and invalid selections instead of calling `sys.exit(1)`.
-- Test suite expanded from 136 to 145 tests.
+- **`browse` (no args)** now picks a mission interactively and browses its remote metakernels, instead of duplicating the `mission list` table.
+- Development Status classifier upgraded from Alpha to Beta.
+- Test suite expanded from 136 to 150 tests.
+
+### Fixed
+
+- **Documentation overhaul** — removed all references to removed fuzzy filename matching from design.qmd, api.qmd, and CLAUDE.md. Updated API signatures for `scan_directory`, `register_file`, `get_metakernel`, `check_metakernel`, `browse_remote_metakernels`, and `KernelDB` constructor. Added missing `update_metakernel` API docs. Fixed Python version requirement in README (3.11, not 3.10). Updated Quarto site description. Added `kernel_coverage` table to schema docs.
 
 ## [0.10.1] - 2026-03-20
 
