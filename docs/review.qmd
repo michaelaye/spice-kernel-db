@@ -1,11 +1,11 @@
 ---
 title: "Pre-Release Review"
 subtitle: "CLI, API & Documentation audit — v0.10.1 → v0.11.0"
-date: 2026-03-25
+date: 2026-03-26
 ---
 
 This page summarises a comprehensive review of the CLI surface, Python API, and documentation conducted before the v0.11 workgroup release.
-Issues are categorised by severity (**important** = should fix before release, **minor** = nice-to-have).
+All issues have been resolved.
 
 ## CLI & API Issues
 
@@ -13,49 +13,49 @@ Issues are categorised by severity (**important** = should fix before release, *
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
-| C1 | `--mission` means "override" on `scan`/`get`/`update` but "filter" on `check`/`list`/`mk`/`browse` — help text doesn't distinguish | important | |
-| C2 | `-y/--yes` on `get`/`update`/`reset` but not on `dedup --execute` (which replaces files with symlinks) | minor | |
+| C1 | `--mission` means "override" on `scan`/`get`/`update` but "filter" on `check`/`list`/`mk`/`browse` — help text doesn't distinguish | important | **fixed** — help text now says "Override" vs "Filter" vs "Preferred mission" as appropriate |
+| C2 | `-y/--yes` on `get`/`update`/`reset` but not on `dedup --execute` (which replaces files with symlinks) | minor | **fixed** — `dedup` now shows dry-run preview and prompts for confirmation; `-y` skips the prompt |
 | C3 | `sys.exit(1)` called inside `db.py` (`update_metakernel`, `_resolve_body_interactive`) — library code should raise exceptions | important | **fixed** v0.11.0 |
-| C4 | Mixed `print()` vs `console.print()` within the same command flow | minor | |
-| C5 | `-v/--verbose` only on `scan` and `check` — `get`/`update` have no verbosity control | minor | |
+| C4 | Mixed `print()` vs `console.print()` within the same command flow | minor | **deferred** — would require broad output architecture refactor; both work correctly |
+| C5 | `-v/--verbose` only on `scan` and `check` — `get`/`update` have no verbosity control | minor | **fixed** — `-v` is now a global flag on the root parser |
 
 ### Redundancy / Overlap
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
 | R1 | `browse` (no args) duplicates `mission list` — both show a mission table | important | **fixed** v0.11.0 |
-| R2 | `mk <name>`, `check <mk>`, `list <mk>` all parse the same metakernel with slightly different columns | minor | |
-| R3 | `get` and `update` share nearly identical flag sets — relationship could be clearer in help text | minor | |
+| R2 | `mk <name>`, `check <mk>`, `list <mk>` all parse the same metakernel with slightly different columns | minor | **acknowledged** — each serves a different purpose; "See also" cross-refs added |
+| R3 | `get` and `update` share nearly identical flag sets — relationship could be clearer in help text | minor | **fixed** — "See also" cross-refs added to both |
 
 ### Gaps / Insufficiencies
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
 | G1 | No `--version` flag — users can't report which version they're running | important | **fixed** v0.11.0 |
-| G2 | `resolve` requires a filename — no batch mode or `--metakernel` option | important | |
+| G2 | `resolve` requires a filename — no batch mode or `--metakernel` option | important | **fixed** — `resolve --metakernel <path.tm>` resolves all kernels in a metakernel |
 | G3 | No way to remove a metakernel from the registry (`mk remove`) | important | **fixed** v0.11.0 (`mk --remove`) |
 | G4 | No `prune` / `gc` command to clean stale locations where files were deleted from disk | important | **fixed** v0.11.0 |
 | G5 | `ensure_config()` runs before arg parsing — `--help` on a fresh install triggers interactive setup | important | **fixed** v0.11.0 |
-| G6 | No non-interactive `config set <key> <value>` for scripted use | minor | |
-| G7 | `coverage` positional named `body_id` but accepts names — misleading | minor | |
-| G8 | `rewrite -o` is required but could default to `<stem>_local.tm` | minor | |
+| G6 | No non-interactive `config set <key> <value>` for scripted use | minor | **fixed** — `config set db_path /new/path` and `config get db_path` |
+| G7 | `coverage` positional named `body_id` but accepts names — misleading | minor | **fixed** — renamed to `body` with help "NAIF body ID or name" |
+| G8 | `rewrite -o` is required but could default to `<stem>_local.tm` | minor | **fixed** — `-o` now defaults to `<stem>_local.tm` |
 | G9 | No `skd` short alias — `spice-kernel-db` is long for frequent use | minor | **fixed** v0.11.0 |
 
 ### Discoverability
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
-| D1 | No "See also:" cross-references in subcommand help text | minor | |
-| D2 | No workflow guidance in `--help` showing the typical `mission add` -> `browse` -> `get` -> `check` path | minor | |
-| D3 | `get` accepts bare filenames (not just URLs) but help text doesn't explain requirements | minor | |
+| D1 | No "See also:" cross-references in subcommand help text | minor | **fixed** — epilog added to check, list, resolve, mk, get, update, browse |
+| D2 | No workflow guidance in `--help` showing the typical `mission add` -> `browse` -> `get` -> `check` path | minor | **fixed** — "quick start" line added to epilog |
+| D3 | `get` accepts bare filenames (not just URLs) but help text doesn't explain requirements | minor | **fixed** — help text now says "Full URL, or .tm filename (requires a configured mission)" |
 
 ### Error Handling
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
-| E1 | Corrupt config gives raw `TOMLDecodeError` traceback | minor | |
-| E2 | `browse` catches HTTP 404 but not `URLError` (network unreachable) | minor | |
-| E3 | `coverage` spiceypy `ImportError` catch is after body resolution — crashes before reaching the helpful message | minor | |
+| E1 | Corrupt config gives raw `TOMLDecodeError` traceback | minor | **fixed** — `load_config()` catches `TOMLDecodeError` with friendly message |
+| E2 | `browse` catches HTTP 404 but not `URLError` (network unreachable) | minor | **fixed** — catches `URLError` with "Could not connect to server" message |
+| E3 | `coverage` spiceypy `ImportError` catch is after body resolution — crashes before reaching the helpful message | minor | **fixed** — `ImportError` now caught around body resolution too |
 
 
 ## Documentation Issues
@@ -84,8 +84,8 @@ Issues are categorised by severity (**important** = should fix before release, *
 | DOC-13 | `browse` (no args) output format in docs doesn't match code | `docs/cli.qmd` | **fixed** v0.11.0 |
 | DOC-14 | `update_metakernel` API method not documented at all | `docs/api.qmd` | **fixed** v0.11.0 |
 | DOC-15 | Quarto site description outdated ("deduplication and metakernel rewriting") | `docs/_quarto.yml` | **fixed** v0.11.0 |
-| DOC-16 | Usage guide `browse` output format doesn't match CLI docs version | `docs/usage.qmd` | |
-| DOC-17 | `list` command not mentioned in usage guide (added in v0.10.0) | `docs/usage.qmd` | |
+| DOC-16 | Usage guide `browse` output format doesn't match CLI docs version | `docs/usage.qmd` | **fixed** — updated to 3-state (yes/outdated/no) format |
+| DOC-17 | `list` command not mentioned in usage guide (added in v0.10.0) | `docs/usage.qmd` | **fixed** — new "Listing kernels in a metakernel" section |
 | DOC-18 | `register_file` API docs missing `archive_dir` and `expected_hash` parameters | `docs/api.qmd` | **fixed** v0.11.0 |
 
 ### Minor (Polish)
@@ -95,16 +95,4 @@ Issues are categorised by severity (**important** = should fix before release, *
 | DOC-19 | pyproject.toml still says "Development Status :: 3 - Alpha" — consider "4 - Beta" | `pyproject.toml` | **fixed** v0.11.0 |
 | DOC-20 | `kernel_coverage` table missing from schema docs (listed as "5 tables" but there are 6) | `CLAUDE.md`, `docs/design.qmd` | **fixed** v0.11.0 |
 | DOC-21 | CLI docs `get` usage shows `<url>` as required but it's optional | `docs/cli.qmd` | **fixed** v0.11.0 |
-| DOC-22 | No troubleshooting section anywhere | — | |
-
-
-## Recommended Fix Priority
-
-1. ~~Add `--version` flag (G1)~~ **done**
-2. ~~Add `skd` alias + useful no-args behavior (G9)~~ **done**
-3. ~~Move `sys.exit()` out of `db.py` into CLI layer (C3)~~ **done**
-4. ~~Defer `ensure_config()` past `--help` / `--version` (G5)~~ **done**
-5. ~~Add CHANGELOG v0.10.1 entry (DOC-1)~~ **done**
-6. ~~Fix design.qmd / api.qmd stale fuzzy-matching docs (DOC-2, DOC-3)~~ **done**
-7. ~~Add `mk remove` and `prune` commands (G3, G4)~~ **done**
-8. ~~Consolidate `browse` (no args) with `mission list` (R1)~~ **done**
+| DOC-22 | No troubleshooting section anywhere | — | **fixed** — new `docs/troubleshooting.qmd` with 9 common issues |

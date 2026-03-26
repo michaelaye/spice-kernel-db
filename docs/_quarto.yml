@@ -23,6 +23,8 @@ website:
         text: CLI Reference
       - href: api.qmd
         text: API Reference
+      - href: troubleshooting.qmd
+        text: Troubleshooting
     right:
       - icon: github
         href: https://github.com/michaelaye/spice-kernel-db

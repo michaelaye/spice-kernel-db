@@ -62,6 +62,9 @@ commands:
     {_g}mission{_r}         Manage configured missions
     {_g}config{_r}          Show or update configuration
     {_g}reset{_r}           Delete the database and start fresh
+
+quick start:
+    mission add → browse MISSION → get → check
 """
 
     parser = argparse.ArgumentParser(
@@ -79,6 +82,10 @@ commands:
         "--db", default=None,
         help="Path to DuckDB database file (default: from config)",
     )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=False,
+        help="Show detailed output (per-file warnings, etc.)",
+    )
     sub = parser.add_subparsers(dest="command", metavar="{command}", help=argparse.SUPPRESS)
 
     # --- scan ---
@@ -86,10 +93,6 @@ commands:
     p_scan.add_argument("directory", help="Root directory to scan recursively")
     p_scan.add_argument(
         "--mission", help="Override auto-detected mission name"
-    )
-    p_scan.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="Print each registered file",
     )
     p_scan.add_argument(
         "--archive", action="store_true",
@@ -104,17 +107,15 @@ commands:
 
     # --- check ---
     p_check = sub.add_parser(
-        "check", help="Check which kernels in a metakernel are available locally"
+        "check",
+        help="Check which kernels in a metakernel are available locally",
+        epilog="See also: list, mk, resolve",
     )
     p_check.add_argument(
         "metakernel", nargs="?", default=None,
         help="Path to .tm file (omit to select from local registry)",
     )
-    p_check.add_argument("--mission", help="Override mission name")
-    p_check.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="Show full per-file warnings instead of summary",
-    )
+    p_check.add_argument("--mission", help="Filter by mission name")
 
     # --- rewrite ---
     p_rewrite = sub.add_parser(
@@ -123,14 +124,14 @@ commands:
     )
     p_rewrite.add_argument("metakernel", help="Path to original .tm file")
     p_rewrite.add_argument(
-        "-o", "--output", required=True,
-        help="Output .tm path",
+        "-o", "--output", default=None,
+        help="Output .tm path (default: <stem>_local.tm)",
     )
     p_rewrite.add_argument(
         "--link-root",
         help="Root for symlink tree (default: kernels/ next to output)",
     )
-    p_rewrite.add_argument("--mission", help="Override mission name")
+    p_rewrite.add_argument("--mission", help="Preferred mission for kernel resolution")
 
     # --- dedup ---
     p_dedup = sub.add_parser(
@@ -139,6 +140,10 @@ commands:
     p_dedup.add_argument(
         "--execute", action="store_true",
         help="Actually replace files (default: dry run)",
+    )
+    p_dedup.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt when --execute is used",
     )
 
     # --- prune ---
@@ -152,21 +157,31 @@ commands:
 
     # --- resolve ---
     p_resolve = sub.add_parser(
-        "resolve", help="Find local path for a kernel filename"
+        "resolve",
+        help="Find local path for a kernel filename",
+        epilog="See also: check, list",
     )
-    p_resolve.add_argument("filename", help="Kernel filename to resolve")
-    p_resolve.add_argument("--mission", help="Preferred mission")
+    p_resolve.add_argument(
+        "filename", nargs="?", default=None,
+        help="Kernel filename to resolve",
+    )
+    p_resolve.add_argument("--mission", help="Preferred mission for resolution")
+    p_resolve.add_argument(
+        "--metakernel", dest="resolve_mk", default=None,
+        help="Resolve all kernels in a .tm metakernel",
+    )
 
     # --- metakernels ---
     p_mk = sub.add_parser(
         "metakernels", aliases=["mk"],
         help="List tracked metakernels or show details",
+        epilog="See also: check, list",
     )
     p_mk.add_argument(
         "name", nargs="?",
         help="Show info for a specific metakernel (by filename)",
     )
-    p_mk.add_argument("--mission", help="Filter by mission name")
+    p_mk.add_argument("--mission", help="Filter by mission name (prefix match)")
     p_mk.add_argument(
         "--remove", action="store_true",
         help="Remove the named metakernel from the registry (does not delete files)",
@@ -176,10 +191,11 @@ commands:
     p_get = sub.add_parser(
         "get",
         help="Download missing kernels for a remote metakernel",
+        epilog="See also: browse, update",
     )
     p_get.add_argument(
         "url", nargs="?", default=None,
-        help="URL or filename of a .tm metakernel (omit to select interactively)",
+        help="Full URL, or .tm filename (requires a configured mission). Omit to select interactively.",
     )
     p_get.add_argument(
         "--download-dir", default=None,
@@ -199,6 +215,7 @@ commands:
     p_update = sub.add_parser(
         "update",
         help="Re-fetch a metakernel from its source and download new kernels",
+        epilog="See also: get, browse",
     )
     p_update.add_argument(
         "metakernel", nargs="?", default=None,
@@ -222,6 +239,7 @@ commands:
     p_browse = sub.add_parser(
         "browse",
         help="Browse remote metakernels in a NAIF mk/ directory",
+        epilog="See also: get, mission add",
     )
     p_browse.add_argument(
         "url", nargs="?", default=None,
@@ -248,12 +266,13 @@ commands:
     p_list = sub.add_parser(
         "list",
         help="List kernels contained in a metakernel",
+        epilog="See also: check, mk",
     )
     p_list.add_argument(
         "metakernel", nargs="?", default=None,
         help="Path to .tm file (omit to select from local registry)",
     )
-    p_list.add_argument("--mission", help="Override mission name")
+    p_list.add_argument("--mission", help="Filter by mission name")
     p_list.add_argument(
         "--type", dest="kernel_type", default=None,
         help="Filter by kernel type (ck, spk, fk, ik, pck, lsk, sclk, dsk)",
@@ -265,20 +284,24 @@ commands:
         help="Check SPK body coverage in a metakernel",
     )
     p_cov.add_argument(
-        "body_id",
-        help="NAIF body ID (e.g. 399) or body name (e.g. Earth)",
+        "body",
+        help="NAIF body ID (e.g. 399) or name (e.g. Earth, Mars)",
     )
     p_cov.add_argument(
         "metakernel", nargs="?", default=None,
         help="Path to .tm file or registry filename (omit to select interactively)",
     )
-    p_cov.add_argument("--mission", help="Override mission name")
+    p_cov.add_argument("--mission", help="Preferred mission for kernel resolution")
 
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update configuration")
     p_config.add_argument(
         "--setup", action="store_true",
         help="Re-run interactive setup",
+    )
+    p_config.add_argument(
+        "config_args", nargs="*", default=[],
+        help="'set <key> <value>' or 'get <key>' (keys: db_path, kernel_dir)",
     )
 
     # --- reset ---
@@ -306,6 +329,28 @@ commands:
     if args.command == "config":
         if args.setup:
             setup_interactive()
+        elif args.config_args:
+            from spice_kernel_db.config import save_config
+            ca = args.config_args
+            if ca[0] == "get" and len(ca) == 2:
+                key = ca[1]
+                if hasattr(config, key):
+                    print(getattr(config, key))
+                else:
+                    print(f"Unknown key: {key}. Valid keys: db_path, kernel_dir", file=sys.stderr)
+                    sys.exit(1)
+            elif ca[0] == "set" and len(ca) == 3:
+                key, value = ca[1], ca[2]
+                if hasattr(config, key):
+                    setattr(config, key, value)
+                    save_config(config)
+                    print(f"{key} = {value}")
+                else:
+                    print(f"Unknown key: {key}. Valid keys: db_path, kernel_dir", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                print("Usage: spice-kernel-db config [set <key> <value> | get <key>]", file=sys.stderr)
+                sys.exit(1)
         else:
             show_config(config)
         return
@@ -371,34 +416,73 @@ commands:
             )
 
         elif args.command == "rewrite":
+            output = args.output
+            if output is None:
+                mk = Path(args.metakernel)
+                output = str(mk.with_stem(mk.stem + "_local"))
             db.rewrite_metakernel(
                 args.metakernel,
-                args.output,
+                output,
                 mission=args.mission,
                 link_root=args.link_root,
             )
 
         elif args.command == "dedup":
+            if args.execute and not args.yes:
+                # Show dry run first, then ask
+                db.deduplicate_with_symlinks(dry_run=True)
+                answer = input(
+                    "\nProceed with deduplication? [y/N]: "
+                ).strip().lower()
+                if answer not in ("y", "yes"):
+                    print("Aborted.")
+                    return
             db.deduplicate_with_symlinks(dry_run=not args.execute)
 
         elif args.command == "prune":
             db.prune(dry_run=not args.execute)
 
         elif args.command == "resolve":
-            path, warnings = db.resolve_kernel(
-                args.filename, preferred_mission=args.mission,
-            )
-            if path:
-                print(path)
+            if args.resolve_mk:
+                # Batch mode — resolve all kernels in a metakernel
+                from spice_kernel_db import parse_metakernel as _parse_mk
+                parsed = _parse_mk(args.resolve_mk)
+                all_ok = True
+                for kernel in parsed.kernel_filenames():
+                    path, warnings = db.resolve_kernel(
+                        kernel, preferred_mission=args.mission,
+                    )
+                    if path:
+                        print(f"{kernel}\t{path}")
+                    else:
+                        print(f"{kernel}\tNOT FOUND", file=sys.stderr)
+                        all_ok = False
+                    for w in warnings:
+                        print(f"  ⚠ {w}", file=sys.stderr)
+                if not all_ok:
+                    sys.exit(1)
+            elif args.filename:
+                path, warnings = db.resolve_kernel(
+                    args.filename, preferred_mission=args.mission,
+                )
+                if path:
+                    print(path)
+                else:
+                    print(f"Not found: {args.filename}", file=sys.stderr)
+                    print(
+                        f"  Hint: the kernel may exist on disk but not in the database.\n"
+                        f"  Run 'spice-kernel-db scan <directory>' to re-index.",
+                        file=sys.stderr,
+                    )
+                for w in warnings:
+                    print(f"  ⚠ {w}", file=sys.stderr)
             else:
-                print(f"Not found: {args.filename}", file=sys.stderr)
                 print(
-                    f"  Hint: the kernel may exist on disk but not in the database.\n"
-                    f"  Run 'spice-kernel-db scan <directory>' to re-index.",
+                    "Usage: spice-kernel-db resolve <filename> "
+                    "or --metakernel <path.tm>",
                     file=sys.stderr,
                 )
-            for w in warnings:
-                print(f"  ⚠ {w}", file=sys.stderr)
+                sys.exit(1)
 
         elif args.command in ("metakernels", "mk"):
             if args.remove:
@@ -415,7 +499,15 @@ commands:
                 db.list_metakernels(mission=args.mission)
 
         elif args.command == "coverage":
-            body_id = _resolve_body_interactive(args.body_id)
+            try:
+                body_id = _resolve_body_interactive(args.body)
+            except ImportError:
+                print(
+                    "SpiceyPy is required for coverage analysis.\n"
+                    "Install it with: pip install spice-kernel-db[spice]",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             if body_id is None:
                 return
 
@@ -508,6 +600,11 @@ commands:
                         )
                     else:
                         raise
+                except urllib.error.URLError as e:
+                    print(
+                        f"Could not connect to server:\n  {url}\n  {e.reason}",
+                        file=sys.stderr,
+                    )
             else:
                 # No args — pick a mission to browse interactively
                 missions = db.list_missions()

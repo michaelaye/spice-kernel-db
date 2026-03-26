@@ -29,8 +29,18 @@ def load_config() -> Config | None:
     """Load config from TOML file. Returns None if not configured yet."""
     if not CONFIG_FILE.is_file():
         return None
-    with open(CONFIG_FILE, "rb") as f:
-        data = tomllib.load(f)
+    try:
+        with open(CONFIG_FILE, "rb") as f:
+            data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        import sys
+        print(
+            f"Error: config file is corrupt: {CONFIG_FILE}\n"
+            f"  {e}\n"
+            f"  Fix the file manually or re-run: spice-kernel-db config --setup",
+            file=sys.stderr,
+        )
+        return None
     return Config(
         db_path=data.get("database", {}).get("path", DEFAULT_DB_PATH),
         kernel_dir=data.get("storage", {}).get("kernel_dir", DEFAULT_KERNEL_DIR),

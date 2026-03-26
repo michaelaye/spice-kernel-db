@@ -175,21 +175,23 @@ spice-kernel-db browse JUICE
 The tool fetches the listing of `.tm` files from the mission's `mk/` directory and groups them by base name (ignoring version tags like `_v461_20251127_001`):
 
 ```
-Remote metakernels: JUICE (https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/)
+Remote metakernels: JUICE (https://spiftp.esac.esa.int/data/SPICE/JUICE/kernels/mk/)
 
-  Metakernel              Versions  Latest      Status
-  ──────────────────────  ────────  ──────────  ──────
-  juice_crema_5_1.tm            12  2024-11-27  local
-  juice_ops.tm                   8  2024-12-03  remote
-  juice_sci.tm                   5  2024-10-15  local
-  juice_struct.tm                1  2024-01-10  remote
+  Metakernel              Versions  Latest           Local
+  ──────────────────────  ────────  ──────────────── ────────
+  juice_crema_5_1.tm            12  2024-11-27 09:30 yes
+  juice_ops.tm                   8  2024-12-03 14:00 outdated
+  juice_sci.tm                   5  2024-10-15 11:00 no
+  juice_struct.tm                1  2024-01-10 08:00 no
 
-  4 unique metakernels | 26 total files | 2 acquired locally
+  Total: 4 unique | 26 files | 1 locally acquired
+  Run 'spice-kernel-db get <name>' to update outdated metakernels.
+  Use --show-versioned to see individual snapshots.
 ```
 
 - **Versions**: How many versioned snapshots exist (including the current version)
 - **Latest**: Date of the most recent version
-- **Status**: `local` means you've acquired at least one version of this metakernel; `remote` means it's only on the server
+- **Local**: `yes` (up to date), `outdated` (remote copy is newer), or `no` (not acquired)
 
 ### Showing versioned snapshots
 
@@ -370,6 +372,36 @@ db.list_metakernels(mission="JUICE")
 # Show info for a specific metakernel
 db.info_metakernel("juice_ops.tm")
 ```
+
+## Listing kernels in a metakernel
+
+The `list` command shows all kernels inside a metakernel, grouped by type:
+
+```bash
+spice-kernel-db list juice_ops.tm
+```
+
+```
+Metakernel: juice_ops.tm
+Kernels: 42 total
+(5 ck, 2 fk, 1 ik, 1 lsk, 3 pck, 1 sclk, 29 spk)
+
+   #  Type  Kernel
+  ──  ────  ──────────────────────────────────
+   1  lsk   naif0012.tls
+   2  pck   pck00011.tpc
+   3  spk   de432s.bsp
+   ...
+```
+
+Filter by kernel type:
+
+```bash
+spice-kernel-db list juice_ops.tm --type spk
+```
+
+Without arguments, you'll be prompted to pick from locally acquired metakernels.
+
 
 ## Rewriting for local use
 

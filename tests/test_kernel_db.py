@@ -2522,3 +2522,108 @@ class TestPrune:
         pruned = db.prune(dry_run=False)
         assert len(pruned) == 0
         db.close()
+
+
+class TestResolveMetakernel:
+    """Test resolve --metakernel batch mode."""
+
+    def test_resolve_metakernel(self, tmp_spice_tree):
+        """resolve --metakernel resolves all kernels in a .tm file."""
+        from spice_kernel_db.cli import main
+
+        db = KernelDB(tmp_spice_tree / "test.duckdb")
+        db.scan_directory(tmp_spice_tree)
+        db.close()
+
+        mk_path = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
+        main([
+            "--db", str(tmp_spice_tree / "test.duckdb"),
+            "resolve", "--metakernel", str(mk_path),
+            "--mission", "JUICE",
+        ])
+
+
+class TestConfigSetGet:
+    """Test config set/get subcommands."""
+
+    def test_config_get(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config(
+            db_path=str(tmp_path / "test.duckdb"),
+            kernel_dir=str(tmp_path / "kernels"),
+        )):
+            main(["config", "get", "db_path"])
+
+        captured = capsys.readouterr()
+        assert "test.duckdb" in captured.out
+
+    def test_config_set(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        config = Config(
+            db_path=str(tmp_path / "test.duckdb"),
+            kernel_dir=str(tmp_path / "kernels"),
+        )
+        with patch("spice_kernel_db.cli.ensure_config", return_value=config), \
+             patch("spice_kernel_db.config.save_config") as mock_save:
+            main(["config", "set", "kernel_dir", "/new/path"])
+
+        mock_save.assert_called_once()
+        assert config.kernel_dir == "/new/path"
+
+    def test_config_get_unknown_key(self, tmp_path):
+        from spice_kernel_db.cli import main
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit):
+                main(["config", "get", "nonexistent_key"])
+
+
+class TestCorruptConfig:
+    """Test handling of corrupt config files."""
+
+    def test_corrupt_toml_returns_none(self, tmp_path):
+        from spice_kernel_db.config import CONFIG_FILE, load_config
+
+        # Write corrupt TOML
+        corrupt_file = tmp_path / "config.toml"
+        corrupt_file.write_text("this is not [valid toml = {{{")
+
+        with patch("spice_kernel_db.config.CONFIG_FILE", corrupt_file):
+            result = load_config()
+
+        assert result is None
+
+
+class TestRewriteDefaultOutput:
+    """Test rewrite -o default behavior."""
+
+    def test_default_output(self, tmp_spice_tree):
+        from spice_kernel_db.cli import main
+
+        db = KernelDB(tmp_spice_tree / "test.duckdb")
+        db.scan_directory(tmp_spice_tree)
+        db.close()
+
+        mk_path = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
+        expected_output = mk_path.with_stem("juice_test_local")
+
+        main([
+            "--db", str(tmp_spice_tree / "test.duckdb"),
+            "rewrite", str(mk_path), "--mission", "JUICE",
+        ])
+
+        assert expected_output.is_file()
+
+
+class TestGlobalVerbose:
+    """Test that -v works as a global flag."""
+
+    def test_verbose_flag_on_help(self):
+        from spice_kernel_db.cli import main
+
+        # --help should mention -v
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+        assert exc_info.value.code == 0

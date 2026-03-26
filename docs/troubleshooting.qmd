@@ -1,0 +1,105 @@
+---
+title: "Troubleshooting"
+subtitle: "Common issues and solutions"
+---
+
+## "Database is locked"
+
+DuckDB uses file-level locking. Only one process can write at a time.
+
+**Symptoms:** `duckdb.IOException: Could not set lock on file`
+
+**Solutions:**
+
+- Wait for the other process to finish (e.g., a running `get` or `scan`).
+- Read-only commands (`check`, `list`, `resolve`, `stats`, `mk`, `coverage`, `duplicates`) open the database in read-only mode and can run concurrently with a writer.
+- If no other process is running, the lock file may be stale. Delete `<db_path>.wal` (the write-ahead log) and retry.
+
+
+## "No locally acquired metakernels"
+
+You need to configure a mission and download a metakernel first.
+
+```bash
+spice-kernel-db mission add     # set up a mission
+spice-kernel-db browse MISSION  # see what's available
+spice-kernel-db get             # download one interactively
+```
+
+
+## "Not found" when resolving a kernel
+
+The kernel exists on disk but isn't in the database yet.
+
+```bash
+# Re-index the directory containing the kernel
+spice-kernel-db scan /path/to/kernels
+```
+
+
+## `spice-kernel-db get` downloads everything again
+
+By default, the tool skips files that match both the expected size and SHA-256 hash. If files were corrupted or partially downloaded, they'll be re-downloaded. Use `--force` to bypass all skip checks.
+
+
+## Metakernel paths don't work with SpiceyPy
+
+SPICE resolves `PATH_VALUES` relative to the **current working directory**, not the metakernel file location. The tool writes absolute `PATH_VALUES` in saved `.tm` files so they work from any directory.
+
+If you see `SPICE(NOSUCHFILE)`, check that the paths in the `.tm` file are absolute:
+
+```bash
+grep PATH_VALUES /path/to/your.tm
+```
+
+
+## Symlinks not supported (Windows)
+
+On Windows, symlink creation requires Developer Mode or administrator privileges. If symlinks fail, the tool still downloads and registers files — only the symlinks are skipped. The metakernel may not work directly; use `rewrite` to create a local copy with correct paths.
+
+
+## SpiceyPy not found for `coverage`
+
+The `coverage` command requires the optional `spiceypy` dependency:
+
+```bash
+pip install spice-kernel-db[spice]
+```
+
+Or install SpiceyPy separately: `pip install spiceypy`
+
+
+## Corrupt config file
+
+If `config.toml` is malformed, the tool prints an error and falls back to interactive setup. To fix manually:
+
+```bash
+# Show the config file location
+spice-kernel-db config
+
+# Re-run setup
+spice-kernel-db config --setup
+```
+
+Or edit `~/.config/spice-kernel-db/config.toml` directly:
+
+```toml
+[database]
+path = "~/.local/share/spice-kernel-db/kernels.duckdb"
+
+[storage]
+kernel_dir = "~/.local/share/spice-kernel-db/kernels"
+```
+
+
+## Stale entries after deleting files
+
+If you've deleted kernel files from disk, the database still references them. Use `prune` to clean up:
+
+```bash
+# Preview what would be removed
+spice-kernel-db prune
+
+# Actually remove stale entries
+spice-kernel-db prune --execute
+```

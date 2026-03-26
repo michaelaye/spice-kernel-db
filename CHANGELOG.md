@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.0] - 2026-03-25
+## [0.11.0] - 2026-03-26
 
 ### Added
 
@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **No-args summary** — running `spice-kernel-db` (or `skd`) with no subcommand now shows locally acquired metakernels and a quick-start guide instead of just the help text.
 - **`mk --remove` flag** — `spice-kernel-db mk --remove <name>` removes a metakernel from the registry and its entries. Does not delete files from disk.
 - **`prune` command** — `spice-kernel-db prune` finds and removes stale DB entries for files that no longer exist on disk. Also cleans up orphaned kernel records with no remaining locations. Dry-run by default (`--execute` to apply).
+- **`resolve --metakernel`** — batch-resolve all kernels in a `.tm` file, printing `filename\tpath` for each.
+- **`config set/get`** — `config set db_path /new/path` and `config get db_path` for scripted, non-interactive configuration.
+- **Global `-v/--verbose`** flag on the root parser, replacing per-command `-v` on `scan` and `check`.
+- **Troubleshooting page** — `docs/troubleshooting.qmd` with 9 common issues and solutions.
+- **Quick-start workflow** in the `--help` epilog: `mission add → browse → get → check`.
+- **"See also" cross-references** in subcommand help text (check, list, resolve, mk, get, update, browse).
 - **Pre-release review document** — `docs/review.qmd` captures the full CLI/API/docs audit.
 
 ### Changed
@@ -22,12 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`update_metakernel()` raises `LookupError`** instead of calling `sys.exit(1)`. The library layer (`db.py`) no longer calls `sys.exit()` — all exit decisions are made in the CLI layer (`cli.py`). This makes `KernelDB` safe to use as a Python API.
 - **`_resolve_body_interactive()` returns `None`** on unknown bodies and invalid selections instead of calling `sys.exit(1)`.
 - **`browse` (no args)** now picks a mission interactively and browses its remote metakernels, instead of duplicating the `mission list` table.
+- **`rewrite -o` is now optional** — defaults to `<stem>_local.tm` when omitted.
+- **`coverage` positional renamed** from `body_id` to `body` with clearer help text.
+- **`dedup --execute` now prompts** for confirmation (shows dry-run preview first). Use `-y` to skip.
+- **`--mission` help text standardized** — "Override" for commands that set the mission, "Filter" for listing commands, "Preferred mission" for resolution commands.
+- **`get` help text clarified** — explains that filenames require a configured mission.
 - Development Status classifier upgraded from Alpha to Beta.
-- Test suite expanded from 136 to 150 tests.
+- Test suite expanded from 136 to 157 tests.
 
 ### Fixed
 
-- **Documentation overhaul** — removed all references to removed fuzzy filename matching from design.qmd, api.qmd, and CLAUDE.md. Updated API signatures for `scan_directory`, `register_file`, `get_metakernel`, `check_metakernel`, `browse_remote_metakernels`, and `KernelDB` constructor. Added missing `update_metakernel` API docs. Fixed Python version requirement in README (3.11, not 3.10). Updated Quarto site description. Added `kernel_coverage` table to schema docs.
+- **Corrupt config handling** — `load_config()` now catches `TOMLDecodeError` with a friendly error message instead of a raw traceback.
+- **`browse` network error** — catches `URLError` (network unreachable) with "Could not connect to server" message.
+- **`coverage` ImportError** — now caught around body resolution too, not just the coverage analysis call.
+- **Documentation overhaul** — removed all references to removed fuzzy filename matching from design.qmd, api.qmd, and CLAUDE.md. Updated API signatures for `scan_directory`, `register_file`, `get_metakernel`, `check_metakernel`, `browse_remote_metakernels`, and `KernelDB` constructor. Added missing `update_metakernel` API docs. Fixed Python version requirement in README (3.11, not 3.10). Updated Quarto site description. Added `kernel_coverage` table to schema docs. Updated usage.qmd browse output format. Added `list` command to usage guide.
 
 ## [0.10.1] - 2026-03-20
 
