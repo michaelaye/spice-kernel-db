@@ -2536,11 +2536,12 @@ class TestResolveMetakernel:
         db.close()
 
         mk_path = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
-        main([
-            "--db", str(tmp_spice_tree / "test.duckdb"),
-            "resolve", "--metakernel", str(mk_path),
-            "--mission", "JUICE",
-        ])
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            main([
+                "--db", str(tmp_spice_tree / "test.duckdb"),
+                "resolve", "--metakernel", str(mk_path),
+                "--mission", "JUICE",
+            ])
 
 
 class TestConfigSetGet:
@@ -2609,10 +2610,11 @@ class TestRewriteDefaultOutput:
         mk_path = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
         expected_output = mk_path.with_stem("juice_test_local")
 
-        main([
-            "--db", str(tmp_spice_tree / "test.duckdb"),
-            "rewrite", str(mk_path), "--mission", "JUICE",
-        ])
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            main([
+                "--db", str(tmp_spice_tree / "test.duckdb"),
+                "rewrite", str(mk_path), "--mission", "JUICE",
+            ])
 
         assert expected_output.is_file()
 
