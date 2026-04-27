@@ -16,7 +16,7 @@ All issues have been resolved.
 | C1 | `--mission` means "override" on `scan`/`get`/`update` but "filter" on `check`/`list`/`mk`/`browse` — help text doesn't distinguish | important | **fixed** — help text now says "Override" vs "Filter" vs "Preferred mission" as appropriate |
 | C2 | `-y/--yes` on `get`/`update`/`reset` but not on `dedup --execute` (which replaces files with symlinks) | minor | **fixed** — `dedup` now shows dry-run preview and prompts for confirmation; `-y` skips the prompt |
 | C3 | `sys.exit(1)` called inside `db.py` (`update_metakernel`, `_resolve_body_interactive`) — library code should raise exceptions | important | **fixed** v0.11.0 |
-| C4 | Mixed `print()` vs `console.print()` within the same command flow | minor | **deferred** — would require broad output architecture refactor; both work correctly |
+| C4 | Mixed `print()` vs `console.print()` within the same command flow | minor | **deferred** — would require a larger output architecture refactor (47 `print()` calls in `db.py` alongside `rich.Table`/`Panel` usage); both produce correct output today, and a blanket replacement risks formatting regressions for minimal user-visible benefit |
 | C5 | `-v/--verbose` only on `scan` and `check` — `get`/`update` have no verbosity control | minor | **fixed** — `-v` is now a global flag on the root parser |
 
 ### Redundancy / Overlap
