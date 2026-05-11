@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-05-11
+
+### Added
+
+- **Alias symlinks on `get`** — when the interactive picker groups versioned snapshots under a base name (e.g. `juice_crema_5_2.tm` covers `juice_crema_5_2_v470_20260415_001.tm`), `get` now creates a relative symlink at the alias name and registers a second `metakernel_registry` row so both names resolve. Also catches HTTP redirects via `resp.geturl()`. Refuses to clobber regular files at the alias path; replaces existing symlinks.
+- **Interactive `resolve` picker** — running `spice-kernel-db resolve` with no arguments now opens a numbered table of tracked metakernels (filtered by `--mission` if given) and prints the selected `mk_path`, instead of exiting with a usage error.
+
 ## [0.11.1] - 2026-05-11
 
 ### Fixed
@@ -336,6 +343,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.12.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.0...v0.10.1
