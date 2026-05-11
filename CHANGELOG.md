@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-05-11
+
+### Fixed
+
+- **`resolve` finds tracked metakernels** — `spice-kernel-db resolve foo.tm` now returns the path of a `.tm` file acquired via `get` (previously returned "Not found" because `resolve_kernel` only consulted the `kernels`/`locations` tables and ignored `metakernel_registry`). Mission preference and cross-mission fallback warnings work the same as for regular kernels.
+
 ## [0.11.0] - 2026-03-26
 
 ### Added
@@ -330,6 +336,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.11.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.9.1...v0.10.0

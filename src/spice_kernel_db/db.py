@@ -537,7 +537,8 @@ class KernelDB:
           1. Exact filename match in preferred_mission
           2. Exact filename match in any mission
           3. Path-suffix match (file on disk registered under different name)
-          4. None — suggest ``spice-kernel-db scan`` to re-index
+          4. Metakernel registry match (for ``.tm`` files acquired via ``get``)
+          5. None — suggest ``spice-kernel-db scan`` to re-index
 
         Returns:
             (resolved_path, warnings) where warnings is a list of
@@ -591,6 +592,27 @@ class KernelDB:
                         f"{h['canonical_name']} in [{h['mission']}]"
                     )
                 return h["abs_path"], warnings
+
+        # --- 4. Metakernel registry (for .tm files acquired via 'get') ---
+        if filename.lower().endswith(".tm"):
+            mk_rows = self.con.execute(
+                "SELECT mk_path, mission FROM metakernel_registry "
+                "WHERE filename = ?",
+                [filename],
+            ).fetchall()
+            if preferred_mission:
+                for mk_path, mis in mk_rows:
+                    if (mis.lower() == preferred_mission.lower()
+                            and Path(mk_path).is_file()):
+                        return mk_path, warnings
+            for mk_path, mis in mk_rows:
+                if Path(mk_path).is_file():
+                    if preferred_mission:
+                        warnings.append(
+                            f"{filename}: not found in [{preferred_mission}] "
+                            f"registry, using copy from [{mis}]"
+                        )
+                    return mk_path, warnings
 
         return None, warnings
 

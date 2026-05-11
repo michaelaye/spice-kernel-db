@@ -352,6 +352,41 @@ class TestResolveKernel:
         assert path is not None
         assert Path(path).is_file()
 
+    def test_resolve_metakernel_from_registry(
+        self, populated_db, tmp_spice_tree
+    ):
+        """A .tm file tracked only in metakernel_registry is resolvable."""
+        mk = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
+        populated_db.con.execute(
+            "INSERT OR REPLACE INTO metakernel_registry "
+            "VALUES (?, ?, ?, ?, current_timestamp)",
+            [str(mk), "JUICE", "https://example.com/juice_test.tm",
+             "juice_test.tm"],
+        )
+        path, warnings = populated_db.resolve_kernel(
+            "juice_test.tm", preferred_mission="JUICE"
+        )
+        assert path == str(mk)
+        assert warnings == []
+
+    def test_resolve_metakernel_cross_mission_warns(
+        self, populated_db, tmp_spice_tree
+    ):
+        """Resolving a .tm registered in another mission emits a warning."""
+        mk = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
+        populated_db.con.execute(
+            "INSERT OR REPLACE INTO metakernel_registry "
+            "VALUES (?, ?, ?, ?, current_timestamp)",
+            [str(mk), "JUICE", "https://example.com/juice_test.tm",
+             "juice_test.tm"],
+        )
+        path, warnings = populated_db.resolve_kernel(
+            "juice_test.tm", preferred_mission="MRO"
+        )
+        assert path == str(mk)
+        assert len(warnings) == 1
+        assert "not found in [MRO]" in warnings[0]
+
 
 class TestDuplicates:
     def test_report_duplicates(self, populated_db):
