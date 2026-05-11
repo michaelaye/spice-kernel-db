@@ -163,7 +163,8 @@ quick start:
     )
     p_resolve.add_argument(
         "filename", nargs="?", default=None,
-        help="Kernel filename to resolve",
+        help="Kernel filename to resolve "
+             "(omit to pick a tracked metakernel interactively)",
     )
     p_resolve.add_argument("--mission", help="Preferred mission for resolution")
     p_resolve.add_argument(
@@ -477,12 +478,11 @@ quick start:
                 for w in warnings:
                     print(f"  ⚠ {w}", file=sys.stderr)
             else:
-                print(
-                    "Usage: spice-kernel-db resolve <filename> "
-                    "or --metakernel <path.tm>",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                # No filename — offer interactive picker over local metakernels
+                picked = _interactive_pick_local_metakernel(db, args.mission)
+                if picked is None:
+                    sys.exit(1)
+                print(picked)
 
         elif args.command in ("metakernels", "mk"):
             if args.remove:
@@ -530,11 +530,13 @@ quick start:
 
         elif args.command == "get":
             url = args.url
+            alias_filename: str | None = None
             if url is None:
                 # Interactive selection — fetch remote listing
-                url = _interactive_select_metakernel(db, args.mission)
-                if not url:
+                selection = _interactive_select_metakernel(db, args.mission)
+                if not selection:
                     return
+                url, alias_filename = selection
                 args.mission = args.mission or _guess_mission_from_url(url)
             elif not url.startswith("http"):
                 # Treat as a filename — resolve mission mk_dir_url
@@ -551,6 +553,7 @@ quick start:
                 mission=args.mission,
                 yes=args.yes,
                 force=args.force,
+                alias_filename=alias_filename,
             )
 
         elif args.command == "update":
@@ -1076,12 +1079,76 @@ def _guess_mission_from_url(url: str) -> str | None:
     return guess_mission(url)
 
 
+def _interactive_pick_local_metakernel(
+    db: KernelDB, mission_filter: str | None,
+) -> str | None:
+    """Show a picker over locally tracked metakernels and return the chosen path.
+
+    Reads ``metakernel_registry`` (optionally filtered by mission with
+    case-insensitive prefix matching) and prompts the user to pick one.
+    Returns the ``mk_path`` of the selection, or ``None`` if there are
+    no entries, the file no longer exists on disk, or the user cancels.
+    """
+    if mission_filter:
+        rows = db.con.execute(
+            "SELECT mk_path, filename, mission FROM metakernel_registry "
+            "WHERE LOWER(mission) LIKE LOWER(?) || '%' "
+            "ORDER BY mission, filename",
+            [mission_filter],
+        ).fetchall()
+    else:
+        rows = db.con.execute(
+            "SELECT mk_path, filename, mission FROM metakernel_registry "
+            "ORDER BY mission, filename"
+        ).fetchall()
+
+    if not rows:
+        msg = "No tracked metakernels"
+        if mission_filter:
+            msg += f" for mission matching '{mission_filter}'"
+        msg += ". Use 'spice-kernel-db get' to acquire one."
+        console.print(f"[yellow]{msg}[/yellow]", stderr=True)
+        return None
+
+    table = Table(title="Tracked metakernels")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Mission")
+    table.add_column("Metakernel")
+    for i, (_, filename, mis) in enumerate(rows, 1):
+        table.add_row(str(i), mis, filename)
+    console.print(table)
+
+    try:
+        raw = input(f"\nSelect metakernel [1-{len(rows)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(rows):
+            mk_path = rows[idx - 1][0]
+            if not Path(mk_path).is_file():
+                console.print(
+                    f"[red]File missing on disk: {mk_path}[/red]",
+                    stderr=True,
+                )
+                return None
+            return mk_path
+    except ValueError:
+        pass
+    console.print("[red]Invalid selection.[/red]", stderr=True)
+    return None
+
+
 def _interactive_select_metakernel(
     db: KernelDB, mission_name: str | None,
-) -> str | None:
+) -> tuple[str, str | None] | None:
     """Fetch remote metakernels and let the user pick one interactively.
 
-    Returns the full URL of the selected metakernel, or None on failure.
+    Returns ``(url, alias_filename)`` for the selected metakernel, or
+    ``None`` on failure. ``alias_filename`` is the version-stripped base
+    name (e.g. ``juice_crema_5_2.tm``) when the picked row groups one or
+    more versioned snapshots, otherwise ``None``.
     """
     mk_dir_url, resolved_name = _resolve_mission_mk_dir(db, mission_name)
     if not mk_dir_url:
@@ -1118,12 +1185,13 @@ def _interactive_select_metakernel(
     local_filenames = {r[0] for r in local_rows}
 
     # Build selection list — one row per base_name, link to latest version
-    choices: list[tuple[str, str, bool]] = []  # (url, base_name, is_local)
+    # (url, base_name, latest_filename, is_local)
+    choices: list[tuple[str, str, str, bool]] = []
     for base_name in sorted(groups):
         group = groups[base_name]
         latest = max(group, key=lambda e: e.filename)
         is_local = any(e.filename in local_filenames for e in group)
-        choices.append((latest.url, base_name, is_local))
+        choices.append((latest.url, base_name, latest.filename, is_local))
 
     table = Table(title=f"Available metakernels — {resolved_name or 'remote'}")
     table.add_column("#", justify="right", style="bold")
@@ -1147,8 +1215,9 @@ def _interactive_select_metakernel(
     try:
         idx = int(raw)
         if 1 <= idx <= len(choices):
-            url, _, _ = choices[idx - 1]
-            return url
+            url, base_name, latest_filename, _ = choices[idx - 1]
+            alias = base_name if base_name != latest_filename else None
+            return url, alias
     except ValueError:
         pass
     console.print("[red]Invalid selection.[/red]", stderr=True)

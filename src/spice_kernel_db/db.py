@@ -42,7 +42,7 @@ from spice_kernel_db.remote import (
     SPICE_SERVERS,
     download_kernel,
     download_kernels_parallel,
-    fetch_metakernel,
+    _fetch_metakernel,
     list_remote_metakernels,
     list_remote_missions,
     query_remote_sizes,
@@ -1007,6 +1007,44 @@ class KernelDB:
                     )
         return n_linked
 
+    def _create_metakernel_alias(
+        self,
+        alias_path: Path,
+        target: Path,
+        mission: str,
+        source_url: str,
+        alias_filename: str,
+    ) -> None:
+        """Create a symlink ``alias_path → target.name`` and register it.
+
+        If ``alias_path`` already exists as a regular file (not a symlink),
+        leave it alone and emit a warning — refuse to clobber user data.
+        If it exists as a symlink, replace it to point at the new target.
+        """
+        if alias_path.is_symlink():
+            alias_path.unlink()
+        elif alias_path.exists():
+            console.print(
+                f"[yellow]Alias {alias_filename} already exists as a regular "
+                f"file in {alias_path.parent} — not overwriting.[/yellow]"
+            )
+            return
+        try:
+            alias_path.symlink_to(target.name)
+        except OSError as e:
+            console.print(
+                f"[yellow]Could not create alias symlink "
+                f"{alias_path}: {e}[/yellow]"
+            )
+            return
+        self.con.execute("""
+            INSERT OR REPLACE INTO metakernel_registry
+            VALUES (?, ?, ?, ?, current_timestamp)
+        """, [str(alias_path), mission, source_url, alias_filename])
+        console.print(
+            f"  Created alias [bold]{alias_filename}[/bold] → {target.name}"
+        )
+
     def get_metakernel(
         self,
         url: str,
@@ -1014,6 +1052,7 @@ class KernelDB:
         mission: str | None = None,
         yes: bool = False,
         force: bool = False,
+        alias_filename: str | None = None,
     ) -> dict:
         """Fetch a remote metakernel, show status, and download missing kernels.
 
@@ -1024,6 +1063,12 @@ class KernelDB:
             mission: Override auto-detected mission name.
             yes: If True, skip the confirmation prompt.
             force: If True, treat all kernels as missing and re-download.
+            alias_filename: Optional second name to expose this metakernel
+                under (e.g. the version-stripped ``juice_crema_5_2.tm`` when
+                the actual file is ``juice_crema_5_2_v470_20260415_001.tm``).
+                A symlink is created at ``mk/<alias_filename>`` pointing to
+                the downloaded file, and a second ``metakernel_registry``
+                row is added so ``resolve <alias_filename>`` works.
 
         Returns:
             dict with keys: found, missing, downloaded, warnings
@@ -1035,8 +1080,8 @@ class KernelDB:
 
         # 1. Fetch and parse
         console.print(f"Fetching [bold]{url}[/bold] ...")
-        text = fetch_metakernel(url)
-        parsed = parse_metakernel_text(text, url)
+        text, final_url = _fetch_metakernel(url)
+        parsed = parse_metakernel_text(text, final_url)
         if mission is None:
             mission = guess_mission(url)
         # Resolve to canonical mission name from DB (e.g. "juice" → "JUICE")
@@ -1047,7 +1092,13 @@ class KernelDB:
         # 1b. Save .tm file to disk with absolute PATH_VALUES so it works
         # from any working directory (SPICE resolves paths relative to CWD,
         # not relative to the .tm file).
-        mk_filename = url.rsplit("/", 1)[-1]
+        # Use final_url so HTTP redirects (e.g. alias → versioned snapshot)
+        # land under the canonical versioned filename on disk.
+        mk_filename = final_url.rsplit("/", 1)[-1]
+        requested_filename = url.rsplit("/", 1)[-1]
+        # Auto-detect an HTTP-redirect alias the caller did not pass explicitly
+        if alias_filename is None and requested_filename != mk_filename:
+            alias_filename = requested_filename
         mk_dest = download_dir / mission / "mk" / mk_filename
         mk_dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1063,7 +1114,14 @@ class KernelDB:
         self.con.execute("""
             INSERT OR REPLACE INTO metakernel_registry
             VALUES (?, ?, ?, ?, current_timestamp)
-        """, [str(mk_dest), mission, url, mk_filename])
+        """, [str(mk_dest), mission, final_url, mk_filename])
+
+        # 1b-alias. Expose the metakernel under a second name via symlink.
+        if alias_filename and alias_filename != mk_filename:
+            alias_path = mk_dir / alias_filename
+            self._create_metakernel_alias(
+                alias_path, mk_dest, mission, url, alias_filename,
+            )
 
         # 1c. Write .spice-server marker for scan auto-detection
         mk_dir_url = url.rsplit("/", 1)[0] + "/"

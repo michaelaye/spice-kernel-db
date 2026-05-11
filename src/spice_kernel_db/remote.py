@@ -178,8 +178,14 @@ def check_mk_availability(
 
 def fetch_metakernel(url: str) -> str:
     """Download metakernel text content from a URL."""
+    return _fetch_metakernel(url)[0]
+
+
+def _fetch_metakernel(url: str) -> tuple[str, str]:
+    """Download metakernel; return (text, final_url_after_redirects)."""
     with urllib.request.urlopen(url) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        text = resp.read().decode("utf-8", errors="replace")
+        return text, resp.geturl()
 
 
 def resolve_kernel_urls(

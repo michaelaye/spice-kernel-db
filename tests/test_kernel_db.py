@@ -679,12 +679,14 @@ class TestGetMetakernel:
 
         if url.endswith(".tm"):
             mock_resp.read.return_value = self.REMOTE_MK_TEXT.encode()
+            mock_resp.geturl.return_value = url
             mock_resp.__enter__ = lambda s: s
             mock_resp.__exit__ = MagicMock(return_value=False)
             return mock_resp
 
         # HEAD request for sizes
         mock_resp.headers = {"Content-Length": "1024"}
+        mock_resp.geturl.return_value = url
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         return mock_resp
@@ -810,6 +812,56 @@ class TestGetMetakernel:
         assert "server_url=" in content
         assert "mk_dir_url=" in content
         assert "naif.jpl.nasa.gov" in content
+
+    def test_get_creates_alias_symlink(self, populated_db, tmp_path):
+        """get_metakernel(alias_filename=...) creates a symlink alias."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test_v470_20260415_001.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                alias_filename="test.tm",
+            )
+
+        mk_dir = dl_dir / "JUICE" / "mk"
+        versioned = mk_dir / "test_v470_20260415_001.tm"
+        alias = mk_dir / "test.tm"
+        assert versioned.is_file() and not versioned.is_symlink()
+        assert alias.is_symlink()
+        assert alias.resolve() == versioned.resolve()
+
+        # Both names should resolve via metakernel_registry
+        path, _ = populated_db.resolve_kernel(
+            "test.tm", preferred_mission="JUICE"
+        )
+        assert path == str(alias)
+        path, _ = populated_db.resolve_kernel(
+            "test_v470_20260415_001.tm", preferred_mission="JUICE"
+        )
+        assert path == str(versioned)
+
+    def test_get_alias_refuses_to_clobber_regular_file(
+        self, populated_db, tmp_path
+    ):
+        """If alias_filename is a real file on disk, don't overwrite it."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test_v470_20260415_001.tm"
+        dl_dir = tmp_path / "downloads"
+        mk_dir = dl_dir / "JUICE" / "mk"
+        mk_dir.mkdir(parents=True)
+        existing = mk_dir / "test.tm"
+        existing.write_text("PRECIOUS USER DATA")
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                alias_filename="test.tm",
+            )
+
+        assert existing.read_text() == "PRECIOUS USER DATA"
+        assert not existing.is_symlink()
 
 
 # ---------------------------------------------------------------------------
