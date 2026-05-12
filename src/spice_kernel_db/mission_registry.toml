@@ -1,0 +1,26 @@
+# Curated registry of verified metakernel directory locations for missions
+# whose layout deviates from the default {server_url}{MISSION}/kernels/mk/ path.
+#
+# An empirical NAIF survey found that no missions there use the speculative
+# alternates (spice_kernels/mk/, data/spice/mk/, etc.) one might guess from
+# naming convention. So this file is deliberately sparse — it should grow
+# only when someone confirms a working metakernel directory somewhere on the
+# web (typically a PDS node or a mission-specific website).
+#
+# Each table key is a mission name (case-sensitive, matches NAIF/ESA dir name
+# when using {server}/{m} placeholders, or any string when using absolute URLs).
+# Placeholders inside `candidates`:
+#   {server} — server URL with trailing slash
+#   {m}      — mission directory name (the table key)
+# Absolute URLs (without placeholders) are also accepted.
+#
+# Candidates are probed (HEAD request) in the listed order; the first that
+# responds 200 is used. The default ``kernels/mk/`` path is always appended
+# automatically by the auto-probe layer, so it does not need to appear here.
+#
+# Set planetarypy = true for missions managed by the planetarypy library; when
+# the [planetarypy] extra is installed and --use-planetarypy is given, the
+# mission-add flow will offer to delegate kernel management.
+#
+# Contributions welcome — please verify the path returns HTTP 200 before
+# submitting a PR. See docs/troubleshooting.qmd.

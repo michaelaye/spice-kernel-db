@@ -525,6 +525,93 @@ Dataclass with attributes:
 | `base_name` | `str` | Filename with version tag stripped |
 | `version_tag` | `str \| None` | Version tag (e.g. `"v461_20251127_001"`) or `None` |
 
+### `probe_mk_candidates`
+
+```python
+from spice_kernel_db.remote import probe_mk_candidates
+probe_mk_candidates(urls: list[str], *, max_workers: int = 8, timeout: float = 5.0) -> list[str]
+```
+
+Send parallel HEAD requests to candidate metakernel-directory URLs and return those that respond successfully, preserving the input order (which encodes priority). Duplicates are collapsed.
+
+### `discover_mk_url`
+
+```python
+from spice_kernel_db.remote import discover_mk_url, DEFAULT_ALT_MK_PATHS
+discover_mk_url(
+    server_url: str,
+    mission: str,
+    *,
+    registry_candidates: list[str] | None = None,
+    extra_paths: tuple[str, ...] = DEFAULT_ALT_MK_PATHS,
+    timeout: float = 5.0,
+) -> list[str]
+```
+
+Discover live metakernel directory URLs for *mission*. Tries `registry_candidates` (highest priority) first, then expands the templates in `extra_paths` (placeholders `{server}` and `{m}`). Returns hits in priority order.
+
+`DEFAULT_ALT_MK_PATHS` contains only `{server}{m}/kernels/mk/`. An empirical NAIF survey found that no missions use alternative templates one might expect from naming convention — alternates should be added via the curated registry or `--mk-dir-url`, not inferred.
+
+## Mission registry
+
+```python
+from spice_kernel_db import registry
+```
+
+Reads `mission_registry.toml` shipped with the package. Used by `mission add` to find metakernel directories for missions whose layout deviates from the default.
+
+### `MissionEntry`
+
+Dataclass: `name`, `candidates: tuple[str, ...]` (URL templates with `{server}`/`{m}` placeholders), `planetarypy: bool`.
+
+### `load_registry`
+
+```python
+registry.load_registry() -> dict[str, MissionEntry]
+```
+
+Cached loader for the bundled registry. Clear the cache via `registry.load_registry.cache_clear()` after replacing the data file (only relevant in tests).
+
+### `registry_candidates`
+
+```python
+registry.registry_candidates(mission: str, server_url: str) -> list[str]
+```
+
+Return registry-defined candidate metakernel URLs for *mission* with placeholders expanded. Empty list when the mission has no registry entry.
+
+### `is_planetarypy_managed`
+
+```python
+registry.is_planetarypy_managed(mission: str) -> bool
+```
+
+True when the registry marks *mission* as managed by [planetarypy](https://github.com/michaelaye/planetarypy).
+
+## planetarypy bridge
+
+```python
+from spice_kernel_db import planetarypy_bridge
+```
+
+Optional integration hook for the planetarypy library. Activated via the `[planetarypy]` extra: `pip install spice-kernel-db[planetarypy]`.
+
+### `is_available`
+
+```python
+planetarypy_bridge.is_available() -> bool
+```
+
+True when planetarypy is importable in the current environment.
+
+### `delegate_mission_add`
+
+```python
+planetarypy_bridge.delegate_mission_add(mission: str, server_url: str) -> dict | None
+```
+
+Stub delegation hook. Currently returns `None`; full integration is tracked in the project's issue tracker.
+
 ## Exceptions
 
 ```python

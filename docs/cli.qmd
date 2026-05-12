@@ -446,17 +446,48 @@ Configure missions for filename-based acquisition and browsing. Mission names ar
 
 ### `mission add`
 
-Interactively set up a new mission. The command guides you through:
+Set up a new mission. Runs interactively with no arguments; non-interactive when a name (or `--mk-dir-url`) is given.
+
+Interactive flow:
 
 1. Choose a server: `[1] NASA  [2] ESA`
-2. View available missions from that server
-3. Select one by number or name
+2. View available missions from that server (split into "with metakernels" and "no default mk/")
+3. Select one by number; or type the name of a "no default mk/" mission to consult the curated registry
 4. Configure deduplication: `Enable deduplication for this mission? [Y/n]:`
 5. Store in database
 
 ```bash
 spice-kernel-db mission add
 ```
+
+| Option | Description |
+|--------|-------------|
+| `name` (positional, optional) | Mission name. When given, prompts are skipped. |
+| `--server-url <URL>` | Archive server base URL. Required with positional name unless the mission name is unambiguous on a known server. |
+| `--mk-dir-url <URL>` | Override the metakernel directory URL (bypasses auto-discovery). Validated with a HEAD request. |
+| `--no-dedup` | Disable deduplication for this mission. |
+| `--use-planetarypy` | Delegate kernel management to planetarypy if the `[planetarypy]` extra is installed and the mission is registry-flagged. |
+
+```bash
+# Interactive
+spice-kernel-db mission add
+
+# Non-interactive, explicit metakernel directory
+spice-kernel-db mission add LRO \
+  --server-url https://naif.jpl.nasa.gov/pub/naif/ \
+  --mk-dir-url https://naif.jpl.nasa.gov/pub/naif/LRO/data/spice/mk/
+
+# Non-interactive, let the tool auto-discover (curated registry + alt-path probe)
+spice-kernel-db mission add OSIRIS-REX --server-url https://naif.jpl.nasa.gov/pub/naif/
+```
+
+When discovery finds multiple candidate metakernel directories, the command lists them and asks you to re-run with `--mk-dir-url`. When it finds none, it points at the troubleshooting docs.
+
+#### Curated metakernel registry
+
+For missions whose metakernels live outside the default `{server}/{MISSION}/kernels/mk/` path — typically on PDS nodes rather than NAIF — the package ships `mission_registry.toml`, a curated list of verified alternate locations. The `mission add` flow checks this registry first, then falls back to the standard `kernels/mk/` probe.
+
+An empirical NAIF survey found that no missions use the speculative patterns (`spice_kernels/mk/`, `data/spice/mk/`, etc.) one might expect from naming convention alone; the registry is therefore deliberately sparse and only grows through verified contributions. See `docs/troubleshooting.qmd` for the contribution format. Registry entries may use absolute URLs (PDS nodes, mission websites), not just `{server}`/`{m}` placeholders.
 
 After setup, the command prints next steps for acquiring metakernels.
 

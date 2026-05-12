@@ -49,6 +49,7 @@ from spice_kernel_db.remote import (
     list_remote_metakernels,
     list_remote_missions,
     query_remote_sizes,
+    server_label_for,
     resolve_kernel_urls,
 )
 
@@ -385,16 +386,10 @@ class KernelDB:
         """).fetchall()
         results = []
         for name, server_url, mk_dir_url, dedup, added_at in rows:
-            # Determine server label
-            server_label = "custom"
-            for label, url in SPICE_SERVERS.items():
-                if server_url == url:
-                    server_label = label
-                    break
             results.append({
                 "name": name,
                 "server_url": server_url,
-                "server_label": server_label,
+                "server_label": server_label_for(server_url),
                 "mk_dir_url": mk_dir_url,
                 "dedup": dedup,
                 "added_at": added_at,
@@ -433,15 +428,10 @@ class KernelDB:
         if not row:
             return None
         name, server_url, mk_dir_url, dedup, added_at = row
-        server_label = "custom"
-        for label, url in SPICE_SERVERS.items():
-            if server_url == url:
-                server_label = label
-                break
         return {
             "name": name,
             "server_url": server_url,
-            "server_label": server_label,
+            "server_label": server_label_for(server_url),
             "mk_dir_url": mk_dir_url,
             "dedup": dedup,
             "added_at": added_at,

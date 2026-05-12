@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-05-13
+
+### Added
+
+- **Non-interactive `mission add`.** Positional mission name plus new flags
+  let you add a mission without prompts:
+
+  ```bash
+  spice-kernel-db mission add MRO \
+    --server-url https://naif.jpl.nasa.gov/pub/naif/ \
+    --mk-dir-url https://naif.jpl.nasa.gov/pub/naif/MRO/kernels/mk/
+  ```
+
+  New options on `mission add`:
+  - `--server-url <URL>` — archive server base URL (inferred from known
+    servers when the mission is unambiguous).
+  - `--mk-dir-url <URL>` — explicit metakernel directory URL. HEAD-checked,
+    then stored as-is. Useful when you've located a metakernel directory
+    on a PDS node or mission website that isn't on NAIF.
+  - `--no-dedup` — disable deduplication for this mission.
+  - `--use-planetarypy` — opt-in delegation flag (see below).
+
+- **Curated mission registry (`mission_registry.toml`)** — extension point
+  for verified alternate metakernel directory locations. Mission names map
+  to candidate URL templates (`{server}` / `{m}` placeholders supported;
+  absolute URLs accepted too) plus an optional `planetarypy = true` flag.
+  The bundled file ships empty by design — an empirical NAIF survey found
+  that the speculative patterns (`spice_kernels/mk/`, `data/spice/mk/`,
+  etc.) you might guess from naming convention are not actually in use
+  anywhere on NAIF. The registry grows only through verified
+  contributions. The `mission add` flow consults it before falling back to
+  the standard `kernels/mk/` probe.
+
+- **Optional `[planetarypy]` extra** and `planetarypy_bridge` module.
+  Most active NASA missions (MRO, MAVEN, JUNO, LRO, MARS2020, MSL, ORX,
+  …) don't publish a mission-wide metakernel on NAIF — their kernels are
+  served by PDS nodes, which the
+  [planetarypy](https://github.com/michaelaye/planetarypy) library
+  already manages. The bridge is the architectural hook for delegating to
+  planetarypy when both (a) the registry marks a mission as managed by
+  planetarypy and (b) the user passes `--use-planetarypy`. The
+  current implementation is a stub that prints a notice and falls back
+  to normal discovery; full delegation is tracked as a follow-up.
+
+- **Public API additions:** `remote.discover_mk_url`,
+  `remote.probe_mk_candidates`, `remote.DEFAULT_ALT_MK_PATHS`, the
+  `registry` module (`MissionEntry`, `load_registry`,
+  `registry_candidates`, `is_planetarypy_managed`), and the
+  `planetarypy_bridge` module.
+
+### Changed
+
+- The interactive `mission add` flow now splits the mission list into
+  "with default `kernels/mk/`" and "no default `mk/`". Typing the name of
+  a "no default `mk/`" mission consults the curated registry and offers
+  any hits as a numbered selection; the previous "not yet supported"
+  message is gone.
+
+### Notes for users
+
+The empirical NAIF survey behind this release found only 8 of 76 real
+missions ship a metakernel directory at the conventional path (and 7 of
+those 8 are ESA-mirror entries). The remaining 68 NASA missions publish
+individual per-type kernels but no curated `.tm` file. For those, your
+real options are (a) point `--mk-dir-url` at a metakernel you've found
+elsewhere (e.g., a PDS bundle), or (b) wait for the planetarypy bridge to
+materialise. Synthesising a metakernel from per-type kernel listings is
+sketched in `Plans/did-we-have-a-abstract-kite.md` (Tier 2) and is a
+separate follow-up.
+
+### Tests
+
+- 232 → 254: `TestRegistry`, `TestProbeMkCandidates`, `TestDiscoverMkUrl`,
+  `TestPlanetarypyBridge`, `TestMissionAddNoninteractive`. New fixture
+  `tests/fixtures/mission_registry_min.toml`.
+
 ## [0.13.4] - 2026-05-12
 
 ### Fixed
@@ -591,6 +667,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.14.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.1...v0.13.2

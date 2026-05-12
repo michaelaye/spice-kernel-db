@@ -138,6 +138,31 @@ def list_remote_missions(server_url: str) -> list[str]:
     return missions
 
 
+# Fallback candidate template probed when no registry candidate matches.
+# Placeholders: {server}, {m}.
+#
+# An empirical survey of NAIF (https://naif.jpl.nasa.gov/pub/naif/) found that
+# every mission either has the standard ``kernels/mk/`` directory or no
+# curated metakernel folder at all — none of the obvious alternatives
+# (``spice_kernels/mk/``, ``data/spice/mk/``, ``data/mk/``,
+# ``kernels/mk/former_versions/``) is in use. So the default list contains
+# only the standard path. Real alternate locations (typically PDS bundles)
+# should be added explicitly via the curated registry or ``--mk-dir-url``.
+DEFAULT_ALT_MK_PATHS: tuple[str, ...] = (
+    "{server}{m}/kernels/mk/",
+)
+
+
+def _head_ok(url: str, timeout: float = 5.0) -> bool:
+    """Return True if a HEAD request to *url* responds successfully."""
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def check_mk_availability(
     server_url: str, missions: list[str], *, max_workers: int = 16
 ) -> dict[str, bool]:
@@ -151,12 +176,7 @@ def check_mk_availability(
 
     def _check(name: str) -> tuple[str, bool]:
         url = f"{server_url}{name}/kernels/mk/"
-        try:
-            req = urllib.request.Request(url, method="HEAD")
-            with urllib.request.urlopen(req, timeout=5):
-                return name, True
-        except Exception:
-            return name, False
+        return name, _head_ok(url)
 
     result: dict[str, bool] = {}
     with Progress(
@@ -174,6 +194,69 @@ def check_mk_availability(
                 result[name] = available
                 progress.advance(task_id)
     return result
+
+
+def probe_mk_candidates(
+    urls: list[str], *, max_workers: int = 8, timeout: float = 5.0
+) -> list[str]:
+    """Probe candidate metakernel directory URLs in parallel.
+
+    Sends a HEAD request to each URL and returns those that respond
+    successfully, **preserving the input order** (which encodes priority).
+    Duplicates in the input are collapsed.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            ordered.append(u)
+
+    if not ordered:
+        return []
+    if len(ordered) == 1:
+        return ordered if _head_ok(ordered[0], timeout) else []
+
+    status: dict[str, bool] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_head_ok, u, timeout): u for u in ordered}
+        for future in as_completed(futures):
+            status[futures[future]] = future.result()
+    return [u for u in ordered if status.get(u)]
+
+
+def discover_mk_url(
+    server_url: str,
+    mission: str,
+    *,
+    registry_candidates: list[str] | None = None,
+    include_default: bool = True,
+    timeout: float = 5.0,
+) -> list[str]:
+    """Discover live metakernel directory URLs for *mission*.
+
+    Composes registry-supplied candidates (highest priority) with the
+    default ``kernels/mk/`` probe (unless ``include_default=False``),
+    expands placeholders, dedups, and returns those that respond 200.
+    Order is preserved (priority).
+    """
+    if not server_url.endswith("/"):
+        server_url += "/"
+
+    candidates: list[str] = list(registry_candidates or [])
+    if include_default:
+        for tmpl in DEFAULT_ALT_MK_PATHS:
+            candidates.append(tmpl.format(server=server_url, m=mission))
+
+    return probe_mk_candidates(candidates, timeout=timeout)
+
+
+def server_label_for(server_url: str) -> str:
+    """Reverse-lookup the canonical label for a server URL ('NASA', 'ESA', or 'custom')."""
+    for label, url in SPICE_SERVERS.items():
+        if url == server_url:
+            return label
+    return "custom"
 
 
 def fetch_metakernel(url: str) -> str:

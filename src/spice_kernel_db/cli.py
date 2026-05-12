@@ -19,11 +19,15 @@ from spice_kernel_db.config import (
     show_config,
 )
 from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
+from spice_kernel_db import planetarypy_bridge, registry
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
     check_mk_availability,
+    discover_mk_url,
     list_remote_metakernels,
     list_remote_missions,
+    probe_mk_candidates,
+    server_label_for,
 )
 
 console = Console()
@@ -302,7 +306,32 @@ quick start:
         help="Manage configured missions",
     )
     mission_sub = p_mission.add_subparsers(dest="mission_command")
-    mission_sub.add_parser("add", help="Add a new mission (interactive)")
+    p_mission_add = mission_sub.add_parser(
+        "add",
+        help="Add a new mission (interactive when no arguments)",
+    )
+    p_mission_add.add_argument(
+        "name", nargs="?",
+        help="Mission name. When given, the prompts are skipped.",
+    )
+    p_mission_add.add_argument(
+        "--server-url",
+        help="Archive server base URL. Required with positional name unless "
+             "the name is unambiguous on a known server.",
+    )
+    p_mission_add.add_argument(
+        "--mk-dir-url",
+        help="Override the metakernel directory URL (bypasses auto-discovery).",
+    )
+    p_mission_add.add_argument(
+        "--no-dedup", action="store_true",
+        help="Disable deduplication for this mission.",
+    )
+    p_mission_add.add_argument(
+        "--use-planetarypy", action="store_true",
+        help="Delegate kernel management to planetarypy if the [planetarypy] "
+             "extra is installed and the mission is registry-flagged.",
+    )
     mission_sub.add_parser("list", help="List configured missions")
     p_mission_rm = mission_sub.add_parser("remove", help="Remove a mission")
     p_mission_rm.add_argument("name", help="Mission name to remove")
@@ -1397,15 +1426,17 @@ def _handle_mission(db: KernelDB, args):
             print(f"Mission '{args.name}' not found.", file=sys.stderr)
 
     elif args.mission_command == "add":
-        _mission_add_interactive(db)
+        if args.mk_dir_url or args.name:
+            _mission_add_noninteractive(db, args)
+        else:
+            _mission_add_interactive(db, args)
 
     else:
         print("Usage: spice-kernel-db mission {add,list,remove}")
 
 
-def _mission_add_interactive(db: KernelDB):
-    """Interactive mission setup: choose server → pick mission → configure."""
-    # 1. Choose server
+def _choose_server() -> tuple[str, str]:
+    """Prompt for a SPICE archive server. Returns ``(label, server_url)``."""
     server_names = list(SPICE_SERVERS.keys())
     print("\nAvailable SPICE archive servers:\n")
     for i, name in enumerate(server_names, 1):
@@ -1415,62 +1446,141 @@ def _mission_add_interactive(db: KernelDB):
         choice = input(f"Select server [1-{len(server_names)}]: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(server_names):
             server_label = server_names[int(choice) - 1]
-            break
+            return server_label, SPICE_SERVERS[server_label]
         print("Invalid choice.")
-    server_url = SPICE_SERVERS[server_label]
 
-    # 2. List missions and check which have metakernel directories
+
+def _match_ci(choice: str, names: list[str]) -> str | None:
+    """Return the first case-insensitive match for *choice* in *names*, or None."""
+    return next((n for n in names if n.lower() == choice.lower()), None)
+
+
+def _select_mk_url_for_unsupported(server_url: str, mission_name: str) -> str | None:
+    """Consult the curated registry for a mission lacking the default mk/.
+
+    ``check_mk_availability`` already proved the default ``kernels/mk/`` path
+    fails for this mission, so we probe only registry-supplied candidates.
+    Prompts the user to pick when multiple hits are found.
+    """
+    reg_candidates = registry.registry_candidates(mission_name, server_url)
+    if not reg_candidates:
+        return None
+    print(f"\nProbing registered alternate metakernel locations for {mission_name}...")
+    hits = discover_mk_url(
+        server_url, mission_name,
+        registry_candidates=reg_candidates, include_default=False,
+    )
+    if not hits:
+        return None
+    if len(hits) == 1:
+        print(f"Found: {hits[0]}")
+        return hits[0]
+    print(f"\nFound {len(hits)} alternate metakernel locations:\n")
+    for i, url in enumerate(hits, 1):
+        print(f"  [{i}] {url}")
+    while True:
+        choice = input(f"Select [1-{len(hits)}]: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(hits):
+            return hits[int(choice) - 1]
+        print("Invalid choice.")
+
+
+def _choose_mission(server_url: str, server_label: str) -> tuple[str, str] | None:
+    """Prompt for a mission. Returns ``(mission_name, mk_dir_url)`` or None on abort."""
     print(f"\nFetching missions from {server_label}...")
     all_missions = list_remote_missions(server_url)
     if not all_missions:
         print("No missions found.", file=sys.stderr)
-        return
+        return None
 
     mk_status = check_mk_availability(server_url, all_missions)
     supported = [m for m in all_missions if mk_status.get(m)]
     unsupported = [m for m in all_missions if not mk_status.get(m)]
 
-    if not supported:
+    if not supported and not unsupported:
         print("No missions with metakernel directories found.", file=sys.stderr)
-        return
+        return None
 
-    print(f"\nAvailable missions ({len(supported)} with metakernels):\n")
-    for i, name in enumerate(supported, 1):
-        print(f"  [{i:>3}] {name}")
+    if supported:
+        print(f"\nAvailable missions ({len(supported)} with metakernels):\n")
+        for i, name in enumerate(supported, 1):
+            print(f"  [{i:>3}] {name}")
 
     if unsupported:
         print(
-            f"\nNot yet supported ({len(unsupported)} without metakernels "
-            f"— see github.com/michaelaye/spice-kernel-db/issues/2):"
+            f"\nNo default mk/ directory ({len(unsupported)} missions — type "
+            f"the name to consult the curated registry):"
         )
         print(f"  {', '.join(unsupported)}")
 
     print()
     while True:
-        choice = input(f"Select mission [1-{len(supported)}] or type name: ").strip()
+        choice = input(
+            f"Select mission [1-{len(supported)}] or type name: "
+        ).strip()
         if choice.isdigit() and 1 <= int(choice) <= len(supported):
-            mission_name = supported[int(choice) - 1]
-            break
-        elif choice in supported:
-            mission_name = choice
-            break
-        # Case-insensitive match
-        matches = [m for m in supported if m.lower() == choice.lower()]
-        if matches:
-            mission_name = matches[0]
-            break
+            name = supported[int(choice) - 1]
+            return name, f"{server_url}{name}/kernels/mk/"
+        if (name := _match_ci(choice, supported)):
+            return name, f"{server_url}{name}/kernels/mk/"
+        if (name := _match_ci(choice, unsupported)):
+            url = _select_mk_url_for_unsupported(server_url, name)
+            if url is None:
+                print(
+                    f"\nNo metakernel directory found for {name}. "
+                    f"See docs/troubleshooting.qmd for how to contribute "
+                    f"alternate locations to mission_registry.toml.",
+                    file=sys.stderr,
+                )
+                return None
+            return name, url
         print("Invalid choice.")
 
-    # 3. mk/ directory URL (already validated by check_mk_availability)
-    mk_dir_url = f"{server_url}{mission_name}/kernels/mk/"
 
-    # 4. Dedup preference
-    dedup_answer = input(
+def _choose_dedup(mission_name: str) -> bool:
+    """Prompt for deduplication preference. Returns True when enabled."""
+    answer = input(
         f"\nEnable deduplication for {mission_name}? [Y/n]: "
     ).strip().lower()
-    dedup = dedup_answer not in ("n", "no")
+    return answer not in ("n", "no")
 
-    # 5. Store
+
+def _maybe_offer_planetarypy(mission_name: str, *, force: bool = False) -> bool:
+    """Offer planetarypy delegation when applicable. Returns True if user opted in."""
+    if not registry.is_planetarypy_managed(mission_name):
+        return False
+    if not planetarypy_bridge.is_available():
+        if force:
+            print(
+                f"--use-planetarypy requested but planetarypy is not installed. "
+                f"Install with: pip install 'spice-kernel-db[planetarypy]'",
+                file=sys.stderr,
+            )
+        return False
+    if force:
+        opted_in = True
+    else:
+        answer = input(
+            f"\n{mission_name} is registered as planetarypy-managed. "
+            f"Delegate to planetarypy? [y/N]: "
+        ).strip().lower()
+        opted_in = answer in ("y", "yes")
+    if not opted_in:
+        return False
+    print(
+        f"planetarypy delegation requested but full integration is not yet "
+        f"implemented (tracked at {planetarypy_bridge.tracking_issue()}). "
+        f"Falling back to normal discovery.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _save_mission(
+    db: KernelDB, mission_name: str, server_label: str, server_url: str,
+    mk_dir_url: str, dedup: bool,
+) -> None:
+    """Persist the mission row and print a confirmation block."""
     db.add_mission(mission_name, server_url, mk_dir_url, dedup)
     dedup_str = "enabled" if dedup else "disabled"
     print(f"\nMission '{mission_name}' ({server_label}) configured.")
@@ -1479,3 +1589,100 @@ def _mission_add_interactive(db: KernelDB):
     print(f"\nNext steps:")
     print(f"  spice-kernel-db browse {mission_name}")
     print(f"  spice-kernel-db get <metakernel>.tm --mission {mission_name}")
+
+
+def _mission_add_interactive(db: KernelDB, args) -> None:
+    """Interactive mission setup: choose server → pick mission → configure."""
+    server_label, server_url = _choose_server()
+    chosen = _choose_mission(server_url, server_label)
+    if chosen is None:
+        return
+    mission_name, mk_dir_url = chosen
+    _maybe_offer_planetarypy(mission_name, force=bool(args.use_planetarypy))
+    dedup = False if args.no_dedup else _choose_dedup(mission_name)
+    _save_mission(db, mission_name, server_label, server_url, mk_dir_url, dedup)
+
+
+def _infer_server_url(name: str, server_url_arg: str | None) -> str | None:
+    """Infer the server URL from --server-url, or a unique match in SPICE_SERVERS.
+
+    Returns None if nothing can be inferred (no --server-url and remote calls fail).
+    """
+    if server_url_arg:
+        return server_url_arg if server_url_arg.endswith("/") else server_url_arg + "/"
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    urls = list(SPICE_SERVERS.values())
+    def _has_mission(url: str) -> bool:
+        try:
+            return any(m.lower() == name.lower() for m in list_remote_missions(url))
+        except Exception:
+            return False
+
+    with ThreadPoolExecutor(max_workers=len(urls)) as pool:
+        found = list(pool.map(_has_mission, urls))
+    for url, ok in zip(urls, found):
+        if ok:
+            return url
+    return None
+
+
+def _mission_add_noninteractive(db: KernelDB, args) -> None:
+    """Non-interactive mission add. Either --mk-dir-url, or discover from --server-url."""
+    if not args.name:
+        print(
+            "mission add: --mk-dir-url requires a positional mission name.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    mission_name = args.name
+    server_url = _infer_server_url(mission_name, args.server_url)
+    if server_url is None:
+        print(
+            f"mission add: cannot determine server URL for '{mission_name}'. "
+            f"Pass --server-url explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    server_label = server_label_for(server_url)
+
+    _maybe_offer_planetarypy(mission_name, force=bool(args.use_planetarypy))
+
+    if args.mk_dir_url:
+        mk_dir_url = args.mk_dir_url
+        if not mk_dir_url.endswith("/"):
+            mk_dir_url += "/"
+        if not probe_mk_candidates([mk_dir_url]):
+            print(
+                f"mission add: --mk-dir-url did not respond to HEAD: {mk_dir_url}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        reg_candidates = registry.registry_candidates(mission_name, server_url)
+        hits = discover_mk_url(
+            server_url, mission_name, registry_candidates=reg_candidates,
+        )
+        if not hits:
+            print(
+                f"mission add: no metakernel directory found for "
+                f"'{mission_name}' on {server_url}. Re-run with --mk-dir-url, "
+                f"or see docs/troubleshooting.qmd.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if len(hits) > 1:
+            print(
+                f"mission add: multiple metakernel directories responded for "
+                f"'{mission_name}'. Re-run with --mk-dir-url <one of>:",
+                file=sys.stderr,
+            )
+            for url in hits:
+                print(f"  {url}", file=sys.stderr)
+            sys.exit(1)
+        mk_dir_url = hits[0]
+
+    dedup = not args.no_dedup
+    _save_mission(db, mission_name, server_label, server_url, mk_dir_url, dedup)

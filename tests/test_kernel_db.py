@@ -4499,3 +4499,285 @@ class TestListMetakernelsAliasAware:
         # Real is unaffected
         assert by_name["real.tm"]["n_kernels"] == 1
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Alternate metakernel discovery
+# ---------------------------------------------------------------------------
+
+FIXTURE_REGISTRY = Path(__file__).parent / "fixtures" / "mission_registry_min.toml"
+
+
+@pytest.fixture
+def fixture_registry(monkeypatch):
+    """Point the registry loader at the test fixture (no cache, no bundled lookup)."""
+    from spice_kernel_db import registry as reg
+    reg.load_registry.cache_clear()
+    monkeypatch.setattr(reg, "load_registry", lambda: reg.load_registry_from(FIXTURE_REGISTRY))
+    yield reg
+
+
+class TestRegistry:
+    def test_load_registry_returns_entries(self, fixture_registry):
+        entries = fixture_registry.load_registry()
+        assert "LRO" in entries
+        assert "MSL" in entries
+        assert entries["LRO"].planetarypy is True
+        assert entries["MSL"].planetarypy is False
+        assert len(entries["LRO"].candidates) == 2
+
+    def test_registry_candidates_expands_placeholders(self, fixture_registry):
+        urls = fixture_registry.registry_candidates(
+            "LRO", "https://naif.jpl.nasa.gov/pub/naif/"
+        )
+        assert urls == [
+            "https://naif.jpl.nasa.gov/pub/naif/LRO/data/spice/mk/",
+            "https://naif.jpl.nasa.gov/pub/naif/LRO/kernels/mk/",
+        ]
+
+    def test_registry_candidates_adds_trailing_slash(self, fixture_registry):
+        urls = fixture_registry.registry_candidates(
+            "LRO", "https://naif.jpl.nasa.gov/pub/naif"  # no trailing /
+        )
+        assert urls[0].startswith("https://naif.jpl.nasa.gov/pub/naif/LRO/")
+
+    def test_registry_candidates_unknown_mission(self, fixture_registry):
+        assert fixture_registry.registry_candidates("APOLLO", "https://x/") == []
+
+    def test_is_planetarypy_managed(self, fixture_registry):
+        assert fixture_registry.is_planetarypy_managed("LRO") is True
+        assert fixture_registry.is_planetarypy_managed("MSL") is False
+        assert fixture_registry.is_planetarypy_managed("UNKNOWN") is False
+
+    def test_bundled_registry_loads(self):
+        """The TOML shipped inside the package must at least parse."""
+        from spice_kernel_db import registry as reg
+        reg.load_registry.cache_clear()
+        assert reg.load_registry() is not None
+
+    def test_registry_is_read_only(self, fixture_registry):
+        """The cached registry mapping must not be mutable — prevents one
+        caller from poisoning the cache for everyone else."""
+        entries = fixture_registry.load_registry()
+        with pytest.raises(TypeError):
+            entries["NEW_MISSION"] = fixture_registry.MissionEntry()
+
+
+class TestProbeMkCandidates:
+    def _fake_urlopen(self, ok_urls):
+        def _open(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            if url in ok_urls:
+                return MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        return _open
+
+    def test_preserves_priority_order(self):
+        from spice_kernel_db.remote import probe_mk_candidates
+        urls = [
+            "https://x/A/mk/",
+            "https://x/B/mk/",
+            "https://x/C/mk/",
+        ]
+        ok = {"https://x/A/mk/", "https://x/C/mk/"}
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            side_effect=self._fake_urlopen(ok),
+        ):
+            result = probe_mk_candidates(urls)
+        # Order = input order, only hits returned
+        assert result == ["https://x/A/mk/", "https://x/C/mk/"]
+
+    def test_dedups_input(self):
+        from spice_kernel_db.remote import probe_mk_candidates
+        urls = ["https://x/A/mk/", "https://x/A/mk/", "https://x/B/mk/"]
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            side_effect=self._fake_urlopen({"https://x/A/mk/"}),
+        ):
+            result = probe_mk_candidates(urls)
+        assert result == ["https://x/A/mk/"]
+
+    def test_empty_input(self):
+        from spice_kernel_db.remote import probe_mk_candidates
+        assert probe_mk_candidates([]) == []
+
+    def test_all_fail(self):
+        from spice_kernel_db.remote import probe_mk_candidates
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("nope"),
+        ):
+            assert probe_mk_candidates(["https://x/Z/mk/"]) == []
+
+
+class TestDiscoverMkUrl:
+    def test_registry_before_defaults(self):
+        from spice_kernel_db.remote import discover_mk_url, DEFAULT_ALT_MK_PATHS
+
+        reg_first = "https://x/M/data/spice/mk/"
+        default_hit = "https://x/M/kernels/mk/"
+
+        def fake(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            if url in (reg_first, default_hit):
+                return MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen", side_effect=fake,
+        ):
+            result = discover_mk_url(
+                "https://x/", "M", registry_candidates=[reg_first],
+            )
+        # Registry candidate must appear before the default kernels/mk hit
+        assert result.index(reg_first) < result.index(default_hit)
+        # Default-path template is probed
+        assert "{server}{m}/kernels/mk/".format(server="https://x/", m="M") in result
+
+    def test_default_paths_contains_only_standard_mk(self):
+        """An empirical NAIF survey found no alt mk/ paths in use; the default
+        list intentionally contains only the standard kernels/mk/ template.
+        Alt paths should be added via the curated registry or --mk-dir-url."""
+        from spice_kernel_db.remote import DEFAULT_ALT_MK_PATHS
+        assert DEFAULT_ALT_MK_PATHS == ("{server}{m}/kernels/mk/",)
+
+    def test_no_hits_returns_empty(self):
+        from spice_kernel_db.remote import discover_mk_url
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError("u", 404, "x", {}, None),
+        ):
+            assert discover_mk_url("https://x/", "Z") == []
+
+
+class TestPlanetarypyBridge:
+    def test_unavailable_when_not_installed(self, monkeypatch):
+        import importlib.util
+        from spice_kernel_db import planetarypy_bridge
+
+        monkeypatch.setattr(
+            importlib.util, "find_spec",
+            lambda name: None if name == "planetarypy" else importlib.util.find_spec(name),
+        )
+        assert planetarypy_bridge.is_available() is False
+
+    def test_delegate_returns_none(self):
+        from spice_kernel_db import planetarypy_bridge
+        assert planetarypy_bridge.delegate_mission_add("LRO", "https://x/") is None
+
+    def test_tracking_issue_url(self):
+        from spice_kernel_db import planetarypy_bridge
+        assert planetarypy_bridge.tracking_issue().startswith("https://")
+
+
+class TestMissionAddNoninteractive:
+    """Drive `_mission_add_noninteractive` directly with a constructed args namespace.
+
+    Avoids the global CLI config-dir / argparse plumbing, since we only care
+    about the discovery + persistence behaviour here.
+    """
+
+    def _make_args(self, **overrides):
+        import types
+        defaults = dict(
+            name=None, server_url=None, mk_dir_url=None,
+            no_dedup=False, use_planetarypy=False,
+        )
+        defaults.update(overrides)
+        return types.SimpleNamespace(**defaults)
+
+    def test_explicit_mk_dir_url(self, db, monkeypatch):
+        from spice_kernel_db import cli
+
+        monkeypatch.setattr(
+            "spice_kernel_db.cli.probe_mk_candidates",
+            lambda urls, **_: list(urls),
+        )
+        # Bypass the server-URL guess (no network).
+        monkeypatch.setattr(
+            "spice_kernel_db.cli._infer_server_url",
+            lambda name, server_url_arg: server_url_arg,
+        )
+
+        args = self._make_args(
+            name="FOO",
+            server_url="https://example.com/",
+            mk_dir_url="https://example.com/FOO/data/spice/mk/",
+        )
+        cli._mission_add_noninteractive(db, args)
+
+        m = db.get_mission("FOO")
+        assert m is not None
+        assert m["mk_dir_url"] == "https://example.com/FOO/data/spice/mk/"
+        assert m["dedup"] is True
+
+    def test_mk_dir_url_unreachable_exits(self, db, monkeypatch):
+        from spice_kernel_db import cli
+
+        monkeypatch.setattr(
+            "spice_kernel_db.cli.probe_mk_candidates", lambda urls, **_: []
+        )
+        monkeypatch.setattr(
+            "spice_kernel_db.cli._infer_server_url",
+            lambda name, server_url_arg: server_url_arg,
+        )
+
+        args = self._make_args(
+            name="FOO", server_url="https://example.com/",
+            mk_dir_url="https://example.com/FOO/no/such/mk/",
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli._mission_add_noninteractive(db, args)
+        assert exc.value.code == 1
+
+    def test_no_hits_exits(self, db, monkeypatch):
+        from spice_kernel_db import cli
+
+        monkeypatch.setattr("spice_kernel_db.cli.discover_mk_url", lambda *a, **kw: [])
+        monkeypatch.setattr(
+            "spice_kernel_db.cli._infer_server_url",
+            lambda name, server_url_arg: server_url_arg,
+        )
+
+        args = self._make_args(name="MYSTERY", server_url="https://example.com/")
+        with pytest.raises(SystemExit) as exc:
+            cli._mission_add_noninteractive(db, args)
+        assert exc.value.code == 1
+
+    def test_multiple_hits_exits(self, db, monkeypatch):
+        from spice_kernel_db import cli
+
+        monkeypatch.setattr(
+            "spice_kernel_db.cli.discover_mk_url",
+            lambda *a, **kw: ["https://x/A/mk/", "https://x/B/mk/"],
+        )
+        monkeypatch.setattr(
+            "spice_kernel_db.cli._infer_server_url",
+            lambda name, server_url_arg: server_url_arg,
+        )
+
+        args = self._make_args(name="M", server_url="https://x/")
+        with pytest.raises(SystemExit) as exc:
+            cli._mission_add_noninteractive(db, args)
+        assert exc.value.code == 1
+
+    def test_single_hit_persists(self, db, monkeypatch):
+        from spice_kernel_db import cli
+
+        monkeypatch.setattr(
+            "spice_kernel_db.cli.discover_mk_url",
+            lambda *a, **kw: ["https://x/M/data/spice/mk/"],
+        )
+        monkeypatch.setattr(
+            "spice_kernel_db.cli._infer_server_url",
+            lambda name, server_url_arg: server_url_arg,
+        )
+
+        args = self._make_args(name="M", server_url="https://x/", no_dedup=True)
+        cli._mission_add_noninteractive(db, args)
+
+        m = db.get_mission("M")
+        assert m is not None
+        assert m["mk_dir_url"] == "https://x/M/data/spice/mk/"
+        assert m["dedup"] is False  # --no-dedup honored

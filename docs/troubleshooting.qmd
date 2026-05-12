@@ -158,3 +158,30 @@ After a `get` or `rewrite`, run `spice-kernel-db verify <mk>` to cross-check the
 | `UNREGISTERED` | File on disk but no `kernels` row | Run `scan <dir>` on the directory containing it. |
 | `BAD_PATH_VALUE` | `PATH_VALUES` not absolute | Use `get` (which writes absolute paths) instead of editing `.tm` files by hand. |
 | `TRAVERSAL` | A `KERNELS_TO_LOAD` entry escapes `PATH_VALUES` | The metakernel is malformed or hostile — don't `furnsh` it. |
+
+
+## Mission has no metakernel directory at the default path
+
+`mission add` looks for a metakernel directory at `{server_url}{MISSION}/kernels/mk/`. Most NASA missions on NAIF do **not** have one — they publish individual per-type kernels (`ck/`, `fk/`, `lsk/`, `pck/`, `sclk/`, `spk/`) but no curated mission-wide `.tm` file. An empirical survey of NAIF in 2026 found:
+
+- 8 missions with `kernels/mk/` (mostly ESA-mirror entries — BEPICOLOMBO, EXOMARS2016, JUICE, LADEE, MEX, ROSETTA, SMART1, VEX)
+- 68 missions with no `mk/` subdirectory anywhere on NAIF
+- 0 missions using alternative templates like `spice_kernels/mk/`, `data/spice/mk/`, etc.
+
+When the default path 404s, you have two productive options:
+
+1. **Manual override** — pass `--mk-dir-url <URL>` to `mission add`. The URL is HEAD-checked but otherwise used as-is. Use this when you've found the metakernel directory yourself — typically on a PDS node such as `pds-imaging.jpl.nasa.gov` or `pds-smallbodies.astro.umd.edu`.
+2. **planetarypy** — for PDS-archived missions, the [planetarypy](https://github.com/michaelaye/planetarypy) library is the right tool. Install the optional bridge with `pip install spice-kernel-db[planetarypy]` and pass `--use-planetarypy` on `mission add`. Full delegation is tracked in the issue tracker — the current stub prints a notice and falls back to normal discovery.
+
+The curated `mission_registry.toml` exists as an extension point: if you confirm a working metakernel directory (anywhere on the web), please open a PR adding an entry so other users benefit:
+
+```toml
+["YOUR-MISSION"]
+candidates = [
+  "{server}{m}/some/alt/path/mk/",
+  "https://some-pds-node.example/spice/your-mission/mk/",
+]
+planetarypy = false   # set to true if planetarypy manages this mission
+```
+
+Registry entries can use absolute URLs (PDS nodes, mission websites) — the `{server}`/`{m}` placeholders are convenient but not required.

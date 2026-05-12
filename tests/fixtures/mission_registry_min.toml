@@ -1,0 +1,15 @@
+# Minimal registry fixture for unit tests. Two entries:
+# - LRO: two candidates (registry priority order), planetarypy = true
+# - MSL: one candidate, planetarypy = false (default)
+
+[LRO]
+candidates = [
+  "{server}{m}/data/spice/mk/",
+  "{server}{m}/kernels/mk/",
+]
+planetarypy = true
+
+[MSL]
+candidates = [
+  "{server}{m}/kernels/mk/former_versions/",
+]
