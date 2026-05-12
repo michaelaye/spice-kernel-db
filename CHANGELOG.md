@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-05-12
+
+### Fixed
+
+- **`prune --metakernels` now finds rows added via `scan`.** The 0.13.1
+  implementation filtered the registry with `WHERE source_url IS NOT NULL`,
+  which silently skipped every metakernel that had been scanned in from
+  a local tree (the most common case — `scan_directory` writes
+  `source_url=NULL`). It now derives a probe URL per row using the same
+  fallback as `update_metakernel`: explicit `source_url` first, then
+  `mission.mk_dir_url + filename`. Rows with neither — typically
+  hand-rolled metakernels — are surfaced in the output as
+  "no probeable URL" rather than silently ignored.
+
+  Discovered in the wild: `update juice_crema_5_1_150lb_23_1_a3_2_v462_20260223_001.tm`
+  correctly raised `MetakernelUnreachableError` (and pointed the user at
+  `prune --metakernels`), but the subsequent prune run failed to list
+  that very metakernel because it had been originally scanned in rather
+  than `get`-acquired, so its `source_url` was NULL.
+
+### Tests
+
+- 224 → 226: `TestPruneMetakernelsNullSourceUrl` (2 tests covering the
+  mk_dir_url-fallback path and the "no probeable URL" skip path).
+
 ## [0.13.1] - 2026-05-12
 
 ### Added
@@ -524,6 +549,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.13.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.1...v0.12.0

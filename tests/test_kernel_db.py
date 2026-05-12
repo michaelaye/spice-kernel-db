@@ -4240,3 +4240,80 @@ class TestPruneMetakernelsCLI:
         ).fetchone()[0]
         assert n == 1
         db2.close()
+
+
+class TestPruneMetakernelsNullSourceUrl:
+    """v0.13.2 fix: prune --metakernels missed rows whose source_url
+    was NULL (the common case for scan-added metakernels). It must use
+    mission.mk_dir_url + filename as a fallback, mirroring update."""
+
+    def test_null_source_url_resolved_via_mission_mk_dir_url(self, tmp_path):
+        """A registry row with NULL source_url whose mission has a
+        configured mk_dir_url must still get HEAD-probed."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission(
+            "JUICE",
+            "https://example.org/",
+            "https://example.org/JUICE/kernels/mk/",
+            dedup=True,
+        )
+
+        # Insert a NULL-source row (mimics what scan_directory writes)
+        p = tmp_path / "mk" / "v462.tm"
+        p.parent.mkdir(parents=True)
+        p.write_text("\\begintext\n")
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'JUICE', NULL, ?, "
+            "current_timestamp)",
+            [str(p), "v462.tm"],
+        )
+
+        seen_urls: list[str] = []
+        def head(req, *args, **kwargs):
+            seen_urls.append(req.full_url)
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, None,
+            )
+
+        with patch("urllib.request.urlopen", side_effect=head):
+            dead = db.prune_metakernels(dry_run=True)
+
+        # URL was derived from mission.mk_dir_url + filename
+        assert seen_urls == ["https://example.org/JUICE/kernels/mk/v462.tm"]
+        assert len(dead) == 1
+        assert dead[0]["filename"] == "v462.tm"
+        assert dead[0]["status_code"] == 404
+        # Reported source_url is the effective URL we probed
+        assert "v462.tm" in dead[0]["source_url"]
+        db.close()
+
+    def test_null_source_url_with_no_mission_mk_dir_url_is_skipped(
+        self, tmp_path, capsys,
+    ):
+        """Rows with neither source_url nor a mission mk_dir_url cannot
+        be probed and should be noted but not classified as dead."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        # Mission exists but has no mk_dir_url
+        db.con.execute(
+            "INSERT INTO missions (name, server_url, mk_dir_url, dedup) "
+            "VALUES ('FOO', '', '', TRUE)"
+        )
+        p = tmp_path / "mk" / "x.tm"
+        p.parent.mkdir(parents=True)
+        p.write_text("\\begintext\n")
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'FOO', NULL, ?, "
+            "current_timestamp)",
+            [str(p), "x.tm"],
+        )
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            dead = db.prune_metakernels(dry_run=True)
+        # Never called — nothing to probe
+        assert mock_urlopen.call_count == 0
+        assert dead == []
+        captured = capsys.readouterr().out
+        assert "no probeable URL" in captured
+        db.close()

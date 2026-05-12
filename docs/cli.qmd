@@ -205,7 +205,7 @@ spice-kernel-db prune --metakernels [--execute] [--delete-files]
 | Option | Description |
 |--------|-------------|
 | `--execute` | Actually remove entries. Default: dry run. |
-| `--metakernels`, `--mk` | Switch to metakernel-registry mode. Sends a HEAD to each `source_url` and treats 403/404/410 as permanently dead. |
+| `--metakernels`, `--mk` | Switch to metakernel-registry mode. Sends a HEAD to each row's effective URL (`source_url` if set, otherwise `mission.mk_dir_url + filename`) and treats 403/404/410 as permanently dead. |
 | `--delete-files` | With `--metakernels --execute`: also unlink the on-disk `.tm` files. |
 
 Network errors (timeouts, DNS failures) are **never** treated as dead — pruning would otherwise discard real state when you happened to be offline.

@@ -2559,18 +2559,36 @@ class KernelDB:
         import urllib.error
         import urllib.request
 
+        # Walk every registry row. We deliberately do NOT filter on
+        # source_url here: rows added via `scan` have NULL source_url
+        # but can still be probed by deriving a URL from the mission's
+        # mk_dir_url + filename, mirroring `update_metakernel`'s
+        # fallback. Without this, the most common case (locally-scanned
+        # metakernels) is silently skipped.
         rows = self.con.execute("""
             SELECT mk_path, filename, mission, source_url
             FROM metakernel_registry
-            WHERE source_url IS NOT NULL AND source_url != ''
             ORDER BY mission, filename
         """).fetchall()
 
         if not rows:
-            print("No metakernels with source URLs in the registry.")
+            print("No metakernels in the registry.")
             return []
 
+        # Cache mk_dir_url per mission to avoid N×get_mission queries.
+        mk_dir_url_cache: dict[str, str | None] = {}
+        def _mk_dir_url(mission_name: str | None) -> str | None:
+            if not mission_name:
+                return None
+            if mission_name not in mk_dir_url_cache:
+                m = self.get_mission(mission_name)
+                mk_dir_url_cache[mission_name] = (
+                    m.get("mk_dir_url") if m else None
+                )
+            return mk_dir_url_cache[mission_name]
+
         dead: list[dict] = []
+        no_url: list[dict] = []
         with Progress(
             transient=True,
         ) as progress:
@@ -2579,8 +2597,27 @@ class KernelDB:
             )
             for mk_path, filename, mission, source_url in rows:
                 progress.advance(tid)
+
+                # Derive an effective URL: explicit source_url first,
+                # then mission.mk_dir_url + filename (same precedence
+                # as update_metakernel).
+                effective_url = source_url
+                if not effective_url:
+                    base = _mk_dir_url(mission)
+                    if base and filename:
+                        effective_url = (
+                            base if base.endswith("/") else base + "/"
+                        ) + filename
+                if not effective_url:
+                    no_url.append({
+                        "mk_path": mk_path,
+                        "filename": filename,
+                        "mission": mission,
+                    })
+                    continue
+
                 try:
-                    req = urllib.request.Request(source_url, method="HEAD")
+                    req = urllib.request.Request(effective_url, method="HEAD")
                     with urllib.request.urlopen(req, timeout=timeout):
                         continue  # alive
                 except urllib.error.HTTPError as e:
@@ -2589,19 +2626,26 @@ class KernelDB:
                             "mk_path": mk_path,
                             "filename": filename,
                             "mission": mission,
-                            "source_url": source_url,
+                            "source_url": effective_url,
                             "status_code": e.code,
                         })
                     else:
                         logger.warning(
                             "HEAD %s returned HTTP %d — not pruning",
-                            source_url, e.code,
+                            effective_url, e.code,
                         )
                 except (urllib.error.URLError, OSError) as e:
                     logger.warning(
                         "HEAD %s failed (%s) — not pruning, may be transient",
-                        source_url, e,
+                        effective_url, e,
                     )
+
+        if no_url:
+            console.print(
+                f"[dim]{len(no_url)} row(s) had no probeable URL "
+                f"(no source_url and no mission mk_dir_url). "
+                f"Use `mk --remove <name>` to drop them manually.[/dim]"
+            )
 
         if not dead:
             print("No dead metakernels found.")

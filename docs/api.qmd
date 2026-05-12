@@ -265,7 +265,9 @@ db.prune_metakernels(
 ) -> list[dict]
 ```
 
-Find rows in `metakernel_registry` whose remote `source_url` returns a permanent HTTP error (403/404/410) and optionally remove them. Sends a HEAD request to each URL with the given `timeout`.
+Find rows in `metakernel_registry` whose remote URL returns a permanent HTTP error (403/404/410) and optionally remove them. Sends a HEAD request to each URL with the given `timeout`.
+
+The probe URL is derived per row: explicit `source_url` if set, otherwise `mission.mk_dir_url + filename` (same fallback as `update_metakernel`). Rows with neither — typically locally-created metakernels with no upstream — are noted in the output and skipped (use `mk --remove <name>` to drop them manually).
 
 Transient failures (timeouts, DNS errors, 5xx) are deliberately **never** classified as dead — leaving a registry row stale is always safer than deleting on a network blip.
 
