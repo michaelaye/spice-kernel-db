@@ -62,6 +62,18 @@ Each fallback step emits a warning. Fuzzy prefix matching was removed in v0.10.0
 
 **Output formatting** uses `rich` throughout — `rich.Table` and `rich.Panel` for all tabular output, `rich.progress.Progress` for download and query progress bars (thread-safe with `ThreadPoolExecutor`).
 
+## Development rules
+
+**Docs ship with the feature, not after.** Every new CLI subcommand, every new flag on an existing subcommand, every new public method on `KernelDB`, and every new behavior visible to the user (new error class, new exit code, new output format) must land in the same change as the corresponding documentation update. Concretely:
+
+- New or changed CLI subcommand → entry in `docs/cli.qmd` (table of options + at least one example).
+- New CLI flag → row added to the relevant subcommand's options table in `docs/cli.qmd`.
+- New `KernelDB` method or `__init__.py` export → entry in `docs/api.qmd`.
+- New user-visible error or recovery path → entry in `docs/troubleshooting.qmd`.
+- New feature → `CHANGELOG.md` entry under the unreleased section (or current dev version).
+
+A pull request that adds features without updating docs is incomplete. If you spot an existing gap while doing other work, fix it in the same PR rather than filing a TODO.
+
 ## Testing Patterns
 
 Tests use `pytest-tmp-files` for temporary directory fixtures. The main fixture `tmp_spice_tree` creates a realistic multi-mission SPICE directory tree with known duplicates. Network operations are mocked with `unittest.mock.patch`. Metakernel content is written as multi-line strings in tests.

@@ -103,3 +103,58 @@ spice-kernel-db prune
 # Actually remove stale entries
 spice-kernel-db prune --execute
 ```
+
+
+## `update` fails with "Metakernel unreachable" / HTTP 404
+
+NAIF (and ESA) routinely rotate older versioned metakernel snapshots into a `former_versions/` subdirectory. Once that happens, the original URL stored in your local `metakernel_registry` returns 404, and `spice-kernel-db update <mk>` aborts with a red panel like:
+
+```
+╭─── Metakernel unreachable ───╮
+│ The remote metakernel is no longer available.
+│   URL:      …/mk/juice_crema_5_1_…_v462_20260223_001.tm
+│   Status:   HTTP 404
+│ NAIF (and ESA) routinely rotate old versioned snapshots into a
+│ former_versions/ subdirectory, which makes the original URL 404.
+╰──────────────────────────────╯
+```
+
+The exit code is `2` (distinct from generic LookupError's `1`), so scripts can detect this case specifically.
+
+**Fix it with `prune --metakernels`:**
+
+```bash
+# Preview every dead registry row (HEAD-probes each source_url)
+spice-kernel-db prune --metakernels
+
+# Actually remove the dead rows
+spice-kernel-db prune --metakernels --execute
+
+# Also delete the on-disk .tm files (symlink trees are shared across
+# metakernels in a mission and are never auto-deleted)
+spice-kernel-db prune --metakernels --execute --delete-files
+```
+
+The pruner treats `403`, `404`, and `410` as permanently dead; transient errors (timeouts, DNS failures, `5xx`) deliberately don't classify a row as dead, so going offline never causes accidental deletion.
+
+If you just want to remove the one offending entry:
+
+```bash
+spice-kernel-db mk --remove juice_crema_5_1_…_v462_20260223_001.tm
+```
+
+Then re-acquire the current version with `browse` → `get`.
+
+
+## `verify` reports unexpected statuses
+
+After a `get` or `rewrite`, run `spice-kernel-db verify <mk>` to cross-check the rewritten metakernel against the DB. Common findings:
+
+| Status | What it means | What to do |
+|--------|---------------|------------|
+| `DANGLING` | Symlink target moved or was deleted | Re-run `get`/`update` on this metakernel — the fixed `_link_existing_kernels` now repairs dangling links. |
+| `HASH_MISMATCH` (deep mode) | File was modified after registration | `prune --execute` to drop the location, then re-`get` to fetch a clean copy. |
+| `AMBIGUOUS` | Two non-superseded `kernels` rows share this filename | Indicates the DB has two distinct files with the same name. Use `find_by_filename` in the Python API to see them, decide which to keep, and `prune` the other. |
+| `UNREGISTERED` | File on disk but no `kernels` row | Run `scan <dir>` on the directory containing it. |
+| `BAD_PATH_VALUE` | `PATH_VALUES` not absolute | Use `get` (which writes absolute paths) instead of editing `.tm` files by hand. |
+| `TRAVERSAL` | A `KERNELS_TO_LOAD` entry escapes `PATH_VALUES` | The metakernel is malformed or hostile — don't `furnsh` it. |

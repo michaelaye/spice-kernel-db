@@ -1,7 +1,11 @@
 """Content-addressed SPICE kernel database for deduplication and metakernel rewriting."""
 
 from spice_kernel_db.config import Config, ensure_config
-from spice_kernel_db.db import ConcurrentModificationError, KernelDB
+from spice_kernel_db.db import (
+    ConcurrentModificationError,
+    KernelDB,
+    MetakernelUnreachableError,
+)
 from spice_kernel_db.parser import parse_metakernel, parse_metakernel_text
 from spice_kernel_db.remote import (
     fetch_metakernel,
@@ -13,6 +17,7 @@ __all__ = [
     "ConcurrentModificationError",
     "Config",
     "KernelDB",
+    "MetakernelUnreachableError",
     "ensure_config",
     "fetch_metakernel",
     "list_remote_metakernels",
@@ -20,4 +25,4 @@ __all__ = [
     "parse_metakernel_text",
     "resolve_kernel_urls",
 ]
-__version__ = "0.13.0"
+__version__ = "0.13.1"

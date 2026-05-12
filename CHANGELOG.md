@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-05-12
+
+### Added
+
+- **`MetakernelUnreachableError`** (new exception, exported from the
+  top-level package) — raised by `KernelDB.update_metakernel()` when
+  the remote returns HTTP 403/404/410. Attributes: `url`, `status`,
+  `filename`. The CLI catches it and prints a rich red panel with
+  recovery instructions instead of a raw stack trace; exit code is
+  `2` (distinct from `1` for the generic `LookupError`) so scripts
+  can detect the case.
+- **`prune --metakernels` (CLI) and `KernelDB.prune_metakernels()`** —
+  HEAD-probes every `source_url` in `metakernel_registry` and lists
+  rows that return 403/404/410 (NAIF rotates old versioned snapshots
+  into `former_versions/`, making the original URL permanently
+  unreachable). `--execute` removes the rows; `--delete-files` also
+  unlinks the on-disk `.tm` files. Transient errors (timeouts,
+  DNS failures, 5xx) are never treated as dead — leaving a row in
+  place is always safer than deleting on a network blip.
+
+### Documentation
+
+- New CLI subcommand entries for `verify` (shipped in 0.13.0 without
+  docs — gap fixed) and `prune` (shipped in 0.11.0 without docs —
+  gap fixed), plus the new `prune --metakernels` mode.
+- New troubleshooting entries for "Metakernel unreachable / HTTP 404
+  on update" and "`verify` reports unexpected statuses".
+- New `docs/api.qmd` entries for `verify_metakernel`,
+  `prune_metakernels`, and an Exceptions section covering both
+  `ConcurrentModificationError` and `MetakernelUnreachableError`.
+- New rule in `CLAUDE.md`: every user-visible change (new CLI
+  command/flag, new public `KernelDB` method, new error class, new
+  exit code) must land documentation in the same commit. Codifies
+  why the 0.13.0 verify/prune doc gaps existed and won't again.
+
+### Tests
+
+- 224 tests (+8 over 0.13.0): `TestUpdateUnreachableMetakernel`
+  (2), `TestPruneMetakernels` (5), `TestPruneMetakernelsCLI` (1).
+
 ## [0.13.0] - 2026-05-12
 
 A wide-ranging audit-and-fix release driven by a parallel-agent
@@ -484,6 +524,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.13.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.0...v0.11.1

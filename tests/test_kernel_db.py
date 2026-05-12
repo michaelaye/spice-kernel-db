@@ -4017,3 +4017,226 @@ class TestH6StalenessDatetimeComparison:
         captured = capsys.readouterr().out
         assert "Remote update available" not in captured
         db.close()
+
+
+class TestUpdateUnreachableMetakernel:
+    """`update` on a metakernel whose source URL now returns 404 (NAIF
+    rotated to former_versions/) must raise MetakernelUnreachableError
+    rather than crashing with a raw HTTPError stack trace."""
+
+    def test_update_raises_unreachable_on_404(self, tmp_path):
+        from spice_kernel_db import MetakernelUnreachableError
+
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Seed a metakernel_registry row pointing at a (mocked) dead URL
+        mk_path = str(tmp_path / "x.tm")
+        (tmp_path / "x.tm").write_text("\\begintext\n")
+        url = "https://naif.example/JUICE/kernels/mk/old.tm"
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, ?, ?, ?, current_timestamp)",
+            [mk_path, "JUICE", url, "old.tm"],
+        )
+
+        def boom(u):
+            raise urllib.error.HTTPError(u, 404, "Not Found", {}, None)
+
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=boom):
+            with pytest.raises(MetakernelUnreachableError) as exc:
+                db.update_metakernel("old.tm")
+        assert exc.value.status == 404
+        assert exc.value.filename == "old.tm"
+        assert exc.value.url == url
+        db.close()
+
+    def test_update_re_raises_non_4xx_errors(self, tmp_path):
+        """Server 5xx (transient) should not be classified as unreachable —
+        the user should retry, not prune."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        mk_path = str(tmp_path / "x.tm")
+        (tmp_path / "x.tm").write_text("\\begintext\n")
+        url = "https://naif.example/JUICE/kernels/mk/old.tm"
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, ?, ?, ?, current_timestamp)",
+            [mk_path, "JUICE", url, "old.tm"],
+        )
+
+        def boom(u):
+            raise urllib.error.HTTPError(u, 503, "Service Unavailable", {}, None)
+
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=boom):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                db.update_metakernel("old.tm")
+        assert exc.value.code == 503
+        db.close()
+
+
+class TestPruneMetakernels:
+    """`prune --metakernels` finds registry rows whose source_url is
+    permanently dead and removes them. Network errors are NOT treated
+    as dead — leaving a row in place is always safer than deleting."""
+
+    def _seed(self, tmp_path, urls: list[tuple[str, str]]) -> tuple[KernelDB, list[Path]]:
+        """Helper: insert N registry rows with given (filename, url) pairs.
+        Returns (db, list-of-on-disk-paths) for assertions."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        paths: list[Path] = []
+        for fname, url in urls:
+            p = tmp_path / "mk" / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("\\begintext\n")
+            paths.append(p)
+            db.con.execute(
+                "INSERT INTO metakernel_registry VALUES "
+                "(?, ?, ?, ?, current_timestamp)",
+                [str(p), "JUICE", url, fname],
+            )
+        return db, paths
+
+    def test_404_is_classified_dead_and_listed_in_dry_run(self, tmp_path):
+        db, paths = self._seed(tmp_path, [
+            ("alive.tm", "https://naif.example/alive.tm"),
+            ("dead.tm",  "https://naif.example/former_versions/dead.tm"),
+        ])
+
+        def head_responses(req, *args, **kwargs):
+            url = req.full_url
+            if "former_versions" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return MagicMock(__enter__=MagicMock(return_value=MagicMock()),
+                             __exit__=MagicMock(return_value=False))
+
+        with patch("urllib.request.urlopen", side_effect=head_responses):
+            dead = db.prune_metakernels(dry_run=True)
+        assert len(dead) == 1
+        assert dead[0]["filename"] == "dead.tm"
+        assert dead[0]["status_code"] == 404
+        # Dry run — registry untouched
+        n = db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_registry"
+        ).fetchone()[0]
+        assert n == 2
+        # File untouched
+        assert all(p.exists() for p in paths)
+        db.close()
+
+    def test_execute_removes_registry_rows_keeps_files(self, tmp_path):
+        db, paths = self._seed(tmp_path, [
+            ("alive.tm", "https://naif.example/alive.tm"),
+            ("dead.tm",  "https://naif.example/former_versions/dead.tm"),
+        ])
+        # Also seed an entry to confirm cascading delete
+        db.con.execute(
+            "INSERT INTO metakernel_entries VALUES (?, 0, ?, ?)",
+            [str(paths[1]), "$K/lsk/x.tls", "x.tls"],
+        )
+
+        def head_responses(req, *args, **kwargs):
+            if "former_versions" in req.full_url:
+                raise urllib.error.HTTPError(
+                    req.full_url, 404, "Not Found", {}, None,
+                )
+            return MagicMock(__enter__=MagicMock(return_value=MagicMock()),
+                             __exit__=MagicMock(return_value=False))
+
+        with patch("urllib.request.urlopen", side_effect=head_responses):
+            db.prune_metakernels(dry_run=False, delete_files=False)
+
+        rows = db.con.execute(
+            "SELECT filename FROM metakernel_registry"
+        ).fetchall()
+        assert rows == [("alive.tm",)]
+        n_entries = db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_entries WHERE mk_path = ?",
+            [str(paths[1])],
+        ).fetchone()[0]
+        assert n_entries == 0
+        # Without --delete-files, the on-disk .tm survives
+        assert paths[1].exists()
+        db.close()
+
+    def test_delete_files_unlinks_on_disk_tm(self, tmp_path):
+        db, paths = self._seed(tmp_path, [
+            ("dead.tm", "https://naif.example/former_versions/dead.tm"),
+        ])
+        def head_responses(req, *args, **kwargs):
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, None,
+            )
+
+        with patch("urllib.request.urlopen", side_effect=head_responses):
+            db.prune_metakernels(dry_run=False, delete_files=True)
+        assert not paths[0].exists()
+        db.close()
+
+    def test_network_error_does_NOT_remove_row(self, tmp_path):
+        """A timeout or DNS failure must not get the row classified as
+        dead — we'd rather leave stale state than delete on a transient."""
+        db, paths = self._seed(tmp_path, [
+            ("maybe-alive.tm", "https://offline.example/x.tm"),
+        ])
+        def boom(req, *args, **kwargs):
+            raise urllib.error.URLError("name resolution failed")
+        with patch("urllib.request.urlopen", side_effect=boom):
+            dead = db.prune_metakernels(dry_run=False)
+        assert dead == []
+        n = db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_registry"
+        ).fetchone()[0]
+        assert n == 1
+        assert paths[0].exists()
+        db.close()
+
+    def test_5xx_is_not_dead(self, tmp_path):
+        db, paths = self._seed(tmp_path, [
+            ("transient.tm", "https://flaky.example/x.tm"),
+        ])
+        def boom(req, *args, **kwargs):
+            raise urllib.error.HTTPError(
+                req.full_url, 503, "Service Unavailable", {}, None,
+            )
+        with patch("urllib.request.urlopen", side_effect=boom):
+            dead = db.prune_metakernels(dry_run=True)
+        assert dead == []
+        db.close()
+
+
+class TestPruneMetakernelsCLI:
+    """End-to-end CLI smoke."""
+
+    def test_cli_prune_metakernels_dry_run(self, tmp_path):
+        from spice_kernel_db.cli import main
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        p = tmp_path / "mk" / "dead.tm"
+        p.parent.mkdir(parents=True)
+        p.write_text("\\begintext\n")
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, ?, ?, ?, current_timestamp)",
+            [str(p), "JUICE",
+             "https://naif.example/former_versions/dead.tm", "dead.tm"],
+        )
+        db.close()
+
+        def boom(req, *args, **kwargs):
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, None,
+            )
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()), \
+             patch("urllib.request.urlopen", side_effect=boom):
+            main([
+                "--db", str(tmp_path / "test.duckdb"),
+                "prune", "--metakernels",
+            ])
+
+        # Dry run by default — registry row still there
+        db2 = KernelDB(tmp_path / "test.duckdb")
+        n = db2.con.execute(
+            "SELECT COUNT(*) FROM metakernel_registry"
+        ).fetchone()[0]
+        assert n == 1
+        db2.close()

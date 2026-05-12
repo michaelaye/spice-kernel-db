@@ -22,6 +22,7 @@ from typing import Optional
 import duckdb
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress
 from rich.table import Table
 
 console = Console()
@@ -170,6 +171,22 @@ class ConcurrentModificationError(RuntimeError):
     the operation; if it persists, another `get`/`scan` is still
     running concurrently.
     """
+
+
+class MetakernelUnreachableError(LookupError):
+    """Raised when the remote metakernel returns a permanent HTTP error
+    (403/404/410), typically because NAIF rotated the file into
+    ``former_versions/``. The local registry row is now an obsolete
+    pointer; the user should clean it up with ``prune --metakernels``.
+    """
+
+    def __init__(self, url: str, status: int, filename: str):
+        self.url = url
+        self.status = status
+        self.filename = filename
+        super().__init__(
+            f"Metakernel {filename!r} is unreachable: HTTP {status} for {url}"
+        )
 
 
 def _format_size(n: int) -> str:
@@ -1885,13 +1902,25 @@ class KernelDB:
                     "Use 'get' with a URL."
                 )
 
-        result = self.get_metakernel(
-            source_url,
-            download_dir=download_dir,
-            mission=mission,
-            yes=yes,
-            force=force,
-        )
+        import urllib.error
+        try:
+            result = self.get_metakernel(
+                source_url,
+                download_dir=download_dir,
+                mission=mission,
+                yes=yes,
+                force=force,
+            )
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 404, 410):
+                # NAIF (and ESA) routinely rotate old versioned
+                # metakernel snapshots into former_versions/, so the
+                # registry's source_url goes permanently 404. Raise a
+                # structured error the CLI can pretty-print.
+                raise MetakernelUnreachableError(
+                    source_url, e.code, mk_filename,
+                ) from e
+            raise
 
         # Re-scan the kernel directories referenced by the metakernel
         # so that new/renamed files on disk get indexed.  Skip if --force
@@ -2496,6 +2525,141 @@ class KernelDB:
 
         print(f"\n{action}: {len(stale)} stale location(s)")
         return pruned_paths
+
+    def prune_metakernels(
+        self,
+        dry_run: bool = True,
+        delete_files: bool = False,
+        timeout: float = 10.0,
+    ) -> list[dict]:
+        """Find metakernels whose remote source URL is no longer
+        reachable (typically NAIF rotating old versioned snapshots into
+        ``former_versions/``) and optionally remove their registry rows.
+
+        Sends a HEAD request to each ``metakernel_registry.source_url``
+        and treats 403/404/410 as permanently dead. Network errors
+        (timeouts, DNS failures) are deliberately NOT treated as dead
+        — we'd rather leave a registry row in place than delete it
+        because the user was offline.
+
+        Args:
+            dry_run: If True (default), only report what would be
+                removed.
+            delete_files: If True (and dry_run is False), also unlink
+                the on-disk ``.tm`` file. Symlink trees under the
+                mission's download dir are shared across metakernels
+                and never auto-cleaned.
+            timeout: Per-URL HTTP HEAD timeout in seconds.
+
+        Returns:
+            List of dicts, one per dead metakernel:
+            ``{'mk_path', 'filename', 'mission', 'source_url',
+              'status_code'}``.
+        """
+        import urllib.error
+        import urllib.request
+
+        rows = self.con.execute("""
+            SELECT mk_path, filename, mission, source_url
+            FROM metakernel_registry
+            WHERE source_url IS NOT NULL AND source_url != ''
+            ORDER BY mission, filename
+        """).fetchall()
+
+        if not rows:
+            print("No metakernels with source URLs in the registry.")
+            return []
+
+        dead: list[dict] = []
+        with Progress(
+            transient=True,
+        ) as progress:
+            tid = progress.add_task(
+                "Checking remote metakernels", total=len(rows),
+            )
+            for mk_path, filename, mission, source_url in rows:
+                progress.advance(tid)
+                try:
+                    req = urllib.request.Request(source_url, method="HEAD")
+                    with urllib.request.urlopen(req, timeout=timeout):
+                        continue  # alive
+                except urllib.error.HTTPError as e:
+                    if e.code in (403, 404, 410):
+                        dead.append({
+                            "mk_path": mk_path,
+                            "filename": filename,
+                            "mission": mission,
+                            "source_url": source_url,
+                            "status_code": e.code,
+                        })
+                    else:
+                        logger.warning(
+                            "HEAD %s returned HTTP %d — not pruning",
+                            source_url, e.code,
+                        )
+                except (urllib.error.URLError, OSError) as e:
+                    logger.warning(
+                        "HEAD %s failed (%s) — not pruning, may be transient",
+                        source_url, e,
+                    )
+
+        if not dead:
+            print("No dead metakernels found.")
+            return []
+
+        # Render results
+        table = Table(title=f"Unreachable metakernels ({len(dead)})")
+        table.add_column("Mission")
+        table.add_column("Filename")
+        table.add_column("HTTP")
+        table.add_column("URL", overflow="fold")
+        for d in dead:
+            table.add_row(
+                d["mission"] or "",
+                d["filename"],
+                str(d["status_code"]),
+                d["source_url"],
+            )
+        console.print(table)
+
+        if dry_run:
+            console.print(
+                f"\n[dim]Dry run — pass --execute to remove the "
+                f"{len(dead)} registry row(s) above.[/dim]"
+            )
+            if not delete_files:
+                console.print(
+                    "[dim]Add --delete-files to also unlink the .tm files "
+                    "on disk.[/dim]"
+                )
+            return dead
+
+        # Actually remove
+        for d in dead:
+            self.con.execute(
+                "DELETE FROM metakernel_entries WHERE mk_path = ?",
+                [d["mk_path"]],
+            )
+            self.con.execute(
+                "DELETE FROM metakernel_registry WHERE mk_path = ?",
+                [d["mk_path"]],
+            )
+            if delete_files:
+                p = Path(d["mk_path"])
+                if p.is_symlink() or p.is_file():
+                    try:
+                        p.unlink()
+                        console.print(f"  Deleted file: {p}")
+                    except OSError as e:
+                        console.print(
+                            f"[yellow]Could not delete {p}: {e}[/yellow]"
+                        )
+
+        console.print(
+            f"\n[bold]Removed {len(dead)} registry row(s)"
+            f"{' + files' if delete_files else ''}.[/bold]"
+        )
+        return dead
 
     # ------------------------------------------------------------------
     # Coverage analysis

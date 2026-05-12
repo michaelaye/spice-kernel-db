@@ -231,11 +231,47 @@ db.update_metakernel(
 
 Re-fetch a metakernel from its source URL and download new or missing kernels. Looks up the source URL from the `metakernel_registry`, falling back to the mission's `mk_dir_url` + filename if no source URL is stored.
 
-Raises `LookupError` if the metakernel is not found in the registry or was added via scan without a source URL.
+Raises `LookupError` if the metakernel is not found in the registry or was added via scan without a source URL. Raises `MetakernelUnreachableError` (a `LookupError` subclass) when the remote returns 403/404/410 — typically because NAIF rotated the file into `former_versions/`; use `prune_metakernels()` to clean up the stale registry row.
 
 After downloading, automatically rescans the kernel directories referenced by the metakernel so newly downloaded files are immediately indexed.
 
 Returns the same dict as `get_metakernel`.
+
+#### `verify_metakernel`
+
+```python
+db.verify_metakernel(
+    mk_path: str | Path,
+    *,
+    deep: bool = False,
+) -> dict
+```
+
+Deeply cross-check a metakernel against the database. Each entry in `KERNELS_TO_LOAD` is substituted through `PATH_VALUES`/`PATH_SYMBOLS` to an absolute path and validated against the `kernels` row whose filename matches (case-insensitive).
+
+Checks: traversal escape from `PATH_VALUES` root, dangling symlinks, missing files, size mismatch, SHA-256 mismatch (only in `deep` mode), `AMBIGUOUS` resolution (multiple non-superseded `kernels` rows share the filename — see [`superseded_by` semantics](design.qmd)), unregistered files, and non-absolute `PATH_VALUES`.
+
+Returns a dict with keys `entries`, `ok`, `fail`, `fatal`, `mk_path`, `deep`. Each entry is a dict with `raw`, `resolved`, `status`, `detail`. `fatal` is `True` if any entry is in a P0 state (e.g. `TRAVERSAL`, `HASH_MISMATCH`, `AMBIGUOUS`).
+
+This is the recommended cross-check after every `get`/`update`/`rewrite`. Run with `deep=True` periodically to catch content corruption that preserves size.
+
+#### `prune_metakernels`
+
+```python
+db.prune_metakernels(
+    dry_run: bool = True,
+    delete_files: bool = False,
+    timeout: float = 10.0,
+) -> list[dict]
+```
+
+Find rows in `metakernel_registry` whose remote `source_url` returns a permanent HTTP error (403/404/410) and optionally remove them. Sends a HEAD request to each URL with the given `timeout`.
+
+Transient failures (timeouts, DNS errors, 5xx) are deliberately **never** classified as dead — leaving a registry row stale is always safer than deleting on a network blip.
+
+With `dry_run=False`, the matching rows are removed from `metakernel_registry` and `metakernel_entries`. With `delete_files=True`, the on-disk `.tm` file is also unlinked; symlink trees under the mission's download directory are shared and never auto-cleaned.
+
+Returns a list of dicts, one per dead metakernel: `{'mk_path', 'filename', 'mission', 'source_url', 'status_code'}`.
 
 #### `index_metakernel`
 
@@ -466,3 +502,17 @@ Dataclass with attributes:
 | `size` | `str` | Size string from the listing (e.g. `"12K"`) |
 | `base_name` | `str` | Filename with version tag stripped |
 | `version_tag` | `str \| None` | Version tag (e.g. `"v461_20251127_001"`) or `None` |
+
+## Exceptions
+
+```python
+from spice_kernel_db import ConcurrentModificationError, MetakernelUnreachableError
+```
+
+### `ConcurrentModificationError`
+
+Raised when `KernelDB.get_metakernel()` detects that another process modified the kernel records during its network I/O window (after the DB lock was released to allow parallel reads). Subclass of `RuntimeError`. Retry the operation after the other writer completes.
+
+### `MetakernelUnreachableError`
+
+Raised by `KernelDB.update_metakernel()` when the remote metakernel returns HTTP 403/404/410 — typically because NAIF rotated the file into `former_versions/`. Subclass of `LookupError`. Attributes: `url`, `status` (int HTTP code), `filename`. Recovery: `db.prune_metakernels(dry_run=False)`.

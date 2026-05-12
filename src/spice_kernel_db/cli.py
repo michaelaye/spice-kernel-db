@@ -18,7 +18,7 @@ from spice_kernel_db.config import (
     setup_interactive,
     show_config,
 )
-from spice_kernel_db.db import KernelDB
+from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
     check_mk_availability,
@@ -172,11 +172,24 @@ quick start:
 
     # --- prune ---
     p_prune = sub.add_parser(
-        "prune", help="Remove stale DB entries for files no longer on disk"
+        "prune",
+        help="Remove stale DB entries for files no longer on disk "
+             "(or, with --metakernels, registry rows whose source URL is dead)",
     )
     p_prune.add_argument(
         "--execute", action="store_true",
         help="Actually remove entries (default: dry run)",
+    )
+    p_prune.add_argument(
+        "--metakernels", "--mk", action="store_true",
+        dest="prune_metakernels",
+        help="Prune metakernel_registry rows whose remote source_url "
+             "returns 403/404/410 (NAIF often rotates old snapshots into "
+             "former_versions/)",
+    )
+    p_prune.add_argument(
+        "--delete-files", action="store_true",
+        help="With --metakernels --execute: also unlink the on-disk .tm files",
     )
 
     # --- resolve ---
@@ -482,7 +495,13 @@ quick start:
             db.deduplicate_with_symlinks(dry_run=not args.execute)
 
         elif args.command == "prune":
-            db.prune(dry_run=not args.execute)
+            if args.prune_metakernels:
+                db.prune_metakernels(
+                    dry_run=not args.execute,
+                    delete_files=args.delete_files,
+                )
+            else:
+                db.prune(dry_run=not args.execute)
 
         elif args.command == "resolve":
             if args.resolve_mk:
@@ -609,6 +628,24 @@ quick start:
                     yes=args.yes,
                     force=args.force,
                 )
+            except MetakernelUnreachableError as e:
+                from rich.panel import Panel as _Panel
+                console.print(_Panel(
+                    f"[red]The remote metakernel is no longer available.[/red]\n\n"
+                    f"  URL:      {e.url}\n"
+                    f"  Status:   HTTP {e.status}\n"
+                    f"  Filename: {e.filename}\n\n"
+                    f"NAIF (and ESA) routinely rotate old versioned snapshots "
+                    f"into a [italic]former_versions/[/italic] subdirectory, "
+                    f"which makes the original URL 404.\n\n"
+                    f"To clean up the stale registry row, run:\n"
+                    f"  [bold]spice-kernel-db prune --metakernels[/bold]\n"
+                    f"or remove just this one:\n"
+                    f"  [bold]spice-kernel-db mk --remove {e.filename}[/bold]",
+                    title="Metakernel unreachable",
+                    border_style="red",
+                ))
+                sys.exit(2)
             except LookupError as e:
                 print(str(e), file=sys.stderr)
                 sys.exit(1)

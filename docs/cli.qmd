@@ -145,6 +145,89 @@ spice-kernel-db resolve mro_sc_2024.bc --mission JUICE
 Prints the resolved path to stdout and any warnings to stderr.
 
 
+## `verify`
+
+Deeply cross-check a metakernel against the database. Every entry in `KERNELS_TO_LOAD` is walked through `PATH_VALUES`/`PATH_SYMBOLS` substitution and validated.
+
+```bash
+spice-kernel-db verify [metakernel] [--deep] [--strict] [--json] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Path to `.tm` file. **Omit to select interactively from the registry.** |
+| `--deep` | Recompute SHA-256 of every entry's target (slow). Default: size-only checks. |
+| `--strict` | Exit non-zero on any non-OK finding. Default: only on fatal P0 issues. |
+| `--json` | Emit structured JSON instead of a rich table. |
+| `--mission` | Filter the interactive picker by mission. |
+
+Per-entry status codes:
+
+| Status | Severity | Meaning |
+|--------|----------|---------|
+| `OK` | — | Verified |
+| `DANGLING` | fatal | Symlink target missing |
+| `NOT_FOUND` | fatal | No file at the resolved path |
+| `NOT_FILE` | fatal | Path exists but isn't a regular file |
+| `TRAVERSAL` | fatal | Entry resolves outside every `PATH_VALUE` root |
+| `HASH_MISMATCH` | fatal | (deep mode) target's SHA-256 ≠ DB record |
+| `SIZE_MISMATCH` | fatal | File size disagrees with DB record |
+| `AMBIGUOUS` | fatal | Multiple non-superseded `kernels` rows for the same filename |
+| `BAD_PATH_VALUE` | fatal | `PATH_VALUES` entry not absolute or directory missing |
+| `UNREGISTERED` | warning | File exists but no `kernels` row — run `scan` |
+
+```bash
+# Quick check (size + presence)
+spice-kernel-db verify ~/spice/juice/mk/juice_ops.tm
+
+# Full hash recompute
+spice-kernel-db verify ~/spice/juice/mk/juice_ops.tm --deep
+
+# CI-friendly
+spice-kernel-db verify juice_ops.tm --json --strict
+```
+
+Use this after a `get`/`update` to confirm the rewritten metakernel is sound. `--deep` is the only mode that catches content corruption that preserves file size.
+
+
+## `prune`
+
+Remove stale database entries. Two modes:
+
+```bash
+# Mode 1 (default): locations whose file no longer exists on disk
+spice-kernel-db prune [--execute]
+
+# Mode 2: metakernel registry rows whose source URL returns 4xx
+spice-kernel-db prune --metakernels [--execute] [--delete-files]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--execute` | Actually remove entries. Default: dry run. |
+| `--metakernels`, `--mk` | Switch to metakernel-registry mode. Sends a HEAD to each `source_url` and treats 403/404/410 as permanently dead. |
+| `--delete-files` | With `--metakernels --execute`: also unlink the on-disk `.tm` files. |
+
+Network errors (timeouts, DNS failures) are **never** treated as dead — pruning would otherwise discard real state when you happened to be offline.
+
+```bash
+# Default mode — preview stale kernel locations
+spice-kernel-db prune
+
+# Actually remove
+spice-kernel-db prune --execute
+
+# Find dead metakernel registry rows (NAIF rotates old snapshots into former_versions/)
+spice-kernel-db prune --metakernels
+
+# Remove the registry rows
+spice-kernel-db prune --metakernels --execute
+
+# And delete the local .tm files (symlink trees are shared and never auto-deleted)
+spice-kernel-db prune --metakernels --execute --delete-files
+```
+
+
 ## `dedup`
 
 Replace duplicate kernel files with symlinks.
