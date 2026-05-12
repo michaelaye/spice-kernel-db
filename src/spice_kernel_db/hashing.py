@@ -54,12 +54,32 @@ _GENERIC_PREFIXES = (
 )
 
 
+def canonicalize_mission(name: str | None) -> str:
+    """Normalise a mission name to its canonical form (H4).
+
+    All mission storage and comparison goes through this — without it,
+    ``JUICE``/``juice``/``Juice`` ended up as separate ``missions`` rows
+    on case-sensitive filesystems and as colliding directories on
+    case-insensitive ones. We pick uppercase as canonical with two
+    exceptions: ``generic`` and ``unknown`` stay lowercase because the
+    rest of the code (notably ``guess_mission``) treats them as
+    sentinels for "no specific mission."
+    """
+    if not name:
+        return "unknown"
+    s = name.strip()
+    if s.lower() in ("generic", "unknown"):
+        return s.lower()
+    return s.upper()
+
+
 def guess_mission(filepath: str) -> str:
     """Best-effort mission name from path components.
 
     Heuristic: look for a directory named before 'kernels/' that isn't
     a generic infrastructure name, then fall back to kernel-type directory
-    patterns, then to filename patterns.
+    patterns, then to filename patterns. Result is run through
+    :func:`canonicalize_mission` for consistent casing.
     """
     _KERNEL_TYPE_DIRS = {"ck", "spk", "pck", "fk", "ik", "lsk", "sclk", "dsk", "mk"}
     parts = Path(filepath).parts
@@ -68,7 +88,7 @@ def guess_mission(filepath: str) -> str:
         if p.lower() == "kernels" and i > 0:
             candidate = parts[i - 1]
             if candidate.lower() not in ("naif", "pub", "data", "spice"):
-                return candidate
+                return canonicalize_mission(candidate)
 
     # Pattern: .../MISSION/<kernel_type>/file (no intermediate kernels/ dir)
     for i, p in enumerate(parts):
@@ -77,13 +97,13 @@ def guess_mission(filepath: str) -> str:
             if candidate.lower() not in (
                 "naif", "pub", "data", "spice", "kernels",
             ) and "generic" not in candidate.lower():
-                return candidate
+                return canonicalize_mission(candidate)
 
     # Fallback: known mission names in filename
     name = Path(filepath).stem.lower()
     for mission in _KNOWN_MISSIONS:
         if mission in name:
-            return mission.upper()
+            return canonicalize_mission(mission)
 
     if name.startswith(_GENERIC_PREFIXES):
         return "generic"

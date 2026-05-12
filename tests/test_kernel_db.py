@@ -14,7 +14,12 @@ import pytest
 
 from spice_kernel_db import KernelDB, parse_metakernel
 from spice_kernel_db.config import Config, load_config, save_config, show_config
-from spice_kernel_db.hashing import classify_kernel, guess_mission, sha256_file
+from spice_kernel_db.hashing import (
+    canonicalize_mission,
+    classify_kernel,
+    guess_mission,
+    sha256_file,
+)
 from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
 from spice_kernel_db.remote import (
     RemoteMetakernel,
@@ -181,10 +186,14 @@ class TestHashing:
         assert classify_kernel("random.xyz") == "unknown"
 
     def test_guess_mission(self):
+        # H4: results are canonicalised via canonicalize_mission().
+        # Real mission names → uppercase; "generic"/"unknown" sentinels
+        # stay lowercase.
         assert guess_mission("/data/JUICE/kernels/lsk/naif.tls") == "JUICE"
         assert guess_mission("/data/MRO/kernels/ck/mro.bc") == "MRO"
-        # Path-based: directory before 'kernels/' is used
-        assert guess_mission("/data/generic_kernels/kernels/lsk/naif.tls") == "generic_kernels"
+        assert guess_mission("/data/juice/kernels/lsk/naif.tls") == "JUICE"
+        # Path-based: directory before 'kernels/' is canonicalised
+        assert guess_mission("/data/generic_kernels/kernels/lsk/naif.tls") == "GENERIC_KERNELS"
         # Fallback to filename-based when no 'kernels/' in path
         assert guess_mission("/naif/generic_kernels/lsk/naif0012.tls") == "generic"
 
@@ -2122,38 +2131,59 @@ class TestIssue4PartialDownloadDetection:
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", return_value=mock_resp):
-            result = download_kernel("http://example.com/test.bsp", dest)
+            result_dest, result_sha = download_kernel(
+                "http://example.com/test.bsp", dest,
+            )
 
-        assert result == dest
+        assert result_dest == dest
         assert dest.read_bytes() == content
+        # C4: download_kernel now returns the streamed sha256 alongside
+        # the path so callers don't need a second pass over the file.
+        assert result_sha == hashlib.sha256(content).hexdigest()
 
 
 class TestIssue5RaceConditionDBState:
-    """Issue 5: DB state can change during download while lock released."""
+    """Issue 5 / C5: DB state can change during download while lock released.
 
-    def test_state_change_warning_logged(self, tmp_path, caplog):
-        """After reacquire, a warning should be logged if kernel records changed."""
+    After C5, detection raises ConcurrentModificationError instead of just
+    logging — the previous behavior silently continued and produced wrong
+    output.
+    """
+
+    def test_state_change_raises_concurrent_modification(self, tmp_path, caplog):
+        """When state changed since the pre-snapshot, _check_state_changed
+        must raise so the caller can abort the operation cleanly."""
+        from spice_kernel_db import ConcurrentModificationError
         db = KernelDB(tmp_path / "test.duckdb")
 
-        # Register a kernel
         kernel = tmp_path / "lsk" / "naif0012.tls"
         kernel.parent.mkdir(parents=True)
         kernel.write_text("LSK CONTENT")
         db.register_file(kernel, mission="JUICE")
 
-        # Take a snapshot of kernel hashes
         pre_snapshot = db._snapshot_kernel_hashes(["naif0012.tls"], "JUICE")
 
-        # Simulate state change: modify the file and re-register
         kernel.write_text("UPDATED LSK CONTENT")
         db.register_file(kernel, mission="JUICE")
 
-        # Verify state change is detected
         with caplog.at_level(logging.WARNING):
-            changed = db._check_state_changed(
-                pre_snapshot, ["naif0012.tls"], "JUICE",
-            )
-        assert changed is True
+            with pytest.raises(ConcurrentModificationError):
+                db._check_state_changed(
+                    pre_snapshot, ["naif0012.tls"], "JUICE",
+                )
+        # Warning is still emitted for forensics
+        assert any("DB state changed" in r.message for r in caplog.records)
+        db.close()
+
+    def test_no_change_returns_false(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("LSK")
+        db.register_file(kernel, mission="JUICE")
+        snap = db._snapshot_kernel_hashes(["naif0012.tls"], "JUICE")
+        # No mutation between snapshot and check → returns False
+        assert db._check_state_changed(snap, ["naif0012.tls"], "JUICE") is False
         db.close()
 
 
@@ -2716,3 +2746,1274 @@ class TestGlobalVerbose:
         with pytest.raises(SystemExit) as exc_info:
             main(["--help"])
         assert exc_info.value.code == 0
+
+
+class TestC1PathTraversalGetMetakernel:
+    """C1: hostile metakernel with traversing relpaths must be refused."""
+
+    def test_get_refuses_traversal_in_kernels_to_load(self, tmp_path):
+        from spice_kernel_db.remote import _fetch_metakernel
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        evil_tm = textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = (
+                '$KERNELS/../../../../tmp/pwn.bsp'
+              )
+            \\begintext
+        """)
+
+        with patch(
+            "spice_kernel_db.db._fetch_metakernel",
+            return_value=(evil_tm, "https://evil.example/evil.tm"),
+        ):
+            with pytest.raises(ValueError, match="path-traversing|unsafe"):
+                db.get_metakernel(
+                    "https://evil.example/evil.tm",
+                    download_dir=tmp_path / "downloads",
+                    mission="JUICE",
+                    yes=True,
+                )
+
+        # No file should have been written outside the download tree
+        assert not (Path("/tmp") / "pwn.bsp").exists() or \
+            (Path("/tmp") / "pwn.bsp").stat().st_size == 0
+        db.close()
+
+    def test_link_existing_refuses_unsafe_relpath(self, tmp_path):
+        """_link_existing_kernels must skip relpaths that escape mission_root."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a real kernel
+        kernel = tmp_path / "JUICE" / "kernels" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("LSK")
+        db.register_file(kernel, mission="JUICE")
+
+        download_dir = tmp_path / "download"
+        download_dir.mkdir()
+
+        n = db._link_existing_kernels(
+            indices=[0],
+            filenames=["naif0012.tls"],
+            relpaths=["../../../tmp/evil.tls"],   # escapes mission_root
+            download_dir=download_dir,
+            mission="JUICE",
+        )
+        assert n == 0
+        # No symlink anywhere outside the mission dir
+        assert not (Path("/tmp") / "evil.tls").exists() or \
+            not (Path("/tmp") / "evil.tls").is_symlink()
+        db.close()
+
+
+class TestC2HashGateByResolvedPath:
+    """C2: hash verification must use the resolved local path, not the
+    caller-supplied filename. Otherwise the gate is bypassed whenever the
+    canonical filename in `kernels` differs from what the metakernel asks
+    for (the documented path-suffix-match case)."""
+
+    def test_link_skips_when_corrupted_via_path_suffix_match(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a file under its canonical (long) name
+        canonical = tmp_path / "JUICE" / "spk" / "jup365_19900101_20500101.bsp"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_bytes(b"identical content")
+        h = db.register_file(canonical, mission="JUICE")
+
+        # Manually add a SECOND location for the same hash with a different
+        # filename — simulates "same content, also lives at this path with
+        # the short name."
+        alt = tmp_path / "JUICE" / "spk" / "jup365.bsp"
+        alt.write_bytes(b"identical content")
+        db.con.execute(
+            "INSERT INTO locations VALUES (?, ?, ?, ?, current_timestamp)",
+            [h, str(alt.resolve()), "JUICE", None],
+        )
+
+        # Now CORRUPT the alt file — content no longer matches its
+        # registered hash. The pre-fix code would skip the hash check
+        # because `WHERE filename='jup365.bsp'` returns NULL (canonical
+        # is the long name). The fix looks up by resolved path.
+        alt.write_bytes(b"corrupted bytes!!!")
+
+        download_dir = tmp_path / "download"
+        download_dir.mkdir()
+        n = db._link_existing_kernels(
+            indices=[0],
+            filenames=["jup365.bsp"],
+            relpaths=["spk/jup365.bsp"],
+            download_dir=download_dir,
+            mission="JUICE",
+        )
+        assert n == 0, (
+            "C2: link must be refused when the resolved file's hash "
+            "no longer matches its locations row"
+        )
+        db.close()
+
+    def test_link_succeeds_when_canonical_differs_but_content_matches(
+        self, tmp_path,
+    ):
+        """The legitimate path-suffix case: same content, different name.
+        After C2, this still works as long as the hash matches."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        canonical = tmp_path / "JUICE" / "spk" / "jup365_19900101_20500101.bsp"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_bytes(b"identical content")
+        h = db.register_file(canonical, mission="JUICE")
+
+        alt = tmp_path / "JUICE" / "spk" / "jup365.bsp"
+        alt.write_bytes(b"identical content")
+        db.con.execute(
+            "INSERT INTO locations VALUES (?, ?, ?, ?, current_timestamp)",
+            [h, str(alt.resolve()), "JUICE", None],
+        )
+
+        download_dir = tmp_path / "download"
+        download_dir.mkdir()
+        n = db._link_existing_kernels(
+            indices=[0],
+            filenames=["jup365.bsp"],
+            relpaths=["spk/jup365.bsp"],
+            download_dir=download_dir,
+            mission="JUICE",
+        )
+        assert n == 1
+        link = download_dir / "JUICE" / "spk" / "jup365.bsp"
+        assert link.is_symlink()
+        db.close()
+
+
+class TestC3SupersededBy:
+    """C3: re-registering the SAME path with new content must mark the
+    old kernels row superseded; resolution then ignores it and is
+    deterministic. Two DIFFERENT paths with the same filename are NOT
+    supersessions — both remain active."""
+
+    def test_same_path_content_change_marks_superseded(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "JUICE" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("v1 content")
+        h1 = db.register_file(kernel, mission="JUICE")
+
+        kernel.write_text("v2 content")
+        h2 = db.register_file(kernel, mission="JUICE")
+        assert h1 != h2
+
+        # Old row's superseded_by must point to the new hash
+        old = db.con.execute(
+            "SELECT superseded_by FROM kernels WHERE sha256 = ?", [h1],
+        ).fetchone()
+        assert old is not None and old[0] == h2
+
+        new = db.con.execute(
+            "SELECT superseded_by FROM kernels WHERE sha256 = ?", [h2],
+        ).fetchone()
+        assert new is not None and new[0] is None
+        db.close()
+
+    def test_resolution_skips_superseded(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "JUICE" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("v1")
+        db.register_file(kernel, mission="JUICE")
+        kernel.write_text("v2")
+        h2 = db.register_file(kernel, mission="JUICE")
+
+        # find_by_filename must return only the active (v2) row
+        hits = db.find_by_filename("naif0012.tls")
+        assert len(hits) == 1
+        assert hits[0]["sha256"] == h2
+        db.close()
+
+    def test_different_paths_same_name_NOT_superseded(self, tmp_path):
+        """Two distinct files sharing a filename are not supersessions."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        a = tmp_path / "tree_a" / "de440.bsp"
+        b = tmp_path / "tree_b" / "de440.bsp"
+        a.parent.mkdir(parents=True)
+        b.parent.mkdir(parents=True)
+        a.write_bytes(b"content A")
+        b.write_bytes(b"content B")
+        ha = db.register_file(a, mission="A")
+        hb = db.register_file(b, mission="B")
+        assert ha != hb
+
+        # Both rows should be active (neither superseded)
+        rows = db.con.execute(
+            "SELECT sha256, superseded_by FROM kernels "
+            "WHERE filename = 'de440.bsp'",
+        ).fetchall()
+        assert len(rows) == 2
+        assert all(r[1] is None for r in rows)
+        db.close()
+
+    def test_old_location_at_same_path_is_cleaned_up(self, tmp_path):
+        """When the path is re-registered with new content, the stale
+        old-hash locations row at that path must be removed (it's not
+        physically there anymore)."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "x" / "foo.bsp"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_bytes(b"v1")
+        h1 = db.register_file(kernel, mission="m")
+        kernel.write_bytes(b"v2")
+        db.register_file(kernel, mission="m")
+
+        # locations should only have the new hash at this path
+        rows = db.con.execute(
+            "SELECT sha256 FROM locations WHERE abs_path = ?",
+            [str(kernel.resolve())],
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] != h1
+        db.close()
+
+
+class TestVerifyMetakernel:
+    """Tests for the `verify` command."""
+
+    def _build_rewritten_mk(self, tmp_path):
+        """Helper: scan a tiny tree, rewrite a metakernel, return path + db."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        juice = tmp_path / "JUICE" / "kernels"
+        for sub in ("lsk", "spk", "mk"):
+            (juice / sub).mkdir(parents=True)
+        (juice / "lsk" / "naif0012.tls").write_text("LSK")
+        (juice / "spk" / "de432s.bsp").write_bytes(b"SPK_BYTES")
+        db.scan_directory(juice, mission="JUICE")
+
+        src_mk = juice / "mk" / "in.tm"
+        src_mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = (
+                '$KERNELS/lsk/naif0012.tls'
+                '$KERNELS/spk/de432s.bsp'
+              )
+            \\begintext
+        """))
+
+        out = tmp_path / "out.tm"
+        link_root = tmp_path / "links"
+        db.rewrite_metakernel(src_mk, out, mission="JUICE", link_root=link_root)
+        return db, out, link_root
+
+    def test_verify_ok_quick(self, tmp_path):
+        db, out, _ = self._build_rewritten_mk(tmp_path)
+        result = db.verify_metakernel(out)
+        assert result["fatal"] is False
+        assert result["fail"] == 0
+        assert result["ok"] == 2
+        db.close()
+
+    def test_verify_ok_deep(self, tmp_path):
+        db, out, _ = self._build_rewritten_mk(tmp_path)
+        result = db.verify_metakernel(out, deep=True)
+        assert result["fatal"] is False
+        assert all(e["status"] == "OK" for e in result["entries"])
+        db.close()
+
+    def test_verify_detects_dangling_symlink(self, tmp_path):
+        db, out, link_root = self._build_rewritten_mk(tmp_path)
+        # Break one symlink: remove its target
+        lsk_link = link_root / "lsk" / "naif0012.tls"
+        target = lsk_link.resolve()
+        target.unlink()
+        result = db.verify_metakernel(out)
+        assert result["fatal"] is True
+        statuses = {e["status"] for e in result["entries"]}
+        assert "DANGLING" in statuses
+        db.close()
+
+    def test_verify_detects_hash_mismatch_in_deep_mode(self, tmp_path):
+        db, out, link_root = self._build_rewritten_mk(tmp_path)
+        # Corrupt the target of a symlink (same size to bypass quick check)
+        target = (link_root / "spk" / "de432s.bsp").resolve()
+        original_size = target.stat().st_size
+        target.write_bytes(b"X" * original_size)
+        result = db.verify_metakernel(out, deep=True)
+        assert result["fatal"] is True
+        assert any(e["status"] == "HASH_MISMATCH" for e in result["entries"])
+        db.close()
+
+    def test_verify_quick_misses_corruption_same_size(self, tmp_path):
+        """Quick mode trades safety for speed; document this."""
+        db, out, link_root = self._build_rewritten_mk(tmp_path)
+        target = (link_root / "spk" / "de432s.bsp").resolve()
+        target.write_bytes(b"X" * target.stat().st_size)
+        result = db.verify_metakernel(out, deep=False)
+        # Quick mode does NOT catch same-size corruption — that's --deep's job
+        assert result["fatal"] is False
+        db.close()
+
+    def test_verify_detects_size_mismatch_in_quick_mode(self, tmp_path):
+        db, out, link_root = self._build_rewritten_mk(tmp_path)
+        target = (link_root / "spk" / "de432s.bsp").resolve()
+        target.write_bytes(b"short")
+        result = db.verify_metakernel(out)
+        assert result["fatal"] is True
+        assert any(e["status"] == "SIZE_MISMATCH" for e in result["entries"])
+        db.close()
+
+    def test_verify_detects_ambiguous_when_two_active_rows(self, tmp_path):
+        """C3: if two non-superseded kernels rows share a filename, verify
+        must flag AMBIGUOUS — resolution would be non-deterministic."""
+        db, out, _ = self._build_rewritten_mk(tmp_path)
+        # Insert a phantom second active kernels row for naif0012.tls
+        fake_hash = "a" * 64
+        db.con.execute(
+            "INSERT INTO kernels (sha256, filename, kernel_type, "
+            "size_bytes, superseded_by) VALUES (?, ?, 'lsk', 3, NULL)",
+            [fake_hash, "naif0012.tls"],
+        )
+        result = db.verify_metakernel(out)
+        assert result["fatal"] is True
+        assert any(e["status"] == "AMBIGUOUS" for e in result["entries"])
+        db.close()
+
+    def test_verify_detects_traversal_in_kernels_to_load(self, tmp_path):
+        """Hand-crafted .tm whose KERNELS_TO_LOAD entries escape the
+        PATH_VALUES root must be flagged TRAVERSAL."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        link_root = tmp_path / "links"
+        link_root.mkdir()
+        # Build a .tm by hand with an absolute PATH_VALUES and a
+        # traversing kernel entry. The resolver still produces a path,
+        # but verify_metakernel detects that it escapes link_root.
+        mk = tmp_path / "evil.tm"
+        mk.write_text(textwrap.dedent(f"""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '{link_root}' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = (
+                '$KERNELS/../../etc/passwd'
+              )
+            \\begintext
+        """))
+        result = db.verify_metakernel(mk)
+        assert result["fatal"] is True
+        assert any(e["status"] == "TRAVERSAL" for e in result["entries"])
+        db.close()
+
+    def test_verify_flags_non_absolute_path_value(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        mk = tmp_path / "bad.tm"
+        mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = ( '$KERNELS/x.bsp' )
+            \\begintext
+        """))
+        result = db.verify_metakernel(mk)
+        assert result["fatal"] is True
+        assert any(e["status"] == "BAD_PATH_VALUE" for e in result["entries"])
+        db.close()
+
+    def test_verify_unregistered_is_non_fatal(self, tmp_path):
+        """A kernel that exists on disk but is not in `kernels` produces a
+        non-fatal warning (UNREGISTERED) — the user should run scan."""
+        db, out, link_root = self._build_rewritten_mk(tmp_path)
+        # Add an orphan file and reference it via the .tm
+        orphan = link_root / "lsk" / "orphan.tls"
+        orphan.write_text("orphan")
+        # Rewrite the .tm to include the orphan
+        text = out.read_text()
+        text = text.replace(
+            "'$KERNELS/lsk/naif0012.tls'",
+            "'$KERNELS/lsk/naif0012.tls'\n    '$KERNELS/lsk/orphan.tls'",
+        )
+        out.write_text(text)
+        result = db.verify_metakernel(out)
+        assert any(e["status"] == "UNREGISTERED" for e in result["entries"])
+        assert result["fatal"] is False
+        db.close()
+
+
+class TestVerifyCLI:
+    """End-to-end CLI smoke tests for `verify`."""
+
+    def test_verify_cli_runs_and_exits_zero_on_ok(self, tmp_path):
+        from spice_kernel_db.cli import main
+        # Build a happy state
+        db = KernelDB(tmp_path / "test.duckdb")
+        juice = tmp_path / "JUICE" / "kernels"
+        for sub in ("lsk", "mk"):
+            (juice / sub).mkdir(parents=True)
+        (juice / "lsk" / "naif0012.tls").write_text("LSK")
+        db.scan_directory(juice, mission="JUICE")
+
+        src = juice / "mk" / "in.tm"
+        src.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif0012.tls' )
+            \\begintext
+        """))
+        out = tmp_path / "out.tm"
+        link_root = tmp_path / "links"
+        db.rewrite_metakernel(src, out, mission="JUICE", link_root=link_root)
+        db.close()
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            # Should run without raising SystemExit (exit 0)
+            main([
+                "--db", str(tmp_path / "test.duckdb"),
+                "verify", str(out),
+            ])
+
+    def test_verify_cli_exits_nonzero_on_fatal(self, tmp_path):
+        from spice_kernel_db.cli import main
+        db = KernelDB(tmp_path / "test.duckdb")
+        juice = tmp_path / "JUICE" / "kernels"
+        for sub in ("lsk", "mk"):
+            (juice / sub).mkdir(parents=True)
+        (juice / "lsk" / "naif0012.tls").write_text("LSK")
+        db.scan_directory(juice, mission="JUICE")
+
+        src = juice / "mk" / "in.tm"
+        src.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif0012.tls' )
+            \\begintext
+        """))
+        out = tmp_path / "out.tm"
+        link_root = tmp_path / "links"
+        db.rewrite_metakernel(src, out, mission="JUICE", link_root=link_root)
+        # Break the symlink
+        (link_root / "lsk" / "naif0012.tls").resolve().unlink()
+        db.close()
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--db", str(tmp_path / "test.duckdb"),
+                    "verify", str(out),
+                ])
+            assert exc.value.code == 1
+
+
+class TestC4DownloadHashStreaming:
+    """C4: hash is streamed during download and authoritative.
+
+    Closes the TOCTOU window between "download finished" and
+    "register_file re-hashes the file" — and provides the hook for
+    external/manifest checksum verification by accepting
+    `expected_hash`.
+    """
+
+    def test_download_returns_streamed_sha256(self, tmp_path):
+        from spice_kernel_db.remote import download_kernel
+
+        content = b"hello world"
+        expected = hashlib.sha256(content).hexdigest()
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.read = MagicMock(side_effect=[content, b""])
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        dest = tmp_path / "x.bsp"
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   return_value=mock_resp):
+            _, sha = download_kernel("http://example.com/x.bsp", dest)
+        assert sha == expected
+
+    def test_download_rejects_mismatched_expected_hash(self, tmp_path):
+        from spice_kernel_db.remote import download_kernel
+
+        content = b"actual content"
+        bogus = "0" * 64  # wrong hash on purpose
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.read = MagicMock(side_effect=[content, b""])
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        dest = tmp_path / "x.bsp"
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   return_value=mock_resp):
+            with pytest.raises(IOError, match="[Hh]ash mismatch"):
+                download_kernel(
+                    "http://example.com/x.bsp", dest, expected_hash=bogus,
+                )
+        # Partial file should be cleaned up
+        assert not dest.exists()
+
+    def test_download_accepts_matching_expected_hash(self, tmp_path):
+        from spice_kernel_db.remote import download_kernel
+
+        content = b"content"
+        good = hashlib.sha256(content).hexdigest()
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": str(len(content))}
+        mock_resp.read = MagicMock(side_effect=[content, b""])
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        dest = tmp_path / "x.bsp"
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   return_value=mock_resp):
+            _, sha = download_kernel(
+                "http://example.com/x.bsp", dest, expected_hash=good,
+            )
+        assert sha == good
+        assert dest.read_bytes() == content
+
+    def test_parallel_propagates_expected_hashes_to_per_url_check(
+        self, tmp_path,
+    ):
+        from spice_kernel_db.remote import download_kernels_parallel
+
+        content = b"abc"
+        good = hashlib.sha256(content).hexdigest()
+        bogus = "f" * 64
+
+        calls = {}
+        def fake_download(url, dest, *, expected_hash=None, **kwargs):
+            calls[url] = expected_hash
+            if expected_hash and expected_hash != good:
+                raise IOError("Hash mismatch")
+            dest.write_bytes(content)
+            return dest, good
+
+        url_good = "http://example.com/good.bsp"
+        url_bad = "http://example.com/bad.bsp"
+        tasks = [
+            (url_good, tmp_path / "good.bsp", "good.bsp"),
+            (url_bad, tmp_path / "bad.bsp", "bad.bsp"),
+        ]
+
+        with patch("spice_kernel_db.remote.download_kernel",
+                   side_effect=fake_download):
+            results, warnings = download_kernels_parallel(
+                tasks,
+                expected_hashes={url_good: good, url_bad: bogus},
+            )
+        # The hash mismatch task aborts; the matching one succeeds
+        assert len(results) == 1
+        assert results[0][1] == good
+        assert any("bad.bsp" in w for w in warnings)
+        # Per-URL expected_hash was forwarded
+        assert calls[url_good] == good
+        assert calls[url_bad] == bogus
+
+    def test_parallel_returns_path_and_hash_tuples(self, tmp_path):
+        from spice_kernel_db.remote import download_kernels_parallel
+
+        content = b"xyz"
+        sha = hashlib.sha256(content).hexdigest()
+        def fake_download(url, dest, **kwargs):
+            dest.write_bytes(content)
+            return dest, sha
+
+        tasks = [
+            ("http://example.com/a.bsp", tmp_path / "a.bsp", "a.bsp"),
+        ]
+        with patch("spice_kernel_db.remote.download_kernel",
+                   side_effect=fake_download):
+            results, warnings = download_kernels_parallel(tasks)
+        assert warnings == []
+        assert len(results) == 1
+        path, h = results[0]
+        assert path == tmp_path / "a.bsp"
+        assert h == sha
+
+
+class TestC5ConcurrencyHandling:
+    """C5: race detection must abort, not silently continue. reacquire()
+    retries transient lock contention."""
+
+    def test_reacquire_retries_on_lock_contention(self, tmp_path):
+        """reacquire() should retry connect() when the first attempt
+        raises (transient write-lock contention from another process)."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.release()
+
+        import duckdb as _duck
+        real_connect = _duck.connect
+        calls = {"n": 0}
+
+        def flaky_connect(path, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise _duck.IOException("simulated lock contention")
+            return real_connect(path, **kwargs)
+
+        with patch("spice_kernel_db.db.duckdb.connect", side_effect=flaky_connect):
+            db.reacquire(initial_delay=0.001)
+        assert calls["n"] >= 3
+        # And the connection is healthy now
+        assert db.con is not None
+        db.close()
+
+    def test_get_metakernel_aborts_on_concurrent_modification(self, tmp_path):
+        """A `get` whose download window overlaps another writer's
+        registration must raise instead of silently continuing."""
+        from spice_kernel_db import ConcurrentModificationError
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        download_dir = tmp_path / "downloads"
+
+        # Pre-register the kernel under a known hash
+        kernel = tmp_path / "preexisting" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("v1 content")
+        db.register_file(kernel, mission="JUICE")
+
+        # The remote .tm references that kernel
+        tm_text = textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif0012.tls' )
+            \\begintext
+        """)
+
+        # Simulate a concurrent writer that mutates the kernel record
+        # in between query_remote_sizes and the post-reacquire check.
+        original_query = None
+        def evil_query(urls):
+            # While the lock is released, "another process" mutates
+            kernel.write_text("v2 different content")
+            db.reacquire()
+            db.register_file(kernel, mission="JUICE")
+            db.release()
+            return {u: 100 for u in urls}
+
+        with patch(
+            "spice_kernel_db.db._fetch_metakernel",
+            return_value=(tm_text, "https://e.example/x.tm"),
+        ), patch(
+            "spice_kernel_db.db.query_remote_sizes", side_effect=evil_query,
+        ):
+            with pytest.raises(ConcurrentModificationError):
+                db.get_metakernel(
+                    "https://e.example/x.tm",
+                    download_dir=download_dir,
+                    mission="JUICE",
+                    yes=True,
+                )
+        db.close()
+
+
+class _CursorTrap:
+    """Wraps a duckdb cursor; raises on a sentinel SQL substring match."""
+
+    def __init__(self, cur, trap: str, raise_after: int = 1):
+        self._c = cur
+        self._trap = trap.upper()
+        self._raise_after = raise_after
+        self._hits = 0
+
+    def execute(self, sql, *args, **kw):
+        if self._trap in sql.upper():
+            self._hits += 1
+            if self._hits >= self._raise_after:
+                raise RuntimeError("simulated crash")
+        return self._c.execute(sql, *args, **kw)
+
+    def __enter__(self):
+        self._c.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self._c.__exit__(*a)
+
+
+class _ConWrapper:
+    """Delegates to a real duckdb connection; cursor() returns a trap."""
+
+    def __init__(self, real_con, trap: str, raise_after: int = 1):
+        self._real = real_con
+        self._trap = trap
+        self._raise_after = raise_after
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def cursor(self):
+        return _CursorTrap(self._real.cursor(), self._trap, self._raise_after)
+
+
+class TestC6Transactions:
+    """C6: multi-statement operations must roll back on failure, not
+    leave the DB partially mutated."""
+
+    def test_index_metakernel_rolls_back_on_insert_failure(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        mk = tmp_path / "x.tm"
+        mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = ( '$KERNELS/lsk/a.tls' '$KERNELS/lsk/b.tls' )
+            \\begintext
+        """))
+        db.index_metakernel(mk)
+        mk_resolved = str(mk.resolve())
+        before = db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_entries WHERE mk_path = ?",
+            [mk_resolved],
+        ).fetchone()[0]
+        assert before == 2
+
+        real = db.con
+        db.con = _ConWrapper(real, "INSERT INTO METAKERNEL_ENTRIES", raise_after=2)
+        try:
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                db.index_metakernel(mk)
+        finally:
+            db.con = real
+
+        after = db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_entries WHERE mk_path = ?",
+            [mk_resolved],
+        ).fetchone()[0]
+        assert after == 2, "C6: index_metakernel must roll back on failure"
+        db.close()
+
+    def test_register_file_rolls_back_on_failure(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "x.bsp"
+        kernel.write_bytes(b"v1")
+        db.register_file(kernel, mission="m")
+        n_k = db.con.execute("SELECT COUNT(*) FROM kernels").fetchone()[0]
+        n_l = db.con.execute("SELECT COUNT(*) FROM locations").fetchone()[0]
+
+        kernel.write_bytes(b"v2 different content")
+        real = db.con
+        db.con = _ConWrapper(real, "INSERT OR REPLACE INTO LOCATIONS")
+        try:
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                db.register_file(kernel, mission="m")
+        finally:
+            db.con = real
+
+        assert db.con.execute(
+            "SELECT COUNT(*) FROM kernels"
+        ).fetchone()[0] == n_k
+        assert db.con.execute(
+            "SELECT COUNT(*) FROM locations"
+        ).fetchone()[0] == n_l
+        db.close()
+
+
+class TestC7AtomicFileOps:
+    """C7: file/symlink mutations are atomic — no concurrent reader sees
+    a missing or truncated file."""
+
+    def test_atomic_write_text_leaves_no_tmp_on_success(self, tmp_path):
+        from spice_kernel_db.parser import _atomic_write_text
+        p = tmp_path / "out.txt"
+        _atomic_write_text(p, "hello")
+        assert p.read_text() == "hello"
+        # No stray .tmp.* files
+        assert list(tmp_path.glob("*.tmp.*")) == []
+
+    def test_atomic_write_text_cleans_up_tmp_on_error(self, tmp_path):
+        from spice_kernel_db.parser import _atomic_write_text
+        p = tmp_path / "out.txt"
+        # Force os.replace to fail
+        import os as _os
+        with patch.object(_os, "replace", side_effect=OSError("boom")):
+            with pytest.raises(OSError):
+                _atomic_write_text(p, "content")
+        # No partial files left behind
+        assert list(tmp_path.glob("*.tmp.*")) == []
+
+    def test_atomic_write_text_overwrites_existing(self, tmp_path):
+        from spice_kernel_db.parser import _atomic_write_text
+        p = tmp_path / "out.txt"
+        p.write_text("old")
+        _atomic_write_text(p, "new")
+        assert p.read_text() == "new"
+
+    def test_atomic_symlink_creates_new(self, tmp_path):
+        from spice_kernel_db.db import _atomic_symlink
+        target = tmp_path / "real.bsp"
+        target.write_bytes(b"data")
+        link = tmp_path / "link.bsp"
+        _atomic_symlink(target, link)
+        assert link.is_symlink()
+        assert link.resolve() == target.resolve()
+
+    def test_atomic_symlink_replaces_existing(self, tmp_path):
+        from spice_kernel_db.db import _atomic_symlink
+        old_target = tmp_path / "old.bsp"
+        old_target.write_bytes(b"old")
+        new_target = tmp_path / "new.bsp"
+        new_target.write_bytes(b"new")
+        link = tmp_path / "link.bsp"
+        link.symlink_to(old_target)
+        _atomic_symlink(new_target, link)
+        assert link.resolve() == new_target.resolve()
+
+    def test_atomic_symlink_cleans_up_tmp_on_error(self, tmp_path):
+        from spice_kernel_db.db import _atomic_symlink
+        target = tmp_path / "real.bsp"
+        target.write_bytes(b"data")
+        link = tmp_path / "link.bsp"
+        import os as _os
+        with patch.object(_os, "replace", side_effect=OSError("boom")):
+            with pytest.raises(OSError):
+                _atomic_symlink(target, link)
+        # The tmp symlink must be cleaned up
+        assert list(tmp_path.glob("*.tmp.*")) == []
+
+
+class TestC8CaseInsensitiveFilenames:
+    """C8: filename lookups are case-insensitive so APFS/HFS+/Windows
+    (case-insensitive FS) and ext4 (case-sensitive) behave the same.
+    Kernel identity is the sha256; name casing is metadata."""
+
+    def test_find_by_filename_case_insensitive_canonical(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        k = tmp_path / "lsk" / "naif0012.tls"
+        k.parent.mkdir(parents=True)
+        k.write_text("LSK")
+        db.register_file(k, mission="JUICE")
+
+        # Query with various casings — all should find the kernel
+        for q in ("naif0012.tls", "NAIF0012.TLS", "Naif0012.Tls"):
+            hits = db.find_by_filename(q)
+            assert len(hits) == 1, f"query {q!r} should match"
+            assert hits[0]["abs_path"] == str(k.resolve())
+        db.close()
+
+    def test_find_by_filename_case_insensitive_path_suffix(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        # Register a file whose canonical name is e.g. CamelCase
+        k = tmp_path / "spk" / "De440.bsp"
+        k.parent.mkdir(parents=True)
+        k.write_bytes(b"content")
+        db.register_file(k, mission="JUICE")
+
+        # find_by_filename with lowercase still finds it via path_suffix
+        # or canonical match
+        hits = db.find_by_filename("de440.bsp")
+        assert len(hits) == 1
+        db.close()
+
+    def test_resolve_kernel_handles_case_mismatch(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        k = tmp_path / "lsk" / "naif0012.tls"
+        k.parent.mkdir(parents=True)
+        k.write_text("LSK")
+        db.register_file(k, mission="JUICE")
+
+        # Metakernel might ask for uppercase
+        resolved, _ = db.resolve_kernel("NAIF0012.TLS", preferred_mission="JUICE")
+        assert resolved == str(k.resolve())
+        db.close()
+
+    def test_register_file_detects_case_differing_collision(self, tmp_path):
+        """If a file with the same name but different casing AND different
+        content gets registered, the C8-aware detection should treat that
+        as a same-filename collision (same path = supersession, different
+        path = both active)."""
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # First file: lowercase
+        a = tmp_path / "a" / "naif0012.tls"
+        a.parent.mkdir(parents=True)
+        a.write_text("v1")
+        db.register_file(a, mission="m")
+
+        # Second file: uppercase, different content, different path
+        b = tmp_path / "b" / "NAIF0012.TLS"
+        b.parent.mkdir(parents=True)
+        b.write_text("v2")
+        db.register_file(b, mission="m")
+
+        # Both should be active (different paths, not supersession),
+        # but the case-insensitive collision warning should have fired
+        rows = db.con.execute(
+            "SELECT filename, superseded_by FROM kernels "
+            "ORDER BY filename",
+        ).fetchall()
+        assert len(rows) == 2
+        assert all(r[1] is None for r in rows), \
+            "different paths should not auto-supersede"
+        db.close()
+
+
+class TestH1DanglingSymlinkRepair:
+    """H1: _link_existing_kernels must repair dangling symlinks instead
+    of silently skipping them. The old code reported success while
+    SPICE then failed at furnsh."""
+
+    def test_dangling_symlink_is_repaired(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        kernel = tmp_path / "JUICE" / "lsk" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("LSK")
+        db.register_file(kernel, mission="JUICE")
+
+        download_dir = tmp_path / "download"
+        link_target = download_dir / "JUICE" / "lsk" / "naif0012.tls"
+        link_target.parent.mkdir(parents=True)
+
+        # Create a dangling symlink (target doesn't exist)
+        ghost = tmp_path / "nowhere" / "old.tls"
+        link_target.symlink_to(ghost)
+        assert link_target.is_symlink() and not link_target.exists()
+
+        n = db._link_existing_kernels(
+            indices=[0],
+            filenames=["naif0012.tls"],
+            relpaths=["lsk/naif0012.tls"],
+            download_dir=download_dir,
+            mission="JUICE",
+        )
+        assert n == 1
+        # Now points at the real kernel
+        assert link_target.resolve() == kernel.resolve()
+        db.close()
+
+
+class TestH2ParserRobustness:
+    """H2: parser tolerates legal SPICE syntax that the old regex broke
+    on — markers inside comments, ')' inside strings, '' escape."""
+
+    def test_begindata_token_inside_comment_is_ignored(self, tmp_path):
+        from spice_kernel_db.parser import parse_metakernel
+        mk = tmp_path / "x.tm"
+        mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begintext
+            Inside a comment we discuss \\begindata syntax as an example.
+            The parser must NOT treat the line above as a real marker.
+            \\begintext
+            \\begindata
+              KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif.tls' )
+            \\begintext
+        """))
+        parsed = parse_metakernel(mk)
+        assert parsed.kernels == ["$KERNELS/lsk/naif.tls"], (
+            "the example token inside the comment block leaked into the "
+            "data region under the old regex split"
+        )
+
+    def test_paren_inside_quoted_string_does_not_truncate_list(
+        self, tmp_path,
+    ):
+        from spice_kernel_db.parser import parse_metakernel
+        mk = tmp_path / "x.tm"
+        # A kernel path containing ')' would have prematurely closed
+        # the list under the old non-greedy regex.
+        mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              KERNELS_TO_LOAD = (
+                '/data/weird)name/foo.bsp'
+                '/data/normal.bsp'
+              )
+            \\begintext
+        """))
+        parsed = parse_metakernel(mk)
+        assert len(parsed.kernels) == 2
+        assert parsed.kernels[0] == "/data/weird)name/foo.bsp"
+        assert parsed.kernels[1] == "/data/normal.bsp"
+
+    def test_double_quote_escape_in_string(self, tmp_path):
+        from spice_kernel_db.parser import parse_metakernel
+        mk = tmp_path / "x.tm"
+        mk.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              KERNELS_TO_LOAD = ( '/data/it''s_quoted.bsp' )
+            \\begintext
+        """))
+        parsed = parse_metakernel(mk)
+        assert parsed.kernels == ["/data/it's_quoted.bsp"]
+
+    def test_indented_begindata_token_works(self, tmp_path):
+        """SPICE spec: marker at start of line (optionally indented)."""
+        from spice_kernel_db.parser import parse_metakernel
+        mk = tmp_path / "x.tm"
+        mk.write_text(
+            "KPL/MK\n"
+            "   \\begindata\n"
+            "  KERNELS_TO_LOAD = ( '$K/a.tls' )\n"
+            "\\begintext\n"
+        )
+        parsed = parse_metakernel(mk)
+        assert parsed.kernels == ["$K/a.tls"]
+
+
+class TestH3PathSymbolPrefixCollision:
+    """H3: longest PATH_SYMBOLS must be substituted first so an entry
+    referencing ``$KERNELS_DATA`` isn't clobbered by an earlier
+    ``$KERNELS`` replacement."""
+
+    def test_resolve_prefers_longer_symbol(self):
+        from spice_kernel_db.parser import parse_metakernel_text
+        text = textwrap.dedent("""\
+            \\begindata
+              PATH_VALUES  = ( '/a' '/b' )
+              PATH_SYMBOLS = ( 'KERNELS' 'KERNELS_DATA' )
+              KERNELS_TO_LOAD = ( '$KERNELS_DATA/x.bsp' '$KERNELS/y.bsp' )
+            \\begintext
+        """)
+        parsed = parse_metakernel_text(text, "test")
+        # $KERNELS_DATA → /b, $KERNELS → /a — must NOT collapse the
+        # longer symbol into /a_DATA via the str.replace prefix bug.
+        assert parsed.resolve("$KERNELS_DATA/x.bsp") == "/b/x.bsp"
+        assert parsed.resolve("$KERNELS/y.bsp") == "/a/y.bsp"
+
+    def test_relpath_prefers_longer_symbol(self):
+        from spice_kernel_db.parser import parse_metakernel_text
+        text = textwrap.dedent("""\
+            \\begindata
+              PATH_VALUES  = ( '/a' '/b' )
+              PATH_SYMBOLS = ( 'KERNELS' 'KERNELS_DATA' )
+              KERNELS_TO_LOAD = ( '$KERNELS_DATA/x.bsp' '$KERNELS/y.bsp' )
+            \\begintext
+        """)
+        parsed = parse_metakernel_text(text, "test")
+        rels = parsed.kernel_relpaths()
+        assert "x.bsp" in rels
+        assert "y.bsp" in rels
+        assert not any("_DATA" in r for r in rels), \
+            "the longer symbol must be fully stripped"
+
+    def test_resolve_kernel_urls_prefers_longer_symbol(self):
+        from spice_kernel_db.parser import parse_metakernel_text
+        from spice_kernel_db.remote import resolve_kernel_urls
+        text = textwrap.dedent("""\
+            \\begindata
+              PATH_VALUES  = ( '..' 'extra' )
+              PATH_SYMBOLS = ( 'KERNELS' 'KERNELS_DATA' )
+              KERNELS_TO_LOAD = ( '$KERNELS_DATA/x.bsp' '$KERNELS/y.bsp' )
+            \\begintext
+        """)
+        parsed = parse_metakernel_text(text, "test")
+        urls = resolve_kernel_urls(
+            "https://e.example/mission/mk/m.tm", parsed,
+        )
+        # $KERNELS_DATA must be resolved (and the longer one not clobbered)
+        assert "_DATA" not in "".join(urls), urls
+        assert any(u.endswith("x.bsp") for u in urls)
+        assert any(u.endswith("y.bsp") for u in urls)
+
+
+class TestH4MissionCanonicalisation:
+    """H4: mission strings are canonicalised at every storage boundary
+    so JUICE/juice/Juice converge to one row + one filesystem subtree."""
+
+    def test_canonicalize_mission(self):
+        assert canonicalize_mission("juice") == "JUICE"
+        assert canonicalize_mission("JUICE") == "JUICE"
+        assert canonicalize_mission("Juice") == "JUICE"
+        # Sentinels stay lowercase
+        assert canonicalize_mission("generic") == "generic"
+        assert canonicalize_mission("Generic") == "generic"
+        assert canonicalize_mission("UNKNOWN") == "unknown"
+        # None / empty
+        assert canonicalize_mission(None) == "unknown"
+        assert canonicalize_mission("") == "unknown"
+        # Whitespace
+        assert canonicalize_mission("  juice  ") == "JUICE"
+
+    def test_register_file_canonicalises_mission(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        k = tmp_path / "x.bsp"
+        k.write_bytes(b"data")
+        db.register_file(k, mission="juice")
+
+        row = db.con.execute(
+            "SELECT mission FROM locations"
+        ).fetchone()
+        assert row[0] == "JUICE"
+        db.close()
+
+    def test_add_mission_canonicalises(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission("juice", "http://x/", "http://x/mk/", dedup=True)
+        rows = db.con.execute("SELECT name FROM missions").fetchall()
+        assert rows == [("JUICE",)]
+        db.close()
+
+    def test_startup_warning_for_case_duplicates(self, tmp_path, caplog):
+        """If a legacy DB has both `JUICE` and `juice` rows, opening it
+        emits a warning so the user knows to merge."""
+        # Manually insert duplicate-case rows BYPASSING canonicalisation
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.con.execute(
+            "INSERT INTO missions (name, server_url, mk_dir_url, dedup) "
+            "VALUES ('JUICE', '', '', TRUE)"
+        )
+        db.con.execute(
+            "INSERT INTO missions (name, server_url, mk_dir_url, dedup) "
+            "VALUES ('juice', '', '', TRUE)"
+        )
+        db.close()
+
+        with caplog.at_level(logging.WARNING):
+            db2 = KernelDB(tmp_path / "test.duckdb")
+        db2.close()
+        assert any(
+            "Mission case duplicates" in r.message
+            for r in caplog.records
+        )
+
+
+class TestH5TaskInfoKeyedByPath:
+    """H5: when two KERNELS_TO_LOAD entries share a basename under
+    different relpaths, attribution must not get scrambled."""
+
+    def test_duplicate_basename_in_metakernel_keeps_separate_attribution(
+        self, tmp_path,
+    ):
+        """End-to-end: a hostile .tm with the same basename under two
+        relpaths must result in both files being registered, each with
+        its own source_url. This used to overwrite via task_info[name]."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        download_dir = tmp_path / "downloads"
+
+        tm_text = textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '..' )
+              PATH_SYMBOLS = ( 'KERNELS' )
+              KERNELS_TO_LOAD = (
+                '$KERNELS/spk/de.bsp'
+                '$KERNELS/spk_alt/de.bsp'
+              )
+            \\begintext
+        """)
+
+        # Mock the network so each URL yields distinct content
+        def fake_dl(url, dest, *, expected_hash=None, **kwargs):
+            content = b"A" * 10 if "spk/" in url else b"B" * 10
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+            return dest, hashlib.sha256(content).hexdigest()
+
+        with patch(
+            "spice_kernel_db.db._fetch_metakernel",
+            return_value=(tm_text, "https://e.example/m/mk/m.tm"),
+        ), patch(
+            "spice_kernel_db.db.query_remote_sizes",
+            side_effect=lambda urls: {u: 10 for u in urls},
+        ), patch(
+            "spice_kernel_db.remote.download_kernel",
+            side_effect=fake_dl,
+        ):
+            db.get_metakernel(
+                "https://e.example/m/mk/m.tm",
+                download_dir=download_dir,
+                mission="JUICE",
+                yes=True,
+            )
+
+        # Both files exist under their distinct relpaths with right content
+        spk = download_dir / "JUICE" / "spk" / "de.bsp"
+        spk_alt = download_dir / "JUICE" / "spk_alt" / "de.bsp"
+        assert spk.read_bytes() == b"A" * 10
+        assert spk_alt.read_bytes() == b"B" * 10
+
+        # Each has its own location row with the correct source_url
+        rows = db.con.execute(
+            "SELECT abs_path, source_url FROM locations "
+            "ORDER BY abs_path"
+        ).fetchall()
+        sources = {r[0]: r[1] for r in rows}
+        assert "spk/de.bsp" in sources[str(spk.resolve())]
+        assert "spk_alt/de.bsp" in sources[str(spk_alt.resolve())]
+        db.close()
+
+
+class TestH6StalenessDatetimeComparison:
+    """H6: staleness check parses dates to datetime rather than doing
+    lexicographic comparison on a 16-char timestamp prefix."""
+
+    def test_subminute_acquire_detects_later_remote_correctly(
+        self, tmp_path, capsys,
+    ):
+        from datetime import datetime, timedelta
+        from spice_kernel_db.remote import RemoteMetakernel
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        # Register a fake metakernel with a known acquired_at
+        mk_path = str(tmp_path / "x.tm")
+        (tmp_path / "x.tm").write_text("\\begintext\n")
+        acq = datetime(2025, 11, 27, 14, 30, 45)
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES (?, ?, ?, ?, ?)",
+            [mk_path, "JUICE", "https://e.example/mk/x.tm", "x.tm", acq],
+        )
+
+        # Remote modified 16 minutes later — clearly newer
+        later = RemoteMetakernel(
+            filename="x.tm",
+            url="https://e.example/mk/x.tm",
+            date="2025-11-27 14:46",
+            size="1K",
+            base_name="x.tm",
+            version_tag=None,
+        )
+        with patch(
+            "spice_kernel_db.db.list_remote_metakernels",
+            return_value=[later],
+        ):
+            db._check_remote_staleness(mk_path, "JUICE")
+        captured = capsys.readouterr().out
+        assert "Remote update available" in captured
+        db.close()
+
+    def test_same_minute_acquire_is_NOT_flagged_stale(
+        self, tmp_path, capsys,
+    ):
+        """If acquired_at is at 14:30:45 and the remote was modified at
+        14:30 (same minute, before our acquisition), we must NOT warn."""
+        from datetime import datetime
+        from spice_kernel_db.remote import RemoteMetakernel
+        db = KernelDB(tmp_path / "test.duckdb")
+
+        mk_path = str(tmp_path / "x.tm")
+        (tmp_path / "x.tm").write_text("\\begintext\n")
+        acq = datetime(2025, 11, 27, 14, 30, 45)
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES (?, ?, ?, ?, ?)",
+            [mk_path, "JUICE", "https://e.example/mk/x.tm", "x.tm", acq],
+        )
+        same_minute = RemoteMetakernel(
+            filename="x.tm",
+            url="https://e.example/mk/x.tm",
+            date="2025-11-27 14:30",
+            size="1K",
+            base_name="x.tm",
+            version_tag=None,
+        )
+        with patch(
+            "spice_kernel_db.db.list_remote_metakernels",
+            return_value=[same_minute],
+        ):
+            db._check_remote_staleness(mk_path, "JUICE")
+        captured = capsys.readouterr().out
+        assert "Remote update available" not in captured
+        db.close()

@@ -117,6 +117,30 @@ quick start:
     )
     p_check.add_argument("--mission", help="Filter by mission name")
 
+    # --- verify ---
+    p_verify = sub.add_parser(
+        "verify",
+        help="Deep cross-check a metakernel against the database",
+        epilog="See also: check",
+    )
+    p_verify.add_argument(
+        "metakernel", nargs="?", default=None,
+        help="Path to .tm file (omit to select from local registry)",
+    )
+    p_verify.add_argument(
+        "--deep", action="store_true",
+        help="Recompute sha256 of every kernel (slow; default: size-only)",
+    )
+    p_verify.add_argument(
+        "--strict", action="store_true",
+        help="Non-zero exit on any non-OK finding (default: only on FATAL)",
+    )
+    p_verify.add_argument(
+        "--json", action="store_true",
+        help="Emit machine-readable JSON instead of a table",
+    )
+    p_verify.add_argument("--mission", help="Filter by mission (for registry lookup)")
+
     # --- rewrite ---
     p_rewrite = sub.add_parser(
         "rewrite",
@@ -416,6 +440,23 @@ quick start:
                 metakernel, mission=args.mission, verbose=args.verbose,
             )
 
+        elif args.command == "verify":
+            metakernel = _require_metakernel(args.metakernel, db, args.mission)
+            if metakernel is None:
+                return
+            result = db.verify_metakernel(metakernel, deep=args.deep)
+            if args.json:
+                import json as _json
+                print(_json.dumps(result, indent=2, default=str))
+            else:
+                _render_verify_table(result)
+            # Exit code: non-zero on fatal (P0) issues by default; on any
+            # non-OK finding with --strict.
+            bad = result["fatal"] or (args.strict and result["fail"] > 0)
+            if bad:
+                import sys as _sys
+                _sys.exit(1)
+
         elif args.command == "rewrite":
             output = args.output
             if output is None:
@@ -664,6 +705,59 @@ quick start:
 
     finally:
         db.close()
+
+
+def _render_verify_table(result: dict) -> None:
+    """Render a verify_metakernel result as a rich table + summary panel."""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    mk = result["mk_path"]
+    deep = result["deep"]
+    total = result["ok"] + result["fail"]
+
+    style_for = {
+        "OK":              "green",
+        "DANGLING":        "red",
+        "NOT_FOUND":       "red",
+        "NOT_FILE":        "red",
+        "HASH_MISMATCH":   "red",
+        "TRAVERSAL":       "red",
+        "AMBIGUOUS":       "red",
+        "BAD_PATH_VALUE":  "red",
+        "SIZE_MISMATCH":   "red",
+        "UNREGISTERED":    "yellow",
+    }
+
+    table = Table(title=f"verify {mk} ({'deep' if deep else 'quick'})")
+    table.add_column("Entry", overflow="fold")
+    table.add_column("Status")
+    table.add_column("Detail", overflow="fold")
+    for e in result["entries"]:
+        status = e["status"]
+        color = style_for.get(status, "white")
+        table.add_row(
+            e["raw"],
+            f"[{color}]{status}[/{color}]",
+            e["detail"],
+        )
+    console.print(table)
+
+    if result["fatal"]:
+        title_style = "red"
+        verdict = "FAIL (fatal issues)"
+    elif result["fail"]:
+        title_style = "yellow"
+        verdict = "WARN (non-fatal issues)"
+    else:
+        title_style = "green"
+        verdict = "OK"
+    console.print(Panel(
+        f"OK: [green]{result['ok']}[/green] / "
+        f"Issues: [red]{result['fail']}[/red] / "
+        f"Total: [bold]{total}[/bold]",
+        title=f"[{title_style}]{verdict}[/{title_style}]",
+    ))
 
 
 def _show_default_summary():

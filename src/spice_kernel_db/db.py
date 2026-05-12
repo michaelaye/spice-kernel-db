@@ -28,6 +28,7 @@ console = Console()
 
 from spice_kernel_db.hashing import (
     KERNEL_EXTENSIONS,
+    canonicalize_mission,
     classify_kernel,
     guess_mission,
     sha256_file,
@@ -73,6 +74,70 @@ def _validate_path_values(
             )
 
 
+def _safe_join(root: Path, relpath: str) -> Path | None:
+    """Join *relpath* onto *root* and confirm the result stays inside root.
+
+    Returns the resolved absolute path on success, or None if *relpath*
+    is absolute, contains traversal that escapes *root*, or otherwise
+    resolves outside *root*. Uses lexical normalisation rather than
+    `Path.resolve()` so existing symlinks cannot mask traversal intent.
+    """
+    import os.path
+    if not relpath:
+        return None
+    if os.path.isabs(relpath):
+        return None
+    root_abs = Path(os.path.abspath(root))
+    joined = os.path.normpath(os.path.join(str(root_abs), relpath))
+    try:
+        Path(joined).relative_to(root_abs)
+    except ValueError:
+        return None
+    return Path(joined)
+
+
+def _atomic_symlink(target: str | Path, link_path: Path) -> None:
+    """Create or replace a symlink at *link_path* atomically (C7).
+
+    Writes a temp symlink in the same directory then ``os.replace``
+    onto *link_path* — this is atomic on POSIX even when *link_path*
+    already exists. Concurrent readers never see a missing link.
+    """
+    import os
+    import uuid
+    tmp = link_path.with_name(link_path.name + f".tmp.{uuid.uuid4().hex[:8]}")
+    try:
+        os.symlink(os.fspath(target), tmp)
+        os.replace(tmp, link_path)
+    except Exception:
+        if tmp.is_symlink() or tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _validate_relpaths(
+    relpaths: list[str], root: Path,
+) -> tuple[list[Path | None], list[str]]:
+    """Validate every entry in *relpaths* against *root*.
+
+    Returns (safe_paths, errors) — safe_paths[i] is the validated absolute
+    Path or None if entry i was unsafe. errors is a list of human-readable
+    descriptions for every unsafe entry. The caller decides whether to
+    abort or skip individual entries based on context.
+    """
+    safe: list[Path | None] = []
+    errors: list[str] = []
+    for rel in relpaths:
+        p = _safe_join(root, rel)
+        if p is None:
+            errors.append(f"unsafe relpath {rel!r}: escapes {root}")
+        safe.append(p)
+    return safe, errors
+
+
 def _should_skip_download(
     dest: Path,
     remote_size: int | None,
@@ -94,6 +159,17 @@ def _should_skip_download(
         return False
     actual_hash = sha256_file(dest)
     return actual_hash == db_hash
+
+
+class ConcurrentModificationError(RuntimeError):
+    """Raised when the DB was modified by another process during a
+    long-running operation that had released the write lock.
+
+    Operations that detect this state must abort rather than silently
+    overwrite the other process's work (C5). Users can typically retry
+    the operation; if it persists, another `get`/`scan` is still
+    running concurrently.
+    """
 
 
 def _format_size(n: int) -> str:
@@ -139,19 +215,47 @@ class KernelDB:
         self.con.close()
         self.con = None
 
-    def reacquire(self):
-        """Reopen the DB connection after :meth:`release`."""
+    def reacquire(
+        self, *, max_retries: int = 6, initial_delay: float = 0.1,
+    ):
+        """Reopen the DB connection after :meth:`release`.
+
+        DuckDB enforces single-writer access via a file lock. If another
+        process took the lock during our release window, retry with
+        exponential backoff (~6.4s max with defaults) before giving up
+        — short bursts of contention are common when two CLI processes
+        overlap their network phases (C5).
+        """
+        import time as _time
+        delay = initial_delay
+        last_exc: Exception | None = None
+        for _ in range(max_retries):
+            try:
+                self.con = duckdb.connect(self.db_path, read_only=self.read_only)
+                return
+            except Exception as e:
+                last_exc = e
+                _time.sleep(delay)
+                delay *= 2
+        # Final attempt: let the original exception propagate
         self.con = duckdb.connect(self.db_path, read_only=self.read_only)
+        # Unreachable on success; keep last_exc for static analyzers
+        _ = last_exc
 
     def _init_schema(self):
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS kernels (
-                sha256       VARCHAR PRIMARY KEY,
-                filename     VARCHAR,
-                kernel_type  VARCHAR,
-                size_bytes   BIGINT
+                sha256        VARCHAR PRIMARY KEY,
+                filename      VARCHAR,
+                kernel_type   VARCHAR,
+                size_bytes    BIGINT,
+                superseded_by VARCHAR
             )
         """)
+        # Migration for DBs created before superseded_by existed
+        cols = {r[1] for r in self.con.execute("PRAGMA table_info(kernels)").fetchall()}
+        if "superseded_by" not in cols:
+            self.con.execute("ALTER TABLE kernels ADD COLUMN superseded_by VARCHAR")
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS locations (
                 sha256       VARCHAR,
@@ -199,6 +303,34 @@ class KernelDB:
                 PRIMARY KEY (sha256, body_id, interval_index)
             )
         """)
+        # H4: warn at startup if the DB already contains case-duplicate
+        # mission rows (e.g. legacy state from before canonicalisation).
+        self._warn_about_mission_case_duplicates()
+
+    def _warn_about_mission_case_duplicates(self) -> None:
+        """Surface a one-time startup warning if `missions` and/or
+        `locations` contain rows whose mission names differ only by
+        case. The user can then choose to merge them explicitly — we
+        deliberately don't auto-merge because data ops should be
+        intentional (H4)."""
+        try:
+            dup_groups = self.con.execute("""
+                SELECT LOWER(name) AS k, LIST(name) AS variants
+                FROM missions
+                GROUP BY LOWER(name)
+                HAVING COUNT(*) > 1
+            """).fetchall()
+        except Exception:
+            return
+        if dup_groups:
+            for _, variants in dup_groups:
+                logger.warning(
+                    "Mission case duplicates detected in missions table: %s. "
+                    "These should be merged manually (e.g. remove one and "
+                    "re-add the canonical form) — automatic resolution "
+                    "would silently move data between rows.",
+                    variants,
+                )
 
     # ------------------------------------------------------------------
     # Mission management
@@ -214,11 +346,14 @@ class KernelDB:
         """Register a mission in the database.
 
         Args:
-            name: Mission name (e.g. "JUICE").
+            name: Mission name (e.g. "JUICE"). Canonicalised via
+                :func:`canonicalize_mission` (H4) so ``juice``/``Juice``
+                collapse to the same row.
             server_url: Root server URL (e.g. NASA or ESA).
             mk_dir_url: Full URL to the mission's mk/ directory.
             dedup: Whether deduplication is enabled for this mission.
         """
+        name = canonicalize_mission(name)
         self.con.execute("""
             INSERT OR REPLACE INTO missions (name, server_url, mk_dir_url, dedup)
             VALUES (?, ?, ?, ?)
@@ -336,7 +471,8 @@ class KernelDB:
         fname = p.name
         ktype = classify_kernel(fname)
         size = p.stat().st_size
-        m = mission or guess_mission(str(p))
+        # H4: canonicalise mission name at the storage boundary
+        m = canonicalize_mission(mission) if mission else guess_mission(str(p))
 
         # Archive: move to central location, leave symlink
         if archive_dir is not None:
@@ -352,6 +488,18 @@ class KernelDB:
                     )
                 p = dest
 
+        # Detect "upstream content update at the same path": this same
+        # abs_path was previously registered with a different sha256.
+        # That's the genuine supersession case (C3 fix). Two different
+        # paths sharing a filename is NOT supersession — both are real
+        # kernels.
+        same_path_old = self.con.execute(
+            "SELECT sha256 FROM locations WHERE abs_path = ?", [str(p)]
+        ).fetchone()
+        superseded_old_hash: str | None = None
+        if same_path_old and same_path_old[0] != h:
+            superseded_old_hash = same_path_old[0]
+
         # Insert or update the kernel record.
         # If the hash already exists with a different filename, we keep
         # the first-registered filename as canonical but still record
@@ -360,38 +508,67 @@ class KernelDB:
             "SELECT filename FROM kernels WHERE sha256 = ?", [h]
         ).fetchone()
 
-        if existing is None:
-            # Issue 11: Check if same filename exists with different hash
-            existing_by_name = self.con.execute(
-                "SELECT sha256 FROM kernels WHERE filename = ?", [fname]
-            ).fetchone()
-            if existing_by_name and existing_by_name[0] != h:
-                old_hash = existing_by_name[0]
-                logger.warning(
-                    "Kernel %s hash changed: %s -> %s. "
-                    "Updating to new version (old record preserved).",
-                    fname, old_hash[:16], h[:16],
-                )
-                # Insert the new hash record (old one remains for history)
-                self.con.execute(
-                    "INSERT INTO kernels VALUES (?, ?, ?, ?)",
-                    [h, fname, ktype, size],
-                )
-            else:
-                self.con.execute(
-                    "INSERT INTO kernels VALUES (?, ?, ?, ?)",
-                    [h, fname, ktype, size],
-                )
-        elif existing[0] != fname:
-            logger.info(
-                "Hash match: %s is identical to already-registered %s",
-                fname, existing[0],
-            )
+        with self.con.cursor() as cur:
+            cur.execute("BEGIN")
+            try:
+                if existing is None:
+                    # Issue 11: Check if same filename exists with different hash
+                    # C8: case-insensitive comparison so APFS/HFS+ collisions
+                    # are detected the same way Linux ext4 would see them.
+                    existing_by_name = cur.execute(
+                        "SELECT sha256 FROM kernels WHERE "
+                        "LOWER(filename) = LOWER(?) "
+                        "AND superseded_by IS NULL",
+                        [fname],
+                    ).fetchone()
+                    if existing_by_name and existing_by_name[0] != h:
+                        old_hash = existing_by_name[0]
+                        if superseded_old_hash == old_hash:
+                            logger.warning(
+                                "Kernel %s content changed at %s: %s -> %s. "
+                                "Marking old version superseded.",
+                                fname, p, old_hash[:16], h[:16],
+                            )
+                        else:
+                            logger.warning(
+                                "Kernel %s exists with a different hash (%s) "
+                                "from a different path; registering new hash %s "
+                                "without superseding (both kept active).",
+                                fname, old_hash[:16], h[:16],
+                            )
+                    cur.execute(
+                        "INSERT INTO kernels (sha256, filename, kernel_type, "
+                        "size_bytes, superseded_by) VALUES (?, ?, ?, ?, NULL)",
+                        [h, fname, ktype, size],
+                    )
+                elif existing[0] != fname:
+                    logger.info(
+                        "Hash match: %s is identical to already-registered %s",
+                        fname, existing[0],
+                    )
 
-        self.con.execute("""
-            INSERT OR REPLACE INTO locations VALUES
-                (?, ?, ?, ?, current_timestamp)
-        """, [h, str(p), m, source_url])
+                # If this same path previously held a different hash, the old
+                # locations row is now stale (the file on disk has only one
+                # hash). Delete it, and mark the old kernels row superseded.
+                if superseded_old_hash:
+                    cur.execute(
+                        "DELETE FROM locations WHERE sha256 = ? AND abs_path = ?",
+                        [superseded_old_hash, str(p)],
+                    )
+                    cur.execute(
+                        "UPDATE kernels SET superseded_by = ? "
+                        "WHERE sha256 = ? AND superseded_by IS NULL",
+                        [h, superseded_old_hash],
+                    )
+
+                cur.execute("""
+                    INSERT OR REPLACE INTO locations VALUES
+                        (?, ?, ?, ?, current_timestamp)
+                """, [h, str(p), m, source_url])
+                cur.execute("COMMIT")
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
         return h
 
     def scan_directory(
@@ -418,6 +595,9 @@ class KernelDB:
         error_count = 0
         missions_found: set[str] = set()
         mk_files: list[tuple[Path, str]] = []  # (path, mission)
+        # H4: canonicalise user-supplied mission once up-front
+        if mission is not None:
+            mission = canonicalize_mission(mission)
         for p in sorted(root.rglob("*")):
             if p.is_file() and p.suffix.lower() in extensions:
                 try:
@@ -476,15 +656,26 @@ class KernelDB:
         actual filename in the locations path. This handles the case where
         the same content is stored under different names (e.g. jup365.bsp
         vs jup365_19900101_20500101.bsp).
+
+        Superseded kernels (kernels.superseded_by IS NOT NULL) are excluded.
+        Filename comparison is case-insensitive (C8): kernel names are
+        treated identically across HFS+/APFS (case-insensitive) and
+        ext4/NTFS (case-sensitive) filesystems. Identity is the sha256
+        anyway — name casing is metadata.
+
+        Ordering is deterministic: by mission, then most-recently-scanned
+        location, then path — so callers see stable results even when
+        multiple non-superseded kernels share the same filename.
         """
         rows = self.con.execute("""
             SELECT DISTINCT k.sha256, l.abs_path, l.mission,
-                   k.kernel_type, k.size_bytes
+                   k.kernel_type, k.size_bytes, l.scanned_at
             FROM kernels k
             JOIN locations l ON k.sha256 = l.sha256
-            WHERE k.filename = ?
-               OR l.abs_path LIKE '%/' || ?
-            ORDER BY l.mission
+            WHERE (LOWER(k.filename) = LOWER(?)
+                   OR LOWER(l.abs_path) LIKE '%/' || LOWER(?))
+              AND k.superseded_by IS NULL
+            ORDER BY l.mission, l.scanned_at DESC, l.abs_path
         """, [filename, filename]).fetchall()
         return [
             {"sha256": r[0], "abs_path": r[1], "mission": r[2],
@@ -510,14 +701,19 @@ class KernelDB:
 
         This catches kernels that are registered in the DB under a different
         canonical name but exist on disk at a path ending with *filename*.
+        Superseded kernels are excluded; ordering is deterministic.
+        C8: comparison is case-insensitive.
         """
         rows = self.con.execute("""
             SELECT DISTINCT k.sha256, l.abs_path, l.mission,
-                   k.kernel_type, k.size_bytes, k.filename AS canonical_name
+                   k.kernel_type, k.size_bytes, k.filename AS canonical_name,
+                   l.scanned_at
             FROM locations l
             JOIN kernels k ON k.sha256 = l.sha256
-            WHERE l.abs_path LIKE '%/' || ? OR l.abs_path LIKE '%\\' || ?
-            ORDER BY l.mission
+            WHERE (LOWER(l.abs_path) LIKE '%/' || LOWER(?)
+                   OR LOWER(l.abs_path) LIKE '%\\' || LOWER(?))
+              AND k.superseded_by IS NULL
+            ORDER BY l.mission, l.scanned_at DESC, l.abs_path
         """, [filename, filename]).fetchall()
         return [
             {"sha256": r[0], "abs_path": r[1], "mission": r[2],
@@ -670,17 +866,30 @@ class KernelDB:
     # ------------------------------------------------------------------
 
     def index_metakernel(self, mk_path: str | Path):
-        """Parse and register a metakernel's entries in the DB."""
+        """Parse and register a metakernel's entries in the DB.
+
+        C6: the DELETE + N INSERTs are wrapped in a transaction. A crash
+        between them previously left an empty metakernel_entries set
+        for this mk_path, which made the kernel list silently incomplete.
+        """
         mk_path = str(Path(mk_path).resolve())
         parsed = parse_metakernel(mk_path)
-        self.con.execute(
-            "DELETE FROM metakernel_entries WHERE mk_path = ?", [mk_path]
-        )
-        for i, raw in enumerate(parsed.kernels):
-            self.con.execute(
-                "INSERT INTO metakernel_entries VALUES (?, ?, ?, ?)",
-                [mk_path, i, raw, Path(raw).name],
-            )
+        with self.con.cursor() as cur:
+            cur.execute("BEGIN")
+            try:
+                cur.execute(
+                    "DELETE FROM metakernel_entries WHERE mk_path = ?",
+                    [mk_path],
+                )
+                for i, raw in enumerate(parsed.kernels):
+                    cur.execute(
+                        "INSERT INTO metakernel_entries VALUES (?, ?, ?, ?)",
+                        [mk_path, i, raw, Path(raw).name],
+                    )
+                cur.execute("COMMIT")
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
 
     def check_metakernel(
         self,
@@ -792,14 +1001,33 @@ class KernelDB:
         except Exception:
             return
 
-        # Find matching remote entry
-        acq_str = str(acquired_at)[:16]  # "YYYY-MM-DD HH:MM"
+        # H6: parse to datetime and compare numerically — the old
+        # lexicographic string comparison on "YYYY-MM-DD HH:MM"
+        # silently dropped seconds and broke at the minute boundary.
+        from datetime import datetime as _dt
+        acq_dt: _dt | None = None
+        if isinstance(acquired_at, _dt):
+            acq_dt = acquired_at
+        else:
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    acq_dt = _dt.strptime(str(acquired_at)[:len(fmt) + 6], fmt)
+                    break
+                except ValueError:
+                    continue
+        if acq_dt is None:
+            return
+
         for entry in entries:
             if entry.filename == mk_filename:
-                if entry.date > acq_str:
+                try:
+                    remote_dt = _dt.strptime(entry.date, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    break
+                if remote_dt > acq_dt:
                     print(
                         f"\n  Remote update available: server modified {entry.date}"
-                        f" (acquired {acq_str})"
+                        f" (acquired {acq_dt:%Y-%m-%d %H:%M})"
                     )
                     print(
                         f"  Run 'spice-kernel-db update {mk_filename}' to fetch the latest version."
@@ -857,28 +1085,24 @@ class KernelDB:
             )
             all_warnings.extend(warnings)
 
-            link_path = (link_root / rel).resolve()
-
-            # Issue 9: Validate that link_path stays within link_root
-            try:
-                link_path.relative_to(link_root)
-            except ValueError:
+            # Issue 9 / C1: validate relpath lexically against link_root
+            link_path = _safe_join(link_root, rel)
+            if link_path is None:
                 logger.warning(
-                    "Path traversal in kernel relpath '%s': resolved to %s "
-                    "which is outside link_root %s. Skipping.",
-                    rel, link_path, link_root,
+                    "Path traversal in kernel relpath '%s': escapes "
+                    "link_root %s. Skipping.", rel, link_root,
                 )
                 all_warnings.append(
-                    f"{fname}: path traversal — resolved outside link_root, skipped"
+                    f"{fname}: path traversal — relpath escapes link_root, skipped"
                 )
                 continue
 
             link_path.parent.mkdir(parents=True, exist_ok=True)
 
             if local and Path(local).is_file():
-                if link_path.is_symlink() or link_path.exists():
-                    link_path.unlink()
-                link_path.symlink_to(Path(local).resolve())
+                # C7: atomic symlink swap so concurrent readers never
+                # observe a missing link.
+                _atomic_symlink(Path(local).resolve(), link_path)
             else:
                 unresolved.append(raw)
                 all_warnings.append(f"{fname}: NOT FOUND — symlink not created")
@@ -911,6 +1135,201 @@ class KernelDB:
         return out_path, all_warnings
 
     # ------------------------------------------------------------------
+    # Verify (cross-check a metakernel against the DB)
+    # ------------------------------------------------------------------
+
+    def verify_metakernel(
+        self,
+        mk_path: str | Path,
+        *,
+        deep: bool = False,
+    ) -> dict:
+        """Cross-check a metakernel against the database.
+
+        Walks every KERNELS_TO_LOAD entry, applies PATH_VALUES/PATH_SYMBOLS
+        substitution to get the absolute path SPICE will load, then checks:
+
+        * the path stays within the PATH_VALUES root (no traversal — C1)
+        * the file (or symlink target) exists
+        * its size matches kernels.size_bytes for the expected filename
+        * with ``deep=True``, its sha256 matches kernels.sha256
+        * the canonical kernels row is not superseded (C3)
+        * no ambiguity between multiple active kernels rows sharing the
+          same filename but different hashes (C3)
+
+        Args:
+            mk_path: Path to the .tm file (typically rewritten with
+                absolute PATH_VALUES).
+            deep: If True, recompute sha256 for every entry. Otherwise
+                stat-only checks (fast).
+
+        Returns:
+            ``{'entries': [...], 'ok': int, 'fail': int, 'fatal': bool}``
+            where each entry is a dict with keys ``raw``, ``resolved``,
+            ``status``, ``detail``.
+        """
+        from os.path import abspath, normpath
+        parsed = parse_metakernel(mk_path)
+
+        entries: list[dict] = []
+        ok = 0
+        fail = 0
+        fatal = False
+
+        # Validate PATH_VALUES first — they must be absolute existing dirs
+        path_value_roots: list[Path] = []
+        for v in parsed.path_values:
+            if not v.startswith("/"):
+                entries.append({
+                    "raw": f"PATH_VALUE={v!r}",
+                    "resolved": v,
+                    "status": "BAD_PATH_VALUE",
+                    "detail": "PATH_VALUE is not absolute; SPICE resolves "
+                              "against CWD which makes the .tm non-portable",
+                })
+                fail += 1
+                fatal = True
+                continue
+            root = Path(v)
+            if not root.is_dir():
+                entries.append({
+                    "raw": f"PATH_VALUE={v!r}",
+                    "resolved": str(root),
+                    "status": "BAD_PATH_VALUE",
+                    "detail": f"PATH_VALUE directory does not exist: {root}",
+                })
+                fail += 1
+                fatal = True
+                continue
+            path_value_roots.append(Path(abspath(root)))
+
+        for raw in parsed.kernels:
+            resolved_str = parsed.resolve(raw)
+            resolved = Path(abspath(normpath(resolved_str)))
+            entry: dict = {"raw": raw, "resolved": str(resolved)}
+
+            # Traversal check: resolved must be inside at least one PATH_VALUE
+            if path_value_roots and not any(
+                str(resolved).startswith(str(r) + "/") or resolved == r
+                for r in path_value_roots
+            ):
+                entry["status"] = "TRAVERSAL"
+                entry["detail"] = (
+                    f"resolves to {resolved} which is outside every "
+                    f"PATH_VALUE root"
+                )
+                entries.append(entry)
+                fail += 1
+                fatal = True
+                continue
+
+            expected_name = resolved.name
+
+            # Existence and dangling check
+            if resolved.is_symlink() and not resolved.exists():
+                entry["status"] = "DANGLING"
+                entry["detail"] = (
+                    f"symlink target missing: "
+                    f"{Path(resolved).resolve(strict=False)}"
+                )
+                entries.append(entry)
+                fail += 1
+                fatal = True
+                continue
+            if not resolved.exists():
+                entry["status"] = "NOT_FOUND"
+                entry["detail"] = "no file at this path"
+                entries.append(entry)
+                fail += 1
+                fatal = True
+                continue
+            if not resolved.is_file():
+                entry["status"] = "NOT_FILE"
+                entry["detail"] = "path exists but is not a regular file"
+                entries.append(entry)
+                fail += 1
+                fatal = True
+                continue
+
+            # Look up what the DB believes about this filename
+            # (C8: case-insensitive for cross-FS portability)
+            kernels_rows = self.con.execute(
+                "SELECT sha256, size_bytes FROM kernels "
+                "WHERE LOWER(filename) = LOWER(?) "
+                "AND superseded_by IS NULL",
+                [expected_name],
+            ).fetchall()
+
+            if len(kernels_rows) == 0:
+                entry["status"] = "UNREGISTERED"
+                entry["detail"] = (
+                    f"no kernels row for filename {expected_name!r}; "
+                    f"run scan to register"
+                )
+                entries.append(entry)
+                fail += 1
+                continue
+
+            if len(kernels_rows) > 1:
+                # C3: multiple active candidates → ambiguous resolution
+                entry["status"] = "AMBIGUOUS"
+                hashes = ", ".join(r[0][:8] for r in kernels_rows)
+                entry["detail"] = (
+                    f"{len(kernels_rows)} active kernels rows for "
+                    f"{expected_name!r} (sha256s: {hashes}); resolution "
+                    f"is not uniquely determined"
+                )
+                entries.append(entry)
+                fail += 1
+                fatal = True
+                continue
+
+            expected_sha, expected_size = kernels_rows[0]
+
+            # Quick size check (cheap)
+            actual_size = resolved.stat().st_size
+            if actual_size != expected_size:
+                entry["status"] = "SIZE_MISMATCH"
+                entry["detail"] = (
+                    f"size {actual_size} != expected {expected_size}"
+                )
+                entries.append(entry)
+                fail += 1
+                fatal = True
+                continue
+
+            if deep:
+                actual_sha = sha256_file(resolved)
+                if actual_sha != expected_sha:
+                    entry["status"] = "HASH_MISMATCH"
+                    entry["detail"] = (
+                        f"sha256 {actual_sha[:16]} != expected "
+                        f"{expected_sha[:16]}"
+                    )
+                    entries.append(entry)
+                    fail += 1
+                    fatal = True
+                    continue
+                entry["sha256"] = actual_sha
+                entry["status"] = "OK"
+                entry["detail"] = "hash verified"
+            else:
+                entry["status"] = "OK"
+                entry["detail"] = "size matches (quick check)"
+
+            entries.append(entry)
+            ok += 1
+
+        return {
+            "entries": entries,
+            "ok": ok,
+            "fail": fail,
+            "fatal": fatal,
+            "mk_path": str(mk_path),
+            "deep": deep,
+        }
+
+    # ------------------------------------------------------------------
     # Acquire (remote metakernel)
     # ------------------------------------------------------------------
 
@@ -939,7 +1358,12 @@ class KernelDB:
     ) -> bool:
         """Check if kernel records changed since the pre-snapshot.
 
-        Returns True if any change detected, and logs a warning.
+        C5: previously this only logged a warning and the caller
+        ignored the return value, so detected races silently corrupted
+        the DB. It now raises :class:`ConcurrentModificationError` so
+        the operation aborts cleanly and the user can retry.
+
+        Returns False if no change detected; never returns True.
         """
         current = self._snapshot_kernel_hashes(filenames, mission)
         changed_files = [
@@ -947,13 +1371,17 @@ class KernelDB:
             if pre_snapshot.get(f, set()) != current.get(f, set())
         ]
         if changed_files:
+            sample = ", ".join(changed_files[:5])
             logger.warning(
                 "DB state changed during download for %d kernel(s): %s. "
                 "Another process may have modified the database.",
-                len(changed_files),
-                ", ".join(changed_files[:5]),
+                len(changed_files), sample,
             )
-            return True
+            raise ConcurrentModificationError(
+                f"DB modified concurrently during operation "
+                f"({len(changed_files)} kernel(s) changed: {sample}). "
+                f"Retry after the other operation completes."
+            )
         return False
 
     def _link_existing_kernels(
@@ -973,28 +1401,69 @@ class KernelDB:
         Returns the number of symlinks created.
         """
         n_linked = 0
+        mission_root = download_dir / mission
         for i in indices:
-            expected = download_dir / mission / relpaths[i]
-            if expected.exists() or expected.is_symlink():
+            # C1: validate relpath against download_dir/mission lexically
+            expected = _safe_join(mission_root, relpaths[i])
+            if expected is None:
+                logger.warning(
+                    "Refusing unsafe relpath %r for %s: escapes %s",
+                    relpaths[i], filenames[i], mission_root,
+                )
+                continue
+            # H1: a dangling symlink (target moved/deleted) was previously
+            # skipped, leaving SPICE pointed at nothing. Unlink so the
+            # block below can recreate it; healthy links still no-op out.
+            if expected.is_symlink() and not expected.exists():
+                try:
+                    expected.unlink()
+                except OSError as e:
+                    logger.warning(
+                        "Could not remove dangling symlink %s: %s",
+                        expected, e,
+                    )
+                    continue
+            elif expected.exists() or expected.is_symlink():
                 continue
             local, _ = self.resolve_kernel(
                 filenames[i], preferred_mission=mission,
             )
             if local and Path(local).is_file():
-                # Issue 3: Verify hash before creating symlink
-                db_row = self.con.execute(
-                    "SELECT sha256 FROM kernels WHERE filename = ?",
-                    [filenames[i]],
+                # C2: verify hash by the RESOLVED LOCAL PATH, not by the
+                # requested filename. The resolved path was returned from
+                # `locations`, which stores sha256 as the join key — so a
+                # direct lookup tells us exactly what hash should be there.
+                # If this lookup misses, the resolver returned a path that
+                # isn't tracked in locations — refuse rather than silently
+                # symlinking.
+                resolved_abs = str(Path(local).resolve())
+                loc_row = self.con.execute(
+                    "SELECT sha256 FROM locations WHERE abs_path = ?",
+                    [resolved_abs],
                 ).fetchone()
-                if db_row:
-                    actual_hash = sha256_file(local)
-                    if actual_hash != db_row[0]:
-                        logger.warning(
-                            "Hash mismatch for %s: expected %s, got %s. "
-                            "Skipping symlink.",
-                            filenames[i], db_row[0][:16], actual_hash[:16],
-                        )
-                        continue
+                if loc_row is None:
+                    # Fallback: try the raw local path too (resolve may have
+                    # followed a symlink the DB doesn't know about)
+                    loc_row = self.con.execute(
+                        "SELECT sha256 FROM locations WHERE abs_path = ?",
+                        [str(Path(local))],
+                    ).fetchone()
+                if loc_row is None:
+                    logger.warning(
+                        "Cannot verify hash for %s: resolved path %s has no "
+                        "locations row. Skipping symlink.",
+                        filenames[i], resolved_abs,
+                    )
+                    continue
+                actual_hash = sha256_file(local)
+                if actual_hash != loc_row[0]:
+                    logger.warning(
+                        "Hash mismatch for %s at %s: expected %s, got %s. "
+                        "Skipping symlink.",
+                        filenames[i], resolved_abs,
+                        loc_row[0][:16], actual_hash[:16],
+                    )
+                    continue
                 # Issue 6: Wrap symlink creation in try/except
                 try:
                     expected.parent.mkdir(parents=True, exist_ok=True)
@@ -1021,16 +1490,15 @@ class KernelDB:
         leave it alone and emit a warning — refuse to clobber user data.
         If it exists as a symlink, replace it to point at the new target.
         """
-        if alias_path.is_symlink():
-            alias_path.unlink()
-        elif alias_path.exists():
+        if alias_path.exists() and not alias_path.is_symlink():
             console.print(
                 f"[yellow]Alias {alias_filename} already exists as a regular "
                 f"file in {alias_path.parent} — not overwriting.[/yellow]"
             )
             return
         try:
-            alias_path.symlink_to(target.name)
+            # C7: atomic symlink replace
+            _atomic_symlink(target.name, alias_path)
         except OSError as e:
             console.print(
                 f"[yellow]Could not create alias symlink "
@@ -1084,6 +1552,8 @@ class KernelDB:
         parsed = parse_metakernel_text(text, final_url)
         if mission is None:
             mission = guess_mission(url)
+        # H4: canonicalise before any filesystem path or DB row uses it
+        mission = canonicalize_mission(mission)
         # Resolve to canonical mission name from DB (e.g. "juice" → "JUICE")
         m = self.get_mission(mission)
         if m:
@@ -1143,6 +1613,20 @@ class KernelDB:
         kernel_urls = resolve_kernel_urls(url, parsed)
         relpaths = parsed.kernel_relpaths()
         filenames = parsed.kernel_filenames()
+
+        # C1: validate every kernel relpath against download_dir/mission
+        # BEFORE any download or symlink work. A hostile metakernel using
+        # `$KERNELS/../../foo` would otherwise let us write arbitrary
+        # paths on the user's filesystem. Abort the whole operation if
+        # any one entry is unsafe — partial downloads on a hostile .tm
+        # would still expose the user.
+        mission_root = (download_dir / mission).resolve()
+        _, relpath_errors = _validate_relpaths(relpaths, mission_root)
+        if relpath_errors:
+            raise ValueError(
+                "Refusing to process metakernel with path-traversing "
+                "KERNELS_TO_LOAD entries:\n  " + "\n  ".join(relpath_errors)
+            )
 
         # 3. Check local DB for each kernel
         # When dedup is disabled for this mission, skip DB lookups and
@@ -1254,25 +1738,38 @@ class KernelDB:
 
         # 7. Build download list, skipping files with correct size AND hash (Issue 2)
         tasks = []
-        task_info: dict[str, str] = {}  # filename -> source_url
+        # H5: key by the full destination path, not basename. Two
+        # KERNELS_TO_LOAD entries with the same basename under different
+        # relpaths previously collided here, attributing the wrong
+        # source_url to whichever registered second.
+        task_info: dict[Path, str] = {}
         already_on_disk: list[Path] = []
         for i in missing_indices:
             kurl = kernel_urls[i]
             relpath = relpaths[i]
-            dest = download_dir / mission / relpath
+            # C1: this was already validated above in `_validate_relpaths`,
+            # but defense-in-depth — refuse to write outside mission_root.
+            dest = _safe_join(mission_root, relpath)
+            if dest is None:
+                raise ValueError(
+                    f"Refusing unsafe download dest for {filenames[i]!r}"
+                )
             fname = filenames[i]
             remote_size = sizes.get(kurl)
-            # Look up expected hash from DB
+            # Look up expected hash from DB (case-insensitive — C8)
             db_row = self.con.execute(
-                "SELECT sha256 FROM kernels WHERE filename = ?", [fname]
+                "SELECT sha256 FROM kernels "
+                "WHERE LOWER(filename) = LOWER(?) "
+                "AND superseded_by IS NULL",
+                [fname],
             ).fetchone()
             db_hash = db_row[0] if db_row else None
             if _should_skip_download(dest, remote_size, db_hash, force):
                 already_on_disk.append(dest)
-                task_info[fname] = kurl
+                task_info[dest] = kurl
                 continue
             tasks.append((kurl, dest, fname))
-            task_info[fname] = kurl
+            task_info[dest] = kurl
 
         if already_on_disk:
             console.print(f"  [dim]Skipped: {len(already_on_disk)} already downloaded[/dim]")
@@ -1284,7 +1781,7 @@ class KernelDB:
         # run read-only queries (resolve, list, check, etc.).
         self.release()
         try:
-            dl_paths, warnings = download_kernels_parallel(
+            dl_results, warnings = download_kernels_parallel(
                 tasks, total_bytes=download_bytes,
             )
         finally:
@@ -1292,11 +1789,22 @@ class KernelDB:
         # Issue 5: Check state after download reacquire
         self._check_state_changed(pre_dl_snapshot, filenames, mission)
 
+        # C4: streamed hashes from the downloader. Pass to register_file
+        # as expected_hash so a TOCTOU between "download finished" and
+        # "register_file re-hashes from disk" cannot let tampered bytes
+        # become canonical.
+        download_hashes: dict[Path, str] = {p: s for p, s in dl_results}
+        dl_paths: list[Path] = [p for p, _ in dl_results]
+
         # Register all files (downloaded + already on disk)
+        # H5: look up source_url by full dest path, not basename
         downloaded: list[str] = []
         for dest in [*already_on_disk, *dl_paths]:
-            kurl = task_info[dest.name]
-            self.register_file(dest, mission=mission, source_url=kurl)
+            kurl = task_info[dest]
+            self.register_file(
+                dest, mission=mission, source_url=kurl,
+                expected_hash=download_hashes.get(dest),
+            )
             downloaded.append(str(dest))
 
         # 8. Create symlinks for "in db" kernels so the metakernel works locally

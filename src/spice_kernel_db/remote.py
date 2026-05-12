@@ -219,10 +219,14 @@ def resolve_kernel_urls(
             resolved += "/"
         symbol_urls[sym] = resolved
 
+    # H3: replace longest symbols first so e.g. $KERNELS_DATA doesn't
+    # get clobbered by an earlier $KERNELS replacement.
+    ordered = sorted(symbol_urls.items(), key=lambda kv: -len(kv[0]))
+
     urls: list[str] = []
     for raw in parsed.kernels:
         url = raw
-        for sym, base_url in symbol_urls.items():
+        for sym, base_url in ordered:
             url = url.replace(f"${sym}/", base_url).replace(f"${sym}", base_url)
         urls.append(url)
 
@@ -262,18 +266,29 @@ def query_remote_sizes(
 
 def download_kernel(
     url: str, dest: Path, *, progress: Progress | None = None,
-    task_id: int | None = None,
-) -> Path:
-    """Download a single kernel file to *dest*.
+    task_id: int | None = None, expected_hash: str | None = None,
+) -> tuple[Path, str]:
+    """Download a single kernel file to *dest*, hashing as we go.
 
     Creates parent directories as needed. If *progress* and *task_id*
-    are given, updates the progress bar with bytes written. Returns *dest*.
+    are given, updates the progress bar with bytes written. Returns
+    ``(dest, sha256_hex)`` — the SHA-256 is computed in the same
+    streaming pass as the file write, so the caller can trust it
+    matches the bytes that landed on disk without a second read pass.
+
+    If *expected_hash* is provided, the streamed hash is compared
+    against it and an IOError is raised on mismatch (C4: detects
+    in-transit corruption or proxy/CDN mangling when an external
+    checksum is known a priori). The partial file is removed.
 
     Raises IOError if the download is incomplete (bytes written does not
-    match Content-Length) or if zero bytes are received.
+    match Content-Length), if zero bytes are received, or if
+    *expected_hash* was given and does not match.
     """
+    import hashlib
     dest.parent.mkdir(parents=True, exist_ok=True)
     bytes_written = 0
+    hasher = hashlib.sha256()
     try:
         with urllib.request.urlopen(url) as resp:
             content_length = resp.headers.get("Content-Length")
@@ -284,6 +299,7 @@ def download_kernel(
                     if not chunk:
                         break
                     f.write(chunk)
+                    hasher.update(chunk)
                     bytes_written += len(chunk)
                     if progress is not None and task_id is not None:
                         progress.advance(task_id, len(chunk))
@@ -297,12 +313,20 @@ def download_kernel(
                 f"Incomplete download from {url}: "
                 f"got {bytes_written} bytes, expected {expected_size}"
             )
+        actual_hash = hasher.hexdigest()
+        # C4: when caller passed an authoritative checksum, refuse to
+        # accept a download whose streamed hash disagrees.
+        if expected_hash is not None and actual_hash != expected_hash:
+            raise IOError(
+                f"Hash mismatch on download from {url}: got "
+                f"{actual_hash[:16]}..., expected {expected_hash[:16]}..."
+            )
     except Exception:
         # Clean up partial file on any error
         if dest.exists():
             dest.unlink()
         raise
-    return dest
+    return dest, actual_hash
 
 
 def download_kernels_parallel(
@@ -310,7 +334,8 @@ def download_kernels_parallel(
     *,
     max_workers: int = 8,
     total_bytes: int | None = None,
-) -> tuple[list[Path], list[str]]:
+    expected_hashes: dict[str, str] | None = None,
+) -> tuple[list[tuple[Path, str]], list[str]]:
     """Download multiple kernels in parallel with a byte-level progress bar.
 
     Args:
@@ -318,9 +343,14 @@ def download_kernels_parallel(
         max_workers: Maximum concurrent downloads.
         total_bytes: Total expected bytes (for progress bar). If None,
             the bar counts files instead of bytes.
+        expected_hashes: Optional mapping ``url -> sha256_hex``. When set
+            and a URL is present, the streamed hash is checked against
+            this value during download; mismatches abort that task.
+            Use this to enforce manifest/published checksums (C4).
 
     Returns:
-        (downloaded_paths, warnings)
+        ``(downloaded, warnings)`` — ``downloaded`` is a list of
+        ``(dest_path, sha256_hex)`` tuples for every successful download.
     """
     if total_bytes and total_bytes > 0:
         columns = [
@@ -339,7 +369,7 @@ def download_kernels_parallel(
             TextColumn("{task.completed}/{task.total} files"),
         ]
 
-    downloaded: list[Path] = []
+    downloaded: list[tuple[Path, str]] = []
     warnings: list[str] = []
     with Progress(*columns) as progress:
         if total_bytes and total_bytes > 0:
@@ -347,40 +377,44 @@ def download_kernels_parallel(
         else:
             pid = progress.add_task("Downloading", total=len(tasks))
 
-        def _do(task: tuple[str, Path, str]) -> tuple[str, Path | None, str | None]:
+        def _do(
+            task: tuple[str, Path, str],
+        ) -> tuple[str, Path | None, str | None, str | None]:
             url, dest, filename = task
             try:
-                download_kernel(
+                exp = expected_hashes.get(url) if expected_hashes else None
+                _, sha = download_kernel(
                     url, dest,
                     progress=progress if total_bytes else None,
                     task_id=pid if total_bytes else None,
+                    expected_hash=exp,
                 )
                 if not total_bytes:
                     progress.advance(pid)
-                return filename, dest, None
+                return filename, dest, sha, None
             except urllib.error.HTTPError as e:
                 # Issue 10: Classify HTTP errors by code (must be before OSError)
                 if e.code in (403, 404, 410):
-                    return filename, None, f"[FATAL] HTTP {e.code}: {e.reason}"
+                    return filename, None, None, f"[FATAL] HTTP {e.code}: {e.reason}"
                 elif e.code >= 500:
-                    return filename, None, f"[RETRIABLE] HTTP {e.code}: {e.reason}"
+                    return filename, None, None, f"[RETRIABLE] HTTP {e.code}: {e.reason}"
                 else:
-                    return filename, None, f"[ERROR] HTTP {e.code}: {e.reason}"
+                    return filename, None, None, f"[ERROR] HTTP {e.code}: {e.reason}"
             except urllib.error.URLError as e:
                 # Network errors — potentially retriable
-                return filename, None, f"[RETRIABLE] {e.reason}"
+                return filename, None, None, f"[RETRIABLE] {e.reason}"
             except (IOError, OSError) as e:
                 # Issue 10: Disk/IO problems — ERROR severity
-                return filename, None, f"[ERROR] {e}"
+                return filename, None, None, f"[ERROR] {e}"
             except Exception as e:
-                return filename, None, f"[WARNING] {e}"
+                return filename, None, None, f"[WARNING] {e}"
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_do, t): t for t in tasks}
             for future in as_completed(futures):
-                fname, dest, error = future.result()
+                fname, dest, sha, error = future.result()
                 if error is None:
-                    downloaded.append(dest)
+                    downloaded.append((dest, sha))
                 else:
                     warnings.append(f"{fname}: {error}")
 
