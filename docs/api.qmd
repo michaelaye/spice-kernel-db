@@ -255,6 +255,24 @@ Returns a dict with keys `entries`, `ok`, `fail`, `fatal`, `mk_path`, `deep`. Ea
 
 This is the recommended cross-check after every `get`/`update`/`rewrite`. Run with `deep=True` periodically to catch content corruption that preserves size.
 
+#### `prune_orphan_symlinks`
+
+```python
+db.prune_orphan_symlinks(dry_run: bool = True) -> list[str]
+```
+
+Walk every mission's download tree (derived from
+`metakernel_registry.mk_path` — the parent of the `mk/` directory) and
+find symlinks whose target no longer exists. These accumulate when an
+underlying kernel store moves or after the default `prune` removes a
+`locations` row — the symlinks pointing at that file are not themselves
+tracked in `locations`, so they survive as junk.
+
+With `dry_run=False`, every dangling symlink is unlinked. Healthy
+symlinks and regular files are left alone.
+
+Returns a list of absolute paths that were (or would be) removed.
+
 #### `prune_metakernels`
 
 ```python

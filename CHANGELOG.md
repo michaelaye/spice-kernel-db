@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-05-12
+
+### Added
+
+- **`prune --orphan-symlinks`** (CLI) and `KernelDB.prune_orphan_symlinks()`
+  (API) — walks each mission's download tree (derived from
+  `metakernel_registry.mk_path`) and finds dangling symlinks whose
+  target has disappeared. These accumulate over time as the upstream
+  kernel store shifts or after default `prune` removes a location row
+  (the symlinks pointing at that file aren't themselves in `locations`
+  and so survive as junk). `--orphan-symlinks` is mutually exclusive
+  with `--metakernels`; run them sequentially if you need both.
+
+### Tests
+
+- 226 → 230: `TestPruneOrphanSymlinks` (4 tests covering dry-run vs
+  execute, healthy-symlink preservation, empty-registry early-out, and
+  CLI mutual-exclusion).
+
 ## [0.13.2] - 2026-05-12
 
 ### Fixed
@@ -549,6 +568,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.13.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.12.0...v0.13.0

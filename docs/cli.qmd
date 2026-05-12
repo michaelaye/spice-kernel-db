@@ -192,7 +192,7 @@ Use this after a `get`/`update` to confirm the rewritten metakernel is sound. `-
 
 ## `prune`
 
-Remove stale database entries. Two modes:
+Remove stale database or filesystem state. Three mutually exclusive modes:
 
 ```bash
 # Mode 1 (default): locations whose file no longer exists on disk
@@ -200,31 +200,31 @@ spice-kernel-db prune [--execute]
 
 # Mode 2: metakernel registry rows whose source URL returns 4xx
 spice-kernel-db prune --metakernels [--execute] [--delete-files]
+
+# Mode 3: dangling symlinks under each mission's download tree
+spice-kernel-db prune --orphan-symlinks [--execute]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--execute` | Actually remove entries. Default: dry run. |
-| `--metakernels`, `--mk` | Switch to metakernel-registry mode. Sends a HEAD to each row's effective URL (`source_url` if set, otherwise `mission.mk_dir_url + filename`) and treats 403/404/410 as permanently dead. |
+| `--metakernels`, `--mk` | Metakernel-registry mode. Sends HEAD to each row's effective URL (`source_url` if set, otherwise `mission.mk_dir_url + filename`); 403/404/410 = dead. |
+| `--orphan-symlinks` | Walk each mission's download tree (derived from `metakernel_registry.mk_path`) recursively and find symlinks whose target no longer exists. These accumulate when an underlying kernel store moves, or after Mode 1 removes a location row. |
 | `--delete-files` | With `--metakernels --execute`: also unlink the on-disk `.tm` files. |
 
-Network errors (timeouts, DNS failures) are **never** treated as dead — pruning would otherwise discard real state when you happened to be offline.
+Network errors (timeouts, DNS failures) in `--metakernels` mode are **never** treated as dead — pruning would otherwise discard real state when you happened to be offline.
+
+`--metakernels` and `--orphan-symlinks` are mutually exclusive — run them sequentially if you want both.
 
 ```bash
-# Default mode — preview stale kernel locations
+# Default — preview stale kernel locations
 spice-kernel-db prune
 
-# Actually remove
-spice-kernel-db prune --execute
-
-# Find dead metakernel registry rows (NAIF rotates old snapshots into former_versions/)
-spice-kernel-db prune --metakernels
-
-# Remove the registry rows
+# Find dead metakernel registry rows
 spice-kernel-db prune --metakernels --execute
 
-# And delete the local .tm files (symlink trees are shared and never auto-deleted)
-spice-kernel-db prune --metakernels --execute --delete-files
+# Sweep up dangling symlinks left behind
+spice-kernel-db prune --orphan-symlinks --execute
 ```
 
 

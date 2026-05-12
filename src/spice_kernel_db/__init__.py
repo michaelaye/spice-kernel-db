@@ -25,4 +25,4 @@ __all__ = [
     "parse_metakernel_text",
     "resolve_kernel_urls",
 ]
-__version__ = "0.13.2"
+__version__ = "0.13.3"

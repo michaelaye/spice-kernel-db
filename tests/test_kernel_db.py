@@ -4317,3 +4317,86 @@ class TestPruneMetakernelsNullSourceUrl:
         captured = capsys.readouterr().out
         assert "no probeable URL" in captured
         db.close()
+
+
+class TestPruneOrphanSymlinks:
+    """`prune --orphan-symlinks` walks each mission's download tree and
+    finds symlinks whose target has disappeared. These accumulate when
+    the upstream kernel store moves or after default `prune` deletes
+    location rows for missing files."""
+
+    def _seed_tree(self, tmp_path: Path) -> tuple[KernelDB, Path, Path]:
+        """Build a download-tree shape that mimics what `get` produces:
+        download_dir/<mission>/mk/<file.tm> + download_dir/<mission>/lsk/...
+        Returns (db, dangling_link, healthy_link)."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        dl = tmp_path / "downloads"
+        mission_root = dl / "JUICE"
+        (mission_root / "mk").mkdir(parents=True)
+        (mission_root / "lsk").mkdir()
+
+        # The mk file (referenced via metakernel_registry so we can
+        # derive the mission root)
+        mk = mission_root / "mk" / "juice.tm"
+        mk.write_text("\\begintext\n")
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'JUICE', NULL, ?, "
+            "current_timestamp)",
+            [str(mk), "juice.tm"],
+        )
+
+        # A healthy symlink pointing at an existing kernel
+        kernel = tmp_path / "store" / "naif0012.tls"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_text("LSK")
+        healthy = mission_root / "lsk" / "naif0012.tls"
+        healthy.symlink_to(kernel)
+
+        # A dangling symlink (target never existed)
+        dangling = mission_root / "lsk" / "ghost.tls"
+        dangling.symlink_to(tmp_path / "nowhere" / "ghost.tls")
+
+        return db, dangling, healthy
+
+    def test_dry_run_reports_dangling_only(self, tmp_path, capsys):
+        db, dangling, healthy = self._seed_tree(tmp_path)
+        result = db.prune_orphan_symlinks(dry_run=True)
+        assert len(result) == 1
+        assert str(dangling) in result
+        # Healthy link untouched in dry run AND in result
+        assert healthy.is_symlink() and healthy.exists()
+        assert dangling.is_symlink()  # not yet removed
+        captured = capsys.readouterr().out
+        assert "Would remove" in captured
+        db.close()
+
+    def test_execute_unlinks_dangling_keeps_healthy(self, tmp_path):
+        db, dangling, healthy = self._seed_tree(tmp_path)
+        result = db.prune_orphan_symlinks(dry_run=False)
+        assert len(result) == 1
+        assert not dangling.exists() and not dangling.is_symlink()
+        # Healthy symlink survives
+        assert healthy.is_symlink() and healthy.exists()
+        db.close()
+
+    def test_no_registered_metakernels_skips_walk(self, tmp_path, capsys):
+        """With nothing in metakernel_registry there's no tree to walk."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        result = db.prune_orphan_symlinks(dry_run=True)
+        assert result == []
+        captured = capsys.readouterr().out
+        assert "No download trees" in captured
+        db.close()
+
+    def test_mutually_exclusive_with_metakernels_in_cli(self, tmp_path):
+        from spice_kernel_db.cli import main
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.close()
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--db", str(tmp_path / "test.duckdb"),
+                    "prune", "--metakernels", "--orphan-symlinks",
+                ])
+        assert exc.value.code == 1

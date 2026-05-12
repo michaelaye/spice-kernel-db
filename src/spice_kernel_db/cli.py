@@ -183,9 +183,16 @@ quick start:
     p_prune.add_argument(
         "--metakernels", "--mk", action="store_true",
         dest="prune_metakernels",
-        help="Prune metakernel_registry rows whose remote source_url "
+        help="Prune metakernel_registry rows whose remote URL "
              "returns 403/404/410 (NAIF often rotates old snapshots into "
              "former_versions/)",
+    )
+    p_prune.add_argument(
+        "--orphan-symlinks", action="store_true",
+        dest="prune_orphan_symlinks",
+        help="Find and remove dangling symlinks under each mission's "
+             "download tree (left behind when a kernel store moves or "
+             "after default prune removes the location row)",
     )
     p_prune.add_argument(
         "--delete-files", action="store_true",
@@ -495,11 +502,19 @@ quick start:
             db.deduplicate_with_symlinks(dry_run=not args.execute)
 
         elif args.command == "prune":
+            if args.prune_metakernels and args.prune_orphan_symlinks:
+                print(
+                    "--metakernels and --orphan-symlinks are mutually exclusive.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             if args.prune_metakernels:
                 db.prune_metakernels(
                     dry_run=not args.execute,
                     delete_files=args.delete_files,
                 )
+            elif args.prune_orphan_symlinks:
+                db.prune_orphan_symlinks(dry_run=not args.execute)
             else:
                 db.prune(dry_run=not args.execute)
 

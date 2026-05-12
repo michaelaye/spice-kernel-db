@@ -15,6 +15,7 @@ Key design decisions:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -2525,6 +2526,67 @@ class KernelDB:
 
         print(f"\n{action}: {len(stale)} stale location(s)")
         return pruned_paths
+
+    def prune_orphan_symlinks(self, dry_run: bool = True) -> list[str]:
+        """Find symlinks under download trees whose target no longer exists.
+
+        Walks every distinct mission's download directory (derived from
+        ``metakernel_registry.mk_path``) recursively and reports
+        dangling symlinks. These accumulate when the underlying kernel
+        store moves or when the default ``prune`` removes a stale
+        ``locations`` row — the symlinks pointing at that file are not
+        themselves tracked in ``locations``, so they stay on the FS as
+        junk.
+
+        Args:
+            dry_run: If True (default), only report. If False, unlink.
+
+        Returns:
+            List of absolute paths that were (or would be) removed.
+        """
+        # Derive download tree roots from the registry. mk_path is
+        # typically ``<download_dir>/<mission>/mk/<filename>.tm``, so
+        # the mission's tree is two levels up. Skip any mk_path that
+        # doesn't fit the convention.
+        roots: set[Path] = set()
+        for (mk_path,) in self.con.execute(
+            "SELECT mk_path FROM metakernel_registry"
+        ).fetchall():
+            p = Path(mk_path)
+            if p.parent.name == "mk":
+                roots.add(p.parent.parent)
+
+        if not roots:
+            print("No download trees to walk (no registered metakernels).")
+            return []
+
+        dangling: list[Path] = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for sub in root.rglob("*"):
+                if sub.is_symlink() and not sub.exists():
+                    dangling.append(sub)
+
+        if not dangling:
+            print("No orphan symlinks found.")
+            return []
+
+        action = "Would remove" if dry_run else "Removed"
+        for d in dangling:
+            try:
+                target = os.readlink(d)
+            except OSError:
+                target = "?"
+            print(f"  {action}: {d}  →  {target}")
+            if not dry_run:
+                try:
+                    d.unlink()
+                except OSError as e:
+                    logger.warning("Could not unlink %s: %s", d, e)
+
+        print(f"\n{action}: {len(dangling)} orphan symlink(s)")
+        return [str(p) for p in dangling]
 
     def prune_metakernels(
         self,
