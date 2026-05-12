@@ -5,6 +5,147 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-05-12
+
+A wide-ranging audit-and-fix release driven by a parallel-agent
+adversarial review of the architecture. Eight P0 findings (including a
+remotely-triggered path-traversal write-anywhere primitive) and six P1
+findings are closed. The new `verify` command lets you cross-check any
+metakernel against the database. Test suite grows from 161 to 216.
+
+See `Plans/2026-05-12-redteam-findings.md` for the full audit, data-
+migration notes, and design questions for the (still-deferred)
+per-metakernel dedup opt-out.
+
+### Added
+
+- **`verify` command** — `spice-kernel-db verify [<mk>]` deeply
+  cross-checks a metakernel against the DB: traversal, dangling
+  symlinks, size, sha256 (with `--deep`), ambiguous resolution, plus
+  PATH_VALUES validity. `--strict` exits non-zero on any non-OK
+  finding, `--json` emits machine-readable output, otherwise a rich
+  table.
+- **Streaming sha256 during download** — `download_kernel` returns
+  the hash it computed while writing the bytes. `download_kernels_parallel`
+  returns `(path, sha256)` tuples; both also accept an optional
+  `expected_hash`/`expected_hashes` parameter that aborts the download
+  on mismatch (foundation for future manifest-based integrity).
+- **`canonicalize_mission()`** in `hashing` — single source of truth
+  for mission-name casing. Real missions canonicalised uppercase;
+  `generic` / `unknown` sentinels stay lowercase.
+- **`ConcurrentModificationError`** exported from the package — raised
+  when a `get` detects another writer mutated the DB during its
+  network phase.
+- **`kernels.superseded_by` column** — auto-migrated on open. Marks
+  the old `kernels` row when the same path is re-registered with new
+  content, so resolution skips superseded versions deterministically.
+
+### Fixed
+
+#### Security (P0)
+
+- **Path-traversal write-anywhere via hostile metakernel (C1)** —
+  `_link_existing_kernels` and the download-dest builder used
+  `download_dir / mission / relpath` with no traversal check. A
+  metakernel containing `$KERNELS/../../foo` could plant
+  symlinks or HTTP-body bytes at arbitrary user-writable paths
+  (`~/.ssh/authorized_keys` worst case). New `_safe_join` /
+  `_validate_relpaths` helpers refuse the entire `get` on any
+  escaping entry; `rewrite_metakernel`'s existing check is refactored
+  onto the same helper.
+
+#### Silent wrong-kernel-into-SPICE (P0)
+
+- **Hash verification gate bypass (C2)** — `_link_existing_kernels`
+  looked up the expected sha256 by the *requested* filename, which
+  returns NULL whenever `resolve_kernel` falls back via path-suffix
+  match (the documented "jup365.bsp ↔ jup365_19900101_20500101.bsp"
+  case). Hash check is now keyed by the *resolved local path* (joined
+  through `locations.abs_path`); a missing row is a hard skip with
+  warning, not a silent pass.
+- **Nondeterministic resolution on filename collisions (C3)** —
+  multiple active `kernels` rows for the same filename are now
+  deterministic (`ORDER BY mission, scanned_at DESC, abs_path`) and
+  `find_by_filename` / `_find_by_path_suffix` filter out superseded
+  rows. `verify` reports `AMBIGUOUS` when more than one active row
+  remains.
+- **Post-download hash trust (C4)** — `register_file` previously
+  re-hashed the file from disk to determine its canonical sha256.
+  Hashes are now computed during the download itself and plumbed
+  through as `expected_hash`, closing the TOCTOU window and making
+  manifest-based verification trivial to add.
+
+#### DB integrity (P0)
+
+- **Race-detection acted upon (C5)** — `_check_state_changed` raised
+  the new `ConcurrentModificationError` (was previously discarded).
+  `reacquire()` retries DuckDB lock contention with exponential
+  backoff (~6.4 s max).
+- **Transactional multi-statement ops (C6)** — `BEGIN/COMMIT/ROLLBACK`
+  around `register_file` (multi-INSERT, possibly two `kernels` rows)
+  and `index_metakernel` (DELETE + N INSERTs). A crash mid-op no
+  longer leaves orphans.
+- **Atomic file mutations (C7)** — new `_atomic_write_text` (in
+  `parser.py`) and `_atomic_symlink` (in `db.py`) use the
+  tmp+`os.replace` pattern. Applied to `write_metakernel`,
+  `rewrite_metakernel`, and `_create_metakernel_alias`. A SPICE
+  `furnsh` running concurrently with a rewrite no longer sees a
+  zero-byte or torn `.tm` file.
+
+#### Cross-platform (P0)
+
+- **Case-insensitive filename queries (C8)** — `find_by_filename`,
+  `_find_by_path_suffix`, `register_file`'s Issue-11 detection, and
+  `verify_metakernel`'s kernel lookup all use `LOWER(filename) =
+  LOWER(?)`. APFS/HFS+/NTFS and ext4 now behave the same — kernel
+  identity is the sha256 anyway; casing is metadata.
+
+#### Recoverable bugs (P1)
+
+- **Dangling-symlink repair (H1)** — `_link_existing_kernels` no
+  longer skips when `is_symlink()` is true but the target is gone.
+  Dangling links are unlinked and recreated; `get` reports honest
+  success.
+- **Robust metakernel parser (H2)** — replaced the regex-based parser
+  with a line-aware lexer that honors SPICE's `''` quote escape,
+  balanced parens (including `)` inside strings), and accepts
+  `\begindata`/`\begintext` markers only at line starts. Previously,
+  a `\begindata` example *inside a comment block*, or any `)` in a
+  kernel path, silently truncated `KERNELS_TO_LOAD` — leading SPICE
+  to load fewer kernels than declared, with no error.
+- **PATH_SYMBOL prefix collision (H3)** — substitutions now sort by
+  descending symbol length, so `$KERNELS_DATA` is no longer clobbered
+  by an earlier `$KERNELS` replacement. Applied in
+  `ParsedMetakernel.resolve`, `kernel_relpaths`, and
+  `resolve_kernel_urls`.
+- **Mission case canonicalisation (H4)** — every storage boundary
+  (`register_file`, `scan_directory`, `add_mission`, `get_metakernel`)
+  funnels through `canonicalize_mission()`. Opening a legacy DB with
+  e.g. both `JUICE` and `juice` rows emits a startup warning so the
+  user knows to merge — we deliberately don't auto-merge because data
+  ops should be explicit.
+- **`task_info` keyed by full dest path (H5)** — a `.tm` with the same
+  basename under two different relpaths no longer scrambles
+  `source_url` attribution between the two `locations` rows.
+- **Datetime-based staleness comparison (H6)** — the staleness check
+  parses both timestamps to `datetime` instead of comparing 16-char
+  string prefixes; sub-minute precision restored, and the previous
+  off-by-one-minute spurious warnings are gone.
+
+### Changed
+
+- **`guess_mission` results are canonicalised** — path-derived
+  candidates are run through `canonicalize_mission()` before return.
+  E.g. `/data/generic_kernels/kernels/...` now yields
+  `GENERIC_KERNELS` instead of the verbatim `generic_kernels`.
+- **`download_kernel` return type** — now `(Path, sha256_hex)` instead
+  of just `Path`. Internal callers updated; external code that
+  depended on the path-only return needs to unpack.
+- **`download_kernels_parallel` return type** — now
+  `(list[(Path, sha256)], warnings)` instead of
+  `(list[Path], warnings)`.
+- **Test suite expanded from 161 to 216 tests.**
+
 ## [0.12.0] - 2026-05-11
 
 ### Added
@@ -343,6 +484,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.13.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.10.1...v0.11.0
