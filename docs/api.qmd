@@ -309,7 +309,9 @@ db.list_metakernels(mission: str | None = None) -> list[dict]
 
 List all tracked metakernels, optionally filtered by mission. Each entry includes the number of kernel entries.
 
-Prints a summary table and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`.
+Alias rows (symlink metakernels created by `get`) inherit their target's entry count and content fingerprint, so the listing reads consistently — both rows show the same kernel count and one of them is annotated `↳ identical to <target>`.
+
+Prints a summary table and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, plus `identical_to` (set when another row has the same content fingerprint).
 
 #### `info_metakernel`
 

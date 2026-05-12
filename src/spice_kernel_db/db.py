@@ -2024,6 +2024,28 @@ class KernelDB:
             key = "\n".join(row[0] for row in entry_rows)
             fingerprints[r["mk_path"]] = hashlib.md5(key.encode()).hexdigest()
 
+        # Alias rows (created by `_create_metakernel_alias` since v0.12.0)
+        # live in `metakernel_registry` at the SYMLINK path but their
+        # `metakernel_entries` are stored under the resolved target path.
+        # That makes the COUNT(*) join above return 0 for aliases. Detect
+        # them here and inherit the target's count + fingerprint so the
+        # listing reads consistently — "↳ identical to <target>".
+        known_paths = {r["mk_path"]: r for r in results}
+        for r in results:
+            p = Path(r["mk_path"])
+            if not p.is_symlink():
+                continue
+            try:
+                target = str(p.resolve())
+            except OSError:
+                continue
+            tgt_r = known_paths.get(target)
+            if tgt_r is None or target == r["mk_path"]:
+                continue
+            if r["n_kernels"] == 0:
+                r["n_kernels"] = tgt_r["n_kernels"]
+            fingerprints[r["mk_path"]] = fingerprints[target]
+
         # Group by fingerprint: map fingerprint -> list of filenames
         from collections import defaultdict
         fp_groups: dict[str, list[str]] = defaultdict(list)

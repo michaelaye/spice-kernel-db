@@ -4400,3 +4400,102 @@ class TestPruneOrphanSymlinks:
                     "prune", "--metakernels", "--orphan-symlinks",
                 ])
         assert exc.value.code == 1
+
+
+class TestListMetakernelsAliasAware:
+    """v0.13.4 fix: alias rows in metakernel_registry pointed at a
+    symlink path; their entries were stored under the resolved target
+    path. `list_metakernels` JOINed by mk_path and got n_kernels=0,
+    and the identical-to detection (which fingerprints the entry list)
+    missed them too. Now aliases inherit their target's count +
+    fingerprint."""
+
+    def test_symlink_alias_inherits_target_count(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        mk_dir = tmp_path / "mk"
+        mk_dir.mkdir()
+
+        # Real metakernel with two entries
+        real = mk_dir / "juice_crema_5_2_v470_20260415_001.tm"
+        real.write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              KERNELS_TO_LOAD = (
+                '$KERNELS/lsk/naif0012.tls'
+                '$KERNELS/spk/de432.bsp'
+              )
+            \\begintext
+        """))
+        db.index_metakernel(real)
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'JUICE', 'https://e/x.tm', ?, "
+            "current_timestamp)",
+            [str(real.resolve()), real.name],
+        )
+
+        # Alias symlink — no entries written for this path
+        alias = mk_dir / "juice_crema_5_2.tm"
+        alias.symlink_to(real.name)  # relative symlink
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'JUICE', 'https://e/y.tm', ?, "
+            "current_timestamp)",
+            [str(alias), alias.name],
+        )
+
+        rows = db.list_metakernels(mission="JUICE")
+        by_name = {r["filename"]: r for r in rows}
+
+        # Both rows now report the same count
+        assert by_name["juice_crema_5_2.tm"]["n_kernels"] == 2
+        assert by_name["juice_crema_5_2_v470_20260415_001.tm"]["n_kernels"] == 2
+
+        # They're detected as identical content (one of them has
+        # identical_to pointing at the other; either direction is fine).
+        identicals = [
+            (n, r.get("identical_to"))
+            for n, r in by_name.items()
+            if r.get("identical_to")
+        ]
+        assert len(identicals) == 1, (
+            f"exactly one row should be flagged identical; got {identicals!r}"
+        )
+        db.close()
+
+    def test_non_alias_symlink_unaffected(self, tmp_path):
+        """A symlink pointing at something NOT in the registry should not
+        crash the alias-detection branch."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        mk_dir = tmp_path / "mk"
+        mk_dir.mkdir()
+
+        real = mk_dir / "real.tm"
+        real.write_text("\\begindata\nKERNELS_TO_LOAD=('a.tls')\n\\begintext\n")
+        db.index_metakernel(real)
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'JUICE', NULL, ?, "
+            "current_timestamp)",
+            [str(real.resolve()), real.name],
+        )
+
+        # Symlink to a file that is NOT registered
+        external = tmp_path / "external_target.tm"
+        external.write_text("ignored")
+        alias = mk_dir / "alias.tm"
+        alias.symlink_to(external)
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, "
+            "filename, acquired_at) VALUES (?, 'JUICE', NULL, ?, "
+            "current_timestamp)",
+            [str(alias), alias.name],
+        )
+
+        rows = db.list_metakernels(mission="JUICE")
+        by_name = {r["filename"]: r for r in rows}
+        # Alias keeps its own (zero) count — no target in registry to inherit
+        assert by_name["alias.tm"]["n_kernels"] == 0
+        # Real is unaffected
+        assert by_name["real.tm"]["n_kernels"] == 1
+        db.close()

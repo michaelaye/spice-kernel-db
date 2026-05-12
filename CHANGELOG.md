@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.4] - 2026-05-12
+
+### Fixed
+
+- **`mk` / `list_metakernels` shows correct kernel count for alias rows.**
+  When `get` creates an alias symlink (e.g. `juice_crema_5_2.tm` →
+  `juice_crema_5_2_v470_20260415_001.tm`), the alias's `metakernel_registry`
+  row used the symlink path, but `metakernel_entries` were stored under
+  the resolved target path. The JOIN in `list_metakernels` returned
+  `n_kernels=0` for the alias, and the content-fingerprint identity
+  detection missed the relationship.
+
+  `list_metakernels` now detects alias rows (mk_path is a symlink to
+  another known mk_path) and inherits the target's entry count and
+  fingerprint, so both rows display the same kernel count and one is
+  annotated `↳ identical to <target>` — consistent with how real-file
+  duplicates already render.
+
+### Tests
+
+- 230 → 232: `TestListMetakernelsAliasAware` (covers the symlink-alias
+  inheritance and confirms non-alias symlinks aren't affected).
+
 ## [0.13.3] - 2026-05-12
 
 ### Added
@@ -568,6 +591,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.13.4]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.0...v0.13.1
