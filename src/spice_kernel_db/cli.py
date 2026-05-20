@@ -299,6 +299,11 @@ quick start:
         "--show-versioned", action="store_true",
         help="Show versioned snapshots under each metakernel",
     )
+    p_browse.add_argument(
+        "--sort", dest="sort_by", choices=["name", "date"], default="name",
+        help="Row ordering: 'name' (default, alphabetical) or 'date' "
+             "(by latest remote date ascending — newest at the bottom)",
+    )
 
     # --- mission ---
     p_mission = sub.add_parser(
@@ -714,6 +719,7 @@ quick start:
                         url,
                         mission=args.mission,
                         show_versioned=args.show_versioned,
+                        sort_by=args.sort_by,
                     )
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
@@ -746,6 +752,7 @@ quick start:
                         m["mk_dir_url"],
                         mission=m["name"],
                         show_versioned=args.show_versioned,
+                        sort_by=args.sort_by,
                     )
                 else:
                     table = Table(title="Select a mission to browse")
@@ -773,6 +780,7 @@ quick start:
                                 m["mk_dir_url"],
                                 mission=m["name"],
                                 show_versioned=args.show_versioned,
+                                sort_by=args.sort_by,
                             )
                             return
                     except ValueError:

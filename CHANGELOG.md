@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-05-20
+
+### Added
+
+- **`browse --sort {name,date}`.** New flag on `spice-kernel-db browse`
+  to order rows by the **Latest** remote modification date instead of
+  alphabetically. `--sort date` sorts ascending, so the most recently
+  updated metakernels appear at the bottom of the table — convenient
+  for spotting fresh updates without scrolling. Mirrored on
+  `KernelDB.browse_remote_metakernels(..., sort_by=...)`.
+
 ## [0.14.0] - 2026-05-13
 
 ### Added
@@ -667,6 +678,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.15.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.2...v0.13.3

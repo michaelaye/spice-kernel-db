@@ -2203,6 +2203,7 @@ class KernelDB:
         mk_dir_url: str,
         mission: str | None = None,
         show_versioned: bool = False,
+        sort_by: str = "name",
     ) -> list[dict]:
         """Scan a remote NAIF mk/ directory and show available metakernels.
 
@@ -2215,6 +2216,10 @@ class KernelDB:
             mission: Override auto-detected mission name.
             show_versioned: If True, list versioned snapshots under each
                 base metakernel.
+            sort_by: Row ordering. ``"name"`` (default) sorts alphabetically
+                by base name. ``"date"`` sorts by latest remote modification
+                date ascending, so the most recently updated metakernels
+                appear at the bottom of the table.
 
         Returns:
             List of dicts with keys: ``base_name``, ``n_versions``,
@@ -2278,6 +2283,13 @@ class KernelDB:
                 "current": current,
                 "versioned": versioned,
             })
+
+        if sort_by == "date":
+            results.sort(key=lambda r: (r["latest_date"], r["base_name"]))
+        elif sort_by != "name":
+            raise ValueError(
+                f"sort_by must be 'name' or 'date', got {sort_by!r}"
+            )
 
         # Print table
         n_unique = len(results)

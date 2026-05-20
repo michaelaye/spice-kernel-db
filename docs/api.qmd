@@ -330,10 +330,13 @@ db.browse_remote_metakernels(
     mk_dir_url: str,
     mission: str | None = None,
     show_versioned: bool = False,
+    sort_by: str = "name",
 ) -> list[dict]
 ```
 
 Scan a remote NAIF `mk/` directory and show available metakernels. Groups entries by base name (stripping version tags like `_v461_20251127_001`), counts versioned snapshots, and checks which base metakernels have been locally acquired.
+
+`sort_by` controls row ordering: `"name"` (default) sorts alphabetically; `"date"` sorts by latest remote modification date ascending, so the most recently updated metakernels appear at the bottom.
 
 Prints a summary table and returns a list of dicts with keys: `base_name`, `n_versions`, `latest_date`, `is_local`, `filenames`.
 

@@ -357,6 +357,7 @@ spice-kernel-db browse [url] [--mission NAME]
 | `url` | URL to a mission's `mk/` directory, or a mission name (omit to list known directories) |
 | `--mission` | Override auto-detected mission name |
 | `--show-versioned` | Show versioned snapshots under each metakernel |
+| `--sort {name,date}` | Row ordering. `name` (default) is alphabetical. `date` sorts by the **Latest** remote modification date ascending, so the most recently updated metakernels appear at the bottom — handy for spotting fresh updates at a glance. |
 
 ```bash
 # List all known mk/ directories (from missions table and previously acquired metakernels)
@@ -368,6 +369,9 @@ spice-kernel-db browse bepi    # matches BEPICOLOMBO
 
 # Browse by full URL
 spice-kernel-db browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
+
+# Sort by latest remote modification date (newest at the bottom)
+spice-kernel-db browse JUICE --sort date
 ```
 
 **Without a URL**, lists configured missions from the `missions` table:
