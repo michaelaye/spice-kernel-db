@@ -22,7 +22,7 @@ website:
       - href: cli.qmd
         text: CLI Reference
       - href: tutorial-mission-discovery.ipynb
-        text: Tutorial: NASA missions
+        text: "Tutorial: NASA missions"
       - href: api.qmd
         text: API Reference
       - href: troubleshooting.qmd
