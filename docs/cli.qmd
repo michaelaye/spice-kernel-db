@@ -313,6 +313,15 @@ When a filename is given instead of a URL, the tool looks up the mk/ directory U
 
 The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
 
+**Archived metakernels.** ESA (and some NAIF directories) rotate older versioned metakernels into a `former_versions/` subdirectory once a newer version supersedes them. When a filename you request is not present in the live `mk/` listing, `get` automatically retries under `former_versions/<filename>` before failing. The kernels referenced by the older metakernel are typically still available at their original locations (ESA in particular is purely additive — old kernel files are kept alongside new ones), so the rest of the download proceeds unchanged:
+
+```bash
+# A 2022-era versioned metakernel — auto-fetched from former_versions/
+spice-kernel-db get juice_crema_2_0_ops_v200.tm --mission JUICE
+```
+
+If both the live and `former_versions/` URLs 404, the error names both attempted URLs so you can diagnose archive layouts that don't follow this convention.
+
 
 ## `update`
 
@@ -358,6 +367,8 @@ spice-kernel-db browse [url] [--mission NAME]
 | `--mission` | Override auto-detected mission name |
 | `--show-versioned` | Show versioned snapshots under each metakernel |
 | `--sort {name,date}` | Row ordering. `name` (default) is alphabetical. `date` sorts by the **Latest** remote modification date ascending, so the most recently updated metakernels appear at the bottom — handy for spotting fresh updates at a glance. |
+| `--archived` | Browse the mission's `former_versions/` subdirectory instead of the live `mk/` listing. Each archived metakernel is rendered on its own row (no base-name aggregation) because archived snapshots are distinct historical files, not byte-identical copies of a current file. |
+| `--filter SUBSTRING` | Case-insensitive substring filter on metakernel filenames. Particularly useful when combined with `--archived` to narrow listings of a thousand-plus entries. |
 
 ```bash
 # List all known mk/ directories (from missions table and previously acquired metakernels)
@@ -372,6 +383,13 @@ spice-kernel-db browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
 
 # Sort by latest remote modification date (newest at the bottom)
 spice-kernel-db browse JUICE --sort date
+
+# Browse only the archived versions in former_versions/
+spice-kernel-db browse JUICE --archived
+spice-kernel-db browse JUICE --archived --sort date  # combine with sort
+
+# Narrow a large listing with a substring filter (combinable with --archived)
+spice-kernel-db browse JUICE --archived --filter crema_5_1
 ```
 
 **Without a URL**, lists configured missions from the `missions` table:

@@ -22,6 +22,7 @@ from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
 from spice_kernel_db import planetarypy_bridge, registry
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
+    _head_ok,
     check_mk_availability,
     discover_mk_url,
     list_remote_metakernels,
@@ -304,6 +305,18 @@ quick start:
         help="Row ordering: 'name' (default, alphabetical) or 'date' "
              "(by latest remote date ascending — newest at the bottom)",
     )
+    p_browse.add_argument(
+        "--archived", action="store_true",
+        help="Browse the mission's former_versions/ subdirectory instead "
+             "of the live mk/ listing — for older versioned metakernels "
+             "that have been superseded",
+    )
+    p_browse.add_argument(
+        "--filter", dest="filter", metavar="SUBSTRING", default=None,
+        help="Case-insensitive substring filter on metakernel filenames "
+             "(useful for narrowing large archive listings, e.g. "
+             "--filter crema_5_1)",
+    )
 
     # --- mission ---
     p_mission = sub.add_parser(
@@ -459,6 +472,13 @@ quick start:
     read_only_commands = {"stats", "duplicates", "check", "list", "resolve",
                           "metakernels", "mk", "coverage"}
     read_only = args.command in read_only_commands
+    # `mk --remove` is a destructive variant of an otherwise read-only
+    # command; it needs a writable connection.
+    if (
+        args.command in ("mk", "metakernels")
+        and getattr(args, "remove", False)
+    ):
+        read_only = False
     db = KernelDB(args.db, read_only=read_only)
     try:
         if args.command == "scan":
@@ -654,7 +674,26 @@ quick start:
                 )
                 if not mk_dir_url:
                     return
-                url = mk_dir_url + url
+                filename = url
+                live_url = mk_dir_url + filename
+                archive_url = mk_dir_url + "former_versions/" + filename
+                if _head_ok(live_url):
+                    url = live_url
+                elif _head_ok(archive_url):
+                    console.print(
+                        f"[dim]Not in mk/, using archived copy: "
+                        f"former_versions/{filename}[/dim]"
+                    )
+                    url = archive_url
+                else:
+                    print(
+                        f"Metakernel '{filename}' not found.\n"
+                        f"  Tried:\n"
+                        f"    {live_url}\n"
+                        f"    {archive_url}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 args.mission = args.mission or mission_name
             db.get_metakernel(
                 url,
@@ -700,6 +739,9 @@ quick start:
                 sys.exit(1)
 
         elif args.command == "browse":
+            def _maybe_archive(u: str) -> str:
+                return u.rstrip("/") + "/former_versions/" if args.archived else u
+
             if args.url:
                 url = args.url
                 # If not a URL, treat as a mission name
@@ -714,12 +756,15 @@ quick start:
                         return
                     url = m["mk_dir_url"]
                     args.mission = args.mission or m["name"]
+                url = _maybe_archive(url)
                 try:
                     db.browse_remote_metakernels(
                         url,
                         mission=args.mission,
                         show_versioned=args.show_versioned,
                         sort_by=args.sort_by,
+                        filter=args.filter,
+                        archived=args.archived,
                     )
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
@@ -749,10 +794,12 @@ quick start:
                         f"Browsing [bold]{m['name']}[/bold]...\n"
                     )
                     db.browse_remote_metakernels(
-                        m["mk_dir_url"],
+                        _maybe_archive(m["mk_dir_url"]),
                         mission=m["name"],
                         show_versioned=args.show_versioned,
                         sort_by=args.sort_by,
+                        filter=args.filter,
+                        archived=args.archived,
                     )
                 else:
                     table = Table(title="Select a mission to browse")
@@ -777,10 +824,12 @@ quick start:
                                 f"\nBrowsing [bold]{m['name']}[/bold]...\n"
                             )
                             db.browse_remote_metakernels(
-                                m["mk_dir_url"],
+                                _maybe_archive(m["mk_dir_url"]),
                                 mission=m["name"],
                                 show_versioned=args.show_versioned,
                                 sort_by=args.sort_by,
+                                filter=args.filter,
+                                archived=args.archived,
                             )
                             return
                     except ValueError:

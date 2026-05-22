@@ -1587,6 +1587,12 @@ class KernelDB:
         abs_path_values = [
             str((mk_dir / v).resolve()) for v in parsed.path_values
         ]
+        # Snapshot prior state so we can roll back cleanly if the user
+        # declines the kernel download. Without this, declining left a
+        # registry row + indexed entries + on-disk .tm but no kernels,
+        # which `mk` then listed as if the metakernel were ready.
+        mk_existed_before = mk_dest.exists()
+        prior_mk_content = mk_dest.read_bytes() if mk_existed_before else None
         write_metakernel(parsed, mk_dest, path_values=abs_path_values)
         self.index_metakernel(mk_dest)
         self.con.execute("""
@@ -1726,22 +1732,59 @@ class KernelDB:
                 f"({_format_size(download_bytes)})? [y/N]: "
             ).strip().lower()
             if answer not in ("y", "yes"):
-                console.print("[dim]Aborted.[/dim]")
-                n_linked = 0
-                if mission_dedup and found_indices:
-                    n_linked = self._link_existing_kernels(
-                        found_indices, filenames, relpaths, download_dir, mission,
+                # Roll back the speculative registration. Without this,
+                # the metakernel would appear in `mk` as if it were
+                # ready, even though its required kernels were never
+                # downloaded.
+                if mk_existed_before and prior_mk_content is not None:
+                    # Update flow: restore the previous .tm content and
+                    # re-index its entries. The registry row was
+                    # REPLACEd in place; values are essentially the
+                    # same modulo the acquired_at timestamp, which we
+                    # accept as harmless drift.
+                    mk_dest.write_bytes(prior_mk_content)
+                    self.index_metakernel(mk_dest)
+                else:
+                    # First-time get: full rollback.
+                    self.con.execute(
+                        "DELETE FROM metakernel_entries WHERE mk_path = ?",
+                        [str(mk_dest)],
                     )
-                lines = []
-                if n_linked:
-                    lines.append(f"Linked {n_linked} existing kernels into download tree.")
-                lines.append(f"Metakernel ready: [bold]{mk_dest}[/bold]")
-                console.print(Panel("\n".join(lines), title="Result"))
+                    self.con.execute(
+                        "DELETE FROM metakernel_registry WHERE mk_path = ?",
+                        [str(mk_dest)],
+                    )
+                    if alias_filename and alias_filename != mk_filename:
+                        alias_path = mk_dir / alias_filename
+                        if alias_path.is_symlink():
+                            try:
+                                alias_path.unlink()
+                            except OSError:
+                                pass
+                        self.con.execute(
+                            "DELETE FROM metakernel_registry "
+                            "WHERE mk_path = ?",
+                            [str(alias_path)],
+                        )
+                    try:
+                        mk_dest.unlink()
+                    except OSError:
+                        pass
+                console.print(Panel(
+                    f"Acquisition aborted — [bold]{n_missing}[/bold] "
+                    f"kernel(s) would have been downloaded.\n"
+                    f"Nothing was added to the database.\n\n"
+                    f"Re-run [bold]spice-kernel-db get[/bold] when "
+                    f"you're ready to download.",
+                    title="Aborted",
+                    border_style="yellow",
+                ))
                 return {
                     "found": found_indices,
                     "missing": missing_indices,
                     "downloaded": [],
                     "warnings": [],
+                    "aborted": True,
                 }
 
         # 7. Build download list, skipping files with correct size AND hash (Issue 2)
@@ -2204,6 +2247,8 @@ class KernelDB:
         mission: str | None = None,
         show_versioned: bool = False,
         sort_by: str = "name",
+        filter: str | None = None,
+        archived: bool = False,
     ) -> list[dict]:
         """Scan a remote NAIF mk/ directory and show available metakernels.
 
@@ -2220,20 +2265,38 @@ class KernelDB:
                 by base name. ``"date"`` sorts by latest remote modification
                 date ascending, so the most recently updated metakernels
                 appear at the bottom of the table.
+            filter: Case-insensitive substring filter applied to entry
+                filenames before grouping. Useful for narrowing large
+                listings (e.g. the ~1400-entry JUICE ``former_versions/``).
+            archived: If True, treat each entry as a distinct historical
+                metakernel — no base-name aggregation. Use for browsing
+                ``former_versions/`` directories where every file is an
+                independent frozen-in-time metakernel, not a snapshot of
+                a current file.
 
         Returns:
             List of dicts with keys: ``base_name``, ``n_versions``,
             ``latest_date``, ``is_local``, ``filenames``.
         """
         entries = list_remote_metakernels(mk_dir_url)
+        if filter:
+            needle = filter.lower()
+            entries = [e for e in entries if needle in e.filename.lower()]
         if mission is None:
             mission = guess_mission(mk_dir_url)
 
-        # Group by base_name
+        # Group by base_name. In archive mode each entry is its own group
+        # — archived snapshots are not byte-identical named copies of a
+        # current file (the original premise behind grouping), so the
+        # base-name aggregation does not apply.
         from collections import defaultdict
         groups: dict[str, list] = defaultdict(list)
-        for entry in entries:
-            groups[entry.base_name].append(entry)
+        if archived:
+            for entry in entries:
+                groups[entry.filename].append(entry)
+        else:
+            for entry in entries:
+                groups[entry.base_name].append(entry)
 
         # Get locally acquired metakernels with acquired_at for this mission
         if mission:
@@ -2267,12 +2330,19 @@ class KernelDB:
                     else:
                         local_status = "yes"
                     break
-            # Separate current (no version tag) from versioned snapshots
-            current = [e for e in group if e.version_tag is None]
-            versioned = sorted(
-                [e for e in group if e.version_tag is not None],
-                key=lambda e: e.filename,
-            )
+            # Separate current (no version tag) from versioned snapshots.
+            # In archive mode, each entry is its own standalone metakernel
+            # (not a snapshot of a current file), so treat the lone group
+            # member as "current" regardless of its version tag.
+            if archived:
+                current = list(group)
+                versioned: list = []
+            else:
+                current = [e for e in group if e.version_tag is None]
+                versioned = sorted(
+                    [e for e in group if e.version_tag is not None],
+                    key=lambda e: e.filename,
+                )
             results.append({
                 "base_name": base_name,
                 "n_versions": len(group),
@@ -2296,12 +2366,8 @@ class KernelDB:
         n_files = len(entries)
         n_local = sum(1 for r in results if r["is_local"])
 
-        # Shorten URL for display
-        display_url = mk_dir_url
-        if len(display_url) > 60:
-            display_url = display_url[:57] + "..."
-
-        print(f"\nRemote metakernels: {mission} ({display_url})\n")
+        print(f"\nRemote metakernels: {mission}")
+        print(f"  {mk_dir_url}\n")
 
         if not results:
             print("  No .tm files found.")
@@ -2312,7 +2378,21 @@ class KernelDB:
                 return "[yellow]outdated[/yellow]"
             return status
 
-        if show_versioned:
+        if archived:
+            # Archive view: one row per file, no grouping. Each archived
+            # metakernel is a distinct historical artifact, not a copy of
+            # something else, so the "Versions" column doesn't apply.
+            table = Table()
+            table.add_column("Metakernel")
+            table.add_column("Date")
+            table.add_column("Size", justify="right")
+            table.add_column("Local")
+            for r in results:
+                ls = _local_str(r["local_status"])
+                e = r["current"][0]
+                table.add_row(e.filename, e.date, e.size, ls)
+            console.print(table)
+        elif show_versioned:
             # Expanded view: show each file, versioned snapshots indented
             table = Table()
             table.add_column("Metakernel")
@@ -2348,13 +2428,19 @@ class KernelDB:
                 )
             console.print(table)
 
-        print(
-            f"\n  Total: {n_unique} unique | {n_files} files"
-            f" | {n_local} locally acquired"
-        )
+        if archived:
+            print(
+                f"\n  Total: {n_files} archived files"
+                f" | {n_local} locally acquired"
+            )
+        else:
+            print(
+                f"\n  Total: {n_unique} unique | {n_files} files"
+                f" | {n_local} locally acquired"
+            )
         if has_outdated:
             print("  Run 'spice-kernel-db get <name>' to update outdated metakernels.")
-        if not show_versioned and n_files > n_unique:
+        if not archived and not show_versioned and n_files > n_unique:
             print("  Use --show-versioned to also show the identical but versioned snapshot metakernels.")
         print()
 

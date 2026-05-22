@@ -700,6 +700,22 @@ class TestGetMetakernel:
         mock_resp.__exit__ = MagicMock(return_value=False)
         return mock_resp
 
+    @staticmethod
+    def _mock_download_kernels_parallel(
+        tasks, max_workers=8, total_bytes=None, expected_hashes=None,
+    ):
+        """Stand-in for the real downloader. Writes fake content to each
+        dest path and returns ``(dest, sha256)`` pairs that match the
+        on-disk bytes, so ``register_file``'s expected-hash check passes."""
+        results: list[tuple[Path, str]] = []
+        for url, dest, fname in tasks:
+            dest_path = Path(dest)
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            content = f"FAKE KERNEL {fname}".encode()
+            dest_path.write_bytes(content)
+            results.append((dest_path, hashlib.sha256(content).hexdigest()))
+        return results, []
+
     def test_get_shows_table(self, populated_db, tmp_path, capsys):
         """get_metakernel prints a table even when we skip download."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
@@ -721,14 +737,15 @@ class TestGetMetakernel:
         assert "missing" in captured.out
 
     def test_get_saves_tm_file(self, populated_db, tmp_path):
-        """get_metakernel saves the .tm file to disk."""
+        """get_metakernel saves the .tm file to disk on confirmed download."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
             populated_db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
             )
 
         mk_file = dl_dir / "JUICE" / "mk" / "test.tm"
@@ -736,14 +753,15 @@ class TestGetMetakernel:
         assert "KERNELS_TO_LOAD" in mk_file.read_text()
 
     def test_get_registers_in_metakernel_registry(self, populated_db, tmp_path):
-        """get_metakernel registers the .tm in metakernel_registry."""
+        """get_metakernel registers the .tm in metakernel_registry on confirm."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
             populated_db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
             )
 
         row = populated_db.con.execute(
@@ -755,14 +773,15 @@ class TestGetMetakernel:
         assert row[2] == "test.tm"
 
     def test_get_indexes_metakernel_entries(self, populated_db, tmp_path):
-        """get_metakernel populates metakernel_entries."""
+        """get_metakernel populates metakernel_entries on confirmed download."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
             populated_db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
             )
 
         mk_dest = str(dl_dir / "JUICE" / "mk" / "test.tm")
@@ -778,9 +797,10 @@ class TestGetMetakernel:
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
             populated_db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
             )
 
         # naif0012.tls is "in db" — should have a symlink at the expected path
@@ -795,9 +815,10 @@ class TestGetMetakernel:
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
             populated_db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
             )
 
         captured = capsys.readouterr()
@@ -828,9 +849,10 @@ class TestGetMetakernel:
         dl_dir = tmp_path / "downloads"
 
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
             populated_db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
                 alias_filename="test.tm",
             )
 
@@ -850,6 +872,72 @@ class TestGetMetakernel:
             "test_v470_20260415_001.tm", preferred_mission="JUICE"
         )
         assert path == str(versioned)
+
+    def test_decline_rolls_back_first_time_get(self, populated_db, tmp_path):
+        """When the user declines a first-time download, the partial
+        registration must be rolled back: no .tm on disk, no row in
+        metakernel_registry, no entries in metakernel_entries. Without
+        this, `mk` would list a metakernel whose dependencies were
+        never downloaded — exactly the bug this prevents."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            result = populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        assert result.get("aborted") is True
+        # No .tm on disk.
+        mk_dest = dl_dir / "JUICE" / "mk" / "test.tm"
+        assert not mk_dest.exists()
+        # No registry row.
+        row = populated_db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_registry WHERE filename = 'test.tm'"
+        ).fetchone()[0]
+        assert row == 0
+        # No metakernel_entries rows.
+        n_entries = populated_db.con.execute(
+            "SELECT COUNT(*) FROM metakernel_entries WHERE mk_path = ?",
+            [str(mk_dest)],
+        ).fetchone()[0]
+        assert n_entries == 0
+
+    def test_decline_preserves_prior_on_update(self, populated_db, tmp_path):
+        """When the user declines while *updating* a metakernel that
+        already exists locally, the prior on-disk content is restored
+        and the registry row is preserved (the prior valid acquisition
+        must not be clobbered)."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        dl_dir = tmp_path / "downloads"
+
+        # Initial successful get
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._mock_urlopen), \
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
+            )
+        mk_dest = dl_dir / "JUICE" / "mk" / "test.tm"
+        prior_content = mk_dest.read_bytes()
+
+        # Now re-get and decline. The prior content + registry row stay.
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+            )
+
+        assert mk_dest.exists()
+        assert mk_dest.read_bytes() == prior_content
+        row = populated_db.con.execute(
+            "SELECT mission FROM metakernel_registry WHERE filename = 'test.tm'"
+        ).fetchone()
+        assert row is not None and row[0] == "JUICE"
 
     def test_get_alias_refuses_to_clobber_regular_file(
         self, populated_db, tmp_path
@@ -888,9 +976,10 @@ class TestMetakernelListingInfo:
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         dl_dir = tmp_path / "downloads"
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
-             patch("builtins.input", return_value="n"):
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=TestGetMetakernel._mock_download_kernels_parallel):
             db.get_metakernel(
-                mk_url, download_dir=dl_dir, mission="JUICE", yes=False,
+                mk_url, download_dir=dl_dir, mission="JUICE", yes=True,
             )
         return dl_dir
 
@@ -925,15 +1014,18 @@ class TestMetakernelListingInfo:
         assert len(populated_db.list_metakernels(mission="NONEXISTENT")) == 0
 
     def test_info_metakernel(self, populated_db, tmp_path, capsys):
-        """info_metakernel shows detailed per-kernel info."""
+        """info_metakernel shows detailed per-kernel info. After a
+        successful `get`, every referenced kernel is in the DB — n_missing
+        is 0. (Pre-fix, this test asserted n_missing=1 because the prior
+        decline-path bug left the .tm registered without downloads.)"""
         self._get_test_mk(populated_db, tmp_path)
         result = populated_db.info_metakernel("test.tm")
         assert result is not None
         assert result["filename"] == "test.tm"
         assert result["mission"] == "JUICE"
         assert result["n_kernels"] == 2
-        assert result["n_in_db"] == 1
-        assert result["n_missing"] == 1
+        assert result["n_in_db"] == 2
+        assert result["n_missing"] == 0
 
         # Check per-kernel details
         kernel_names = [k["filename"] for k in result["kernels"]]
@@ -942,7 +1034,6 @@ class TestMetakernelListingInfo:
 
         captured = capsys.readouterr()
         assert "in db" in captured.out
-        assert "missing" in captured.out
 
     def test_list_metakernels_identical_content(self, populated_db, tmp_path, capsys):
         """list_metakernels flags metakernels with identical kernel lists."""
@@ -2594,6 +2685,43 @@ class TestRemoveMetakernel:
         assert db.remove_metakernel("juice_ops") is True
         assert db.con.execute("SELECT COUNT(*) FROM metakernel_registry").fetchone()[0] == 0
         db.close()
+
+    def test_cli_mk_remove_opens_db_writable(self, tmp_path):
+        """Regression: `mk --remove <name>` must open the DB read-write.
+        `mk` (without --remove) is in the read-only command set; the
+        destructive variant has to flip that or DuckDB raises
+        InvalidInputException on the DELETE."""
+        from spice_kernel_db.cli import main
+
+        db_path = tmp_path / "test.duckdb"
+        db = KernelDB(db_path)
+        db.con.execute("""
+            INSERT INTO metakernel_registry
+            (mk_path, filename, mission, source_url, acquired_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, [
+            "/tmp/stale.tm", "stale.tm", "JUICE",
+            "https://example.com/stale.tm",
+        ])
+        db.close()
+
+        cfg = Config(
+            db_path=str(db_path),
+            kernel_dir=str(tmp_path / "kernels"),
+        )
+        with patch("spice_kernel_db.config.load_config", return_value=cfg):
+            main(["mk", "--remove", "stale.tm"])
+
+        # Row is gone — and we did not raise.
+        db = KernelDB(db_path, read_only=True)
+        try:
+            n = db.con.execute(
+                "SELECT COUNT(*) FROM metakernel_registry "
+                "WHERE filename = 'stale.tm'"
+            ).fetchone()[0]
+        finally:
+            db.close()
+        assert n == 0
 
 
 class TestPrune:
@@ -4781,3 +4909,288 @@ class TestMissionAddNoninteractive:
         assert m is not None
         assert m["mk_dir_url"] == "https://x/M/data/spice/mk/"
         assert m["dedup"] is False  # --no-dedup honored
+
+
+class TestGetArchiveFallback:
+    """`get <filename> --mission JUICE` should transparently retry under
+    `former_versions/` when the live mk/ URL 404s. The headline use case is
+    reproducing analyses from an older versioned metakernel (e.g.
+    `juice_crema_2_0_ops_v200.tm`) that ESA has since rotated out of the
+    live listing."""
+
+    MK_DIR = "https://example.com/JUICE/kernels/mk/"
+
+    def _setup(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission("JUICE", "https://example.com/", self.MK_DIR, True)
+        db.close()
+        return Config(
+            db_path=str(tmp_path / "test.duckdb"),
+            kernel_dir=str(tmp_path / "kernels"),
+        )
+
+    def test_archive_fallback_when_live_404s(self, tmp_path):
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        captured: dict = {}
+
+        def fake_head_ok(url, timeout=5.0):
+            return "former_versions/" in url
+
+        def fake_get_metakernel(self, url, **kwargs):
+            captured["url"] = url
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.cli._head_ok", side_effect=fake_head_ok), \
+             patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
+            main(["get", "juice_crema_2_0_ops_v200.tm", "--mission", "JUICE"])
+
+        assert captured["url"] == (
+            self.MK_DIR + "former_versions/juice_crema_2_0_ops_v200.tm"
+        )
+
+    def test_live_url_takes_priority(self, tmp_path):
+        """When the live URL HEADs 200, archive must not be probed and the
+        live URL is the one passed downstream."""
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        captured: dict = {}
+        head_calls: list[str] = []
+
+        def fake_head_ok(url, timeout=5.0):
+            head_calls.append(url)
+            return "former_versions/" not in url  # live yes, archive irrelevant
+
+        def fake_get_metakernel(self, url, **kwargs):
+            captured["url"] = url
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.cli._head_ok", side_effect=fake_head_ok), \
+             patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
+            main(["get", "juice_ops.tm", "--mission", "JUICE"])
+
+        assert captured["url"] == self.MK_DIR + "juice_ops.tm"
+        # Archive URL must NOT have been probed on the happy path
+        assert all("former_versions/" not in u for u in head_calls)
+
+    def test_both_fail_emits_error_with_both_urls(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        called = {"get": False}
+
+        def fake_get_metakernel(self, url, **kwargs):
+            called["get"] = True
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.cli._head_ok", return_value=False), \
+             patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
+            with pytest.raises(SystemExit) as exc:
+                main(["get", "juice_nonexistent.tm", "--mission", "JUICE"])
+
+        assert exc.value.code == 1
+        assert called["get"] is False  # never reached get_metakernel
+        err = capsys.readouterr().err
+        assert self.MK_DIR + "juice_nonexistent.tm" in err
+        assert self.MK_DIR + "former_versions/juice_nonexistent.tm" in err
+
+
+class TestBrowseArchivedFlag:
+    """`browse --archived` should target the mission's former_versions/
+    subdirectory instead of the live mk/ listing — for discovering older
+    versioned metakernels that have been superseded."""
+
+    MK_DIR = "https://example.com/JUICE/kernels/mk/"
+
+    def _setup(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission("JUICE", "https://example.com/", self.MK_DIR, True)
+        db.close()
+        return Config(
+            db_path=str(tmp_path / "test.duckdb"),
+            kernel_dir=str(tmp_path / "kernels"),
+        )
+
+    def test_archived_flag_appends_former_versions(self, tmp_path):
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        captured: dict = {}
+
+        def fake_browse(self, url, **kwargs):
+            captured["url"] = url
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch.object(KernelDB, "browse_remote_metakernels", fake_browse):
+            main(["browse", "JUICE", "--archived"])
+
+        assert captured["url"] == self.MK_DIR + "former_versions/"
+
+    def test_without_archived_flag_browses_live_mk(self, tmp_path):
+        """Regression: default behavior must not change."""
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        captured: dict = {}
+
+        def fake_browse(self, url, **kwargs):
+            captured["url"] = url
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch.object(KernelDB, "browse_remote_metakernels", fake_browse):
+            main(["browse", "JUICE"])
+
+        assert captured["url"] == self.MK_DIR
+
+    def test_archived_flag_with_explicit_url(self, tmp_path):
+        """When the user passes a full URL, --archived still suffixes
+        former_versions/ — letting them browse an archive without a
+        configured mission."""
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        captured: dict = {}
+
+        def fake_browse(self, url, **kwargs):
+            captured["url"] = url
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch.object(KernelDB, "browse_remote_metakernels", fake_browse):
+            main(["browse", self.MK_DIR, "--archived"])
+
+        assert captured["url"] == self.MK_DIR + "former_versions/"
+
+
+class TestBrowseFilter:
+    """`browse --filter SUBSTRING` narrows large listings via a case-
+    insensitive substring match on entry filenames."""
+
+    def test_filter_narrows_entries_case_insensitive(self, tmp_path):
+        """browse_remote_metakernels filters entries whose filename
+        contains the (lowercased) substring."""
+        from spice_kernel_db.remote import RemoteMetakernel
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        try:
+            entries = [
+                RemoteMetakernel(
+                    filename=f, url="http://x/" + f, date="2024-01-01 00:00",
+                    size="1K", base_name=f, version_tag=None,
+                )
+                for f in [
+                    "juice_ops_v200.tm",
+                    "juice_crema_5_1.tm",
+                    "JUICE_CREMA_5_2.tm",  # uppercase — should match too
+                    "rosetta_ops_v01.tm",
+                ]
+            ]
+            with patch(
+                "spice_kernel_db.db.list_remote_metakernels",
+                return_value=entries,
+            ):
+                results = db.browse_remote_metakernels(
+                    "http://x/mk/", mission="JUICE", filter="crema",
+                )
+            names = sorted(r["base_name"] for r in results)
+            assert names == ["JUICE_CREMA_5_2.tm", "juice_crema_5_1.tm"]
+        finally:
+            db.close()
+
+    def test_filter_none_returns_all(self, tmp_path):
+        """No filter (None) is a no-op — regression guard."""
+        from spice_kernel_db.remote import RemoteMetakernel
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        try:
+            entries = [
+                RemoteMetakernel(
+                    filename=f, url="http://x/" + f, date="2024-01-01 00:00",
+                    size="1K", base_name=f, version_tag=None,
+                )
+                for f in ["a.tm", "b.tm", "c.tm"]
+            ]
+            with patch(
+                "spice_kernel_db.db.list_remote_metakernels",
+                return_value=entries,
+            ):
+                results = db.browse_remote_metakernels(
+                    "http://x/mk/", mission="X",
+                )
+            assert len(results) == 3
+        finally:
+            db.close()
+
+
+class TestBrowseArchivedRendering:
+    """In archive mode every entry is a distinct historical file (not a
+    snapshot of a current one). Grouping by base name would conflate
+    semantically different files into one row, so archive mode must
+    render flat — one row per file — regardless of version tag."""
+
+    def _entries(self):
+        from spice_kernel_db.remote import RemoteMetakernel
+        # All three share base_name "juice_plan.tm" because the version
+        # tag is stripped — but they are NOT identical files. In archive
+        # mode they must not be grouped.
+        return [
+            RemoteMetakernel(
+                filename=f"juice_plan_{tag}.tm",
+                url=f"http://x/juice_plan_{tag}.tm",
+                date=date, size="9K",
+                base_name="juice_plan.tm",
+                version_tag=tag,
+            )
+            for tag, date in [
+                ("v410_20221110_001", "2022-11-10 00:00"),
+                ("v423_20230309_001", "2023-03-09 16:30"),
+                ("v470_20260521_003", "2026-05-21 14:33"),
+            ]
+        ]
+
+    def test_archived_mode_disables_base_name_grouping(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        try:
+            with patch(
+                "spice_kernel_db.db.list_remote_metakernels",
+                return_value=self._entries(),
+            ):
+                results = db.browse_remote_metakernels(
+                    "http://x/mk/former_versions/",
+                    mission="JUICE",
+                    archived=True,
+                )
+            # 3 entries → 3 distinct results (one per file), not 1 group.
+            assert len(results) == 3
+            names = sorted(r["base_name"] for r in results)
+            assert names == [
+                "juice_plan_v410_20221110_001.tm",
+                "juice_plan_v423_20230309_001.tm",
+                "juice_plan_v470_20260521_003.tm",
+            ]
+            # In archive mode each entry is its own "current" — n_versions=1.
+            assert all(r["n_versions"] == 1 for r in results)
+            assert all(len(r["current"]) == 1 for r in results)
+        finally:
+            db.close()
+
+    def test_non_archived_still_groups_by_base_name(self, tmp_path):
+        """Regression: live mk/ view keeps its base-name grouping
+        (where versioned snapshots ARE byte-identical to the current
+        file and should be hidden from the compact view)."""
+        db = KernelDB(tmp_path / "test.duckdb")
+        try:
+            with patch(
+                "spice_kernel_db.db.list_remote_metakernels",
+                return_value=self._entries(),
+            ):
+                results = db.browse_remote_metakernels(
+                    "http://x/mk/", mission="JUICE",
+                )
+            # All 3 entries share base_name "juice_plan.tm" → 1 group.
+            assert len(results) == 1
+            assert results[0]["base_name"] == "juice_plan.tm"
+            assert results[0]["n_versions"] == 3
+        finally:
+            db.close()

@@ -145,6 +145,14 @@ spice-kernel-db mk --remove juice_crema_5_1_…_v462_20260223_001.tm
 
 Then re-acquire the current version with `browse` → `get`.
 
+**Want to re-fetch the *archived* version instead?** `get` automatically retries under `former_versions/` when the live `mk/` URL 404s, so:
+
+```bash
+spice-kernel-db get juice_crema_5_1_…_v462_20260223_001.tm --mission JUICE
+```
+
+…will transparently download the archived metakernel and its referenced kernels (which ESA keeps live in `kernels/{spk,fk,…}/` even after a `.tm` is rotated out). This is the recommended way to reproduce analyses against a specific older metakernel version.
+
 
 ## `verify` reports unexpected statuses
 

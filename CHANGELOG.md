@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-05-22
+
+### Added
+
+- **`get` auto-falls back to `former_versions/`.** When a metakernel
+  filename is not present in the live `mk/` directory (HEAD 404),
+  `spice-kernel-db get <name> --mission <M>` now transparently retries
+  under `mk/former_versions/<name>` before failing. This makes older
+  versioned metakernels (e.g. `juice_crema_2_0_ops_v200.tm`) directly
+  reproducible without manual URL construction. Verified against JUICE
+  on ESA's spiftp archive (where referenced kernels remain live in
+  `kernels/{spk,fk,lsk,…}/` even after the `.tm` is rotated). On
+  missions whose archive layout does not use `former_versions/`, the
+  fallback costs one extra HEAD on the already-failing path.
+
+- **`browse --archived`.** New flag on `spice-kernel-db browse` that
+  targets the mission's `former_versions/` subdirectory instead of the
+  live `mk/` listing. Useful for discovering which superseded versioned
+  metakernels are still available for re-acquisition via `get`. Combines
+  with `--sort` and `--show-versioned`.
+
+- **`browse --filter SUBSTRING`.** Case-insensitive substring filter on
+  metakernel filenames. Particularly useful with `--archived` for cutting
+  a thousand-plus entry archive listing down to the handful of base
+  names you care about. Mirrored on
+  `KernelDB.browse_remote_metakernels(..., filter=...)`.
+
+### Fixed
+
+- **`mk --remove` no longer crashes with a read-only DB error.**
+  `mk` is in the read-only command set so it can share the DB with a
+  running writer, but the destructive `--remove` variant was inheriting
+  the same mode and DuckDB raised `InvalidInputException` on the
+  underlying `DELETE`. The CLI now flips to read-write when `--remove`
+  is supplied.
+
+- **Declining a `get` no longer leaves a half-acquired metakernel in
+  the registry.** Previously, answering "no" at the
+  `Download N missing kernels?` prompt still wrote the `.tm` to disk,
+  inserted a row into `metakernel_registry`, indexed entries into
+  `metakernel_entries`, and even printed "Metakernel ready" — even
+  though the required kernels were never downloaded. The next
+  `spice-kernel-db mk` listing then showed the broken metakernel with
+  no indication that its dependencies were missing. The decline path
+  now rolls back cleanly: a first-time `get` ends in no on-disk file
+  and no DB rows; an `update`-style re-get of an existing metakernel
+  preserves the prior content and registry row. The result dict
+  carries `"aborted": True` so programmatic callers can detect it.
+
+### Changed
+
+- **`browse` header layout.** The URL of the directory being scanned now
+  prints on its own indented line beneath the mission label instead of
+  being squashed in parentheses and truncated to 60 chars. Full URLs
+  remain readable regardless of terminal width.
+
+- **`browse --archived` rendering is now flat.** Each archived
+  metakernel is shown on its own row with its actual date and size,
+  instead of being aggregated under a synthetic base-name row with a
+  "Versions" count. The base-name grouping was originally designed for
+  the live `mk/` view, where versioned snapshots are byte-identical
+  named copies of the current file and the aggregation is honest. In
+  the archive directory none of those preconditions hold — every file
+  is a distinct historical state — so flat rendering reflects reality.
+  Footer now reads `Total: N archived files | M locally acquired`.
+
 ## [0.15.0] - 2026-05-20
 
 ### Added
@@ -678,6 +744,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.16.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.3...v0.13.4
