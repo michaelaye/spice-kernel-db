@@ -150,18 +150,30 @@ Prints the resolved path to stdout and any warnings to stderr.
 Show every filename a deduplicated kernel is known under. Content-addressed deduplication stores one physical file per unique content hash under a single canonical name; other filenames with identical content become aliases. This command lets you follow that trail from any name (or hash) back to the content and to all the sibling names it shares.
 
 ```bash
-spice-kernel-db aliases <name-or-hash>
+spice-kernel-db aliases [name-or-hash]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `name_or_hash` | A kernel filename (canonical *or* alias) or a SHA-256 (full or ≥6-char prefix) |
+| `name_or_hash` | A kernel filename (canonical *or* alias) or a SHA-256 (full or ≥6-char prefix). **Omit to pick from the deduplicated kernels interactively.** |
 
 ```bash
+# Direct lookup
 spice-kernel-db aliases bc_mpo_hga_scm_20220101_20230101_s20221229_v01.bc
+
+# No argument → interactive picker over deduplicated kernels
+spice-kernel-db aliases
 ```
 
-Prints the content hash, canonical name, kernel type and size, the full list of alias filenames (with the canonical one marked), and every on-disk location. Exits non-zero if the name or hash is unknown.
+Prints the content hash, canonical name, kernel type and size, the full list of alias filenames (with the canonical one marked), and every on-disk location. With no argument it lists every deduplicated kernel (those whose content is shared under more than one filename), sorted most-aliased first, and lets you pick one. Exits non-zero if a supplied name or hash is unknown.
+
+The `get`, `update`, and `list` commands also annotate any deduplicated kernel inline with `(+N aliases)` in their kernel tables, pointing you at `aliases <name>` for the full trail.
+
+::: {.callout-tip}
+## Discover upstream aliases without deduplicating
+
+Because identity is content-based, `aliases` surfaces names an *archive* (e.g. ESA) publishes the same bytes under — revealing, for example, that a `_v13` kernel is byte-identical to `_v12`, or that two trajectory scenarios reuse the same solar-array/antenna kernels. This is a pure discovery feature: it needs **no `dedup` step** (symlinking duplicates is a separate, optional space-saving operation). See [Discovering archive-side aliases](design.qmd#content-identity).
+:::
 
 
 ## `verify`

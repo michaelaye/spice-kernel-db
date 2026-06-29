@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-06-29
+
+### Added
+
+- **`(+N aliases)` annotation in kernel listings.** The `get`, `update`, and
+  `list` commands now flag any deduplicated kernel inline in their kernel
+  tables — e.g. `bc_mpo_hga_zero_…v02.bc (+7 aliases)` — so it's obvious at a
+  glance which kernels share content with other filenames, with `aliases
+  <name>` for the full trail. New `KernelDB.alias_counts_by_name()` helper
+  (maps each filename to how many other names its content is known under).
+  Names are annotated, never substituted, so you always see the name you
+  asked for.
+
+- **`aliases` with no argument is interactive.** Run `spice-kernel-db aliases`
+  with no name/hash to get a picker over the deduplicated kernels (sorted
+  most-aliased first), matching the interactive-selection behaviour of the
+  other commands.
+
+- **`aliases` on-disk listing shows a `Kind` column** — `real file`,
+  `→ <target>` for a symlink, or `missing` — so you can see the physical
+  layout of a deduplicated kernel (e.g. which copy a `dedup` run turned into a
+  symlink). Long paths now fold instead of being ellipsized.
+
+### Fixed
+
+- **`aliases` now appears in the root `--help` listing** (under *inspect*). The
+  command shipped in 0.17.0 but was missing from the curated command list.
+
+### Changed
+
+- **`kernel_aliases` is now a view derived from `locations`** instead of the
+  standalone table introduced in 0.17.0. Alias names are exactly the distinct
+  on-disk basenames each content hash appears under, so the trail is always
+  consistent with the physical index with no separate bookkeeping or backfill
+  (a name is, by design, forgotten once its file is pruned). The `aliases`
+  command and `KernelDB.aliases()` are unchanged; existing databases convert
+  the old table to the view automatically on first open.
+
 ## [0.17.0] - 2026-06-29
 
 ### Added
@@ -778,6 +816,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.18.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.14.0...v0.15.0

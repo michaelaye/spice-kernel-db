@@ -98,6 +98,18 @@ When you `scan_directory`, each file is hashed. If the hash already exists in `k
 
 This means `find_by_filename("jup365_19900101_20500101.bsp")` will find all locations whose path ends with that filename, even though the canonical name in the `kernels` table is `jup365.bsp`. The lookup checks both the `kernels.filename` column and the actual filename in `locations.abs_path`.
 
+### Discovering archive-side aliases
+
+Because identity is content-based and recorded at scan/`get` time, the database accumulates — for free, without modifying any files — a map of **which filenames an archive publishes the same bytes under**. The `aliases` command (and `KernelDB.aliases()`) surface it:
+
+```bash
+spice-kernel-db aliases juice_ops_v13.tf
+```
+
+reveals that ESA ships `juice_ops_v13.tf` and `juice_ops_v12.tf` with byte-identical content — i.e. `v13` did not actually change anything in `v12` — or that two trajectory scenarios (`crema_5_1` and its `a3_2` variant) reuse exactly the same solar-array, antenna, or frame kernels. That is a genuine insight into how an archive is structured, and it requires **no deduplication step**: physically replacing the duplicates with symlinks (`dedup`) is an optional, separate space-saving operation.
+
+`kernel_aliases` is a view over `locations` — `SELECT DISTINCT sha256, basename(abs_path)` — so the alias set is always exactly the distinct names each content hash has been observed under, with nothing extra to maintain.
+
 
 ## Mission-aware resolution {#mission-aware-resolution}
 

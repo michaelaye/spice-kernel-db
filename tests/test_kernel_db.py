@@ -5332,26 +5332,31 @@ class TestAliasTrail:
         finally:
             db.close()
 
-    def test_records_pre_resolve_symlink_name(self, tmp_path):
-        """Registering a symlink path records the *link* name, not just the
-        resolved target name (the trail the old code discarded)."""
+    def test_view_reflects_locations_live(self, tmp_path):
+        """`kernel_aliases` is a view over `locations`: a second on-disk name
+        for the same content appears as an alias with no extra bookkeeping."""
         db = self._make_db(tmp_path)
         try:
-            real = tmp_path / "canonical.bc"
-            real.write_bytes(b"shared bytes")
-            link = tmp_path / "alias_name.bc"
-            link.symlink_to(real)
-            db.register_file(link, mission="TEST")
-            info = db.aliases("alias_name.bc")
+            p = tmp_path / "k.bc"
+            p.write_bytes(b"x")
+            db.register_file(p, mission="TEST")
+            sha = db.con.execute("SELECT sha256 FROM kernels").fetchone()[0]
+            # Same content recorded at a second path with a different name.
+            db.con.execute(
+                "INSERT OR IGNORE INTO locations VALUES "
+                "(?, ?, 'TEST', NULL, current_timestamp)",
+                [sha, str(tmp_path / "k_alias.bc")],
+            )
+            info = db.aliases("k_alias.bc")
             assert info is not None
-            assert "alias_name.bc" in info["aliases"]
+            assert {"k.bc", "k_alias.bc"} <= set(info["aliases"])
         finally:
             db.close()
 
-    def test_backfill_seeds_from_existing_kernels(self, tmp_path):
-        """A DB whose kernel_aliases table is created later is backfilled
-        from the canonical names already in `kernels`."""
-        dbpath = tmp_path / "backfill.duckdb"
+    def test_view_replaces_legacy_table_on_open(self, tmp_path):
+        """A DB carrying a 0.17.0-style kernel_aliases *table* is converted to
+        the view on the next writable open, without data loss."""
+        dbpath = tmp_path / "legacy.duckdb"
         db = KernelDB(dbpath)
         try:
             p = tmp_path / "k.bc"
@@ -5359,15 +5364,115 @@ class TestAliasTrail:
             db.register_file(p, mission="TEST")
         finally:
             db.close()
-        # Simulate a pre-B database: drop the alias table, reopen → migrate.
+        # Recreate the old table form in its place.
         import duckdb
         con = duckdb.connect(str(dbpath))
-        con.execute("DROP TABLE kernel_aliases")
+        con.execute("DROP VIEW IF EXISTS kernel_aliases")
+        con.execute(
+            "CREATE TABLE kernel_aliases "
+            "(sha256 VARCHAR, filename VARCHAR, PRIMARY KEY (sha256, filename))"
+        )
         con.close()
-        db2 = KernelDB(dbpath)
+        db2 = KernelDB(dbpath)  # reopen → table dropped, view defined
         try:
+            kind = db2.con.execute(
+                "SELECT table_type FROM information_schema.tables "
+                "WHERE table_name = 'kernel_aliases'"
+            ).fetchone()[0]
+            assert kind == "VIEW"
             info = db2.aliases("k.bc")
-            assert info is not None
-            assert "k.bc" in info["aliases"]
+            assert info is not None and "k.bc" in info["aliases"]
         finally:
             db2.close()
+
+
+class TestAliasAnnotation:
+    """alias_counts_by_name powers the (+N aliases) listing annotation."""
+
+    def test_counts_extra_names_per_filename(self, tmp_path):
+        db = KernelDB(tmp_path / "ann.duckdb")
+        try:
+            # two identical-content files -> shared content, +1 alias each
+            for n in ("predict.bc", "measured.bc"):
+                p = tmp_path / n
+                p.write_bytes(b"SAME BYTES")
+                db.register_file(p, mission="TEST")
+            # a unique file -> no aliases
+            u = tmp_path / "unique.bc"
+            u.write_bytes(b"DIFFERENT BYTES")
+            db.register_file(u, mission="TEST")
+
+            extra = db.alias_counts_by_name(
+                ["predict.bc", "measured.bc", "unique.bc", "absent.bc"]
+            )
+            assert extra == {"predict.bc": 1, "measured.bc": 1}
+            # unique and absent names are omitted (no alias / not in DB)
+            assert "unique.bc" not in extra
+            assert "absent.bc" not in extra
+            assert db.alias_counts_by_name([]) == {}
+        finally:
+            db.close()
+
+
+class TestAliasPicker:
+    """`aliases` with no argument offers an interactive picker over the
+    deduplicated kernels."""
+
+    def test_picker_lists_dedup_and_returns_choice(self, tmp_path, monkeypatch):
+        from spice_kernel_db.cli import _interactive_pick_deduplicated_kernel
+        db = KernelDB(tmp_path / "p.duckdb")
+        try:
+            for n in ("a.bc", "b.bc"):           # identical content -> dedup
+                p = tmp_path / n
+                p.write_bytes(b"SAME BYTES")
+                db.register_file(p, mission="T")
+            u = tmp_path / "u.bc"                 # unique -> not offered
+            u.write_bytes(b"UNIQUE BYTES")
+            db.register_file(u, mission="T")
+
+            monkeypatch.setattr("builtins.input", lambda *a, **k: "1")
+            picked = _interactive_pick_deduplicated_kernel(db)
+            assert picked in {"a.bc", "b.bc"}
+            # the picked name resolves to a real trail
+            assert db.aliases(picked)["aliases"] == ["a.bc", "b.bc"]
+        finally:
+            db.close()
+
+    def test_picker_returns_none_without_dedup(self, tmp_path, monkeypatch):
+        from spice_kernel_db.cli import _interactive_pick_deduplicated_kernel
+        db = KernelDB(tmp_path / "p2.duckdb")
+        try:
+            u = tmp_path / "only.bc"
+            u.write_bytes(b"X")
+            db.register_file(u, mission="T")
+            monkeypatch.setattr("builtins.input", lambda *a, **k: "1")
+            assert _interactive_pick_deduplicated_kernel(db) is None
+        finally:
+            db.close()
+
+    def test_picker_cancel_returns_none(self, tmp_path, monkeypatch):
+        from spice_kernel_db.cli import _interactive_pick_deduplicated_kernel
+        db = KernelDB(tmp_path / "p3.duckdb")
+        try:
+            for n in ("a.bc", "b.bc"):
+                p = tmp_path / n
+                p.write_bytes(b"SAME")
+                db.register_file(p, mission="T")
+            monkeypatch.setattr("builtins.input", lambda *a, **k: "")  # blank
+            assert _interactive_pick_deduplicated_kernel(db) is None
+        finally:
+            db.close()
+
+
+class TestLocationKind:
+    """`aliases` on-disk listing distinguishes real files from symlinks."""
+
+    def test_real_symlink_and_missing(self, tmp_path):
+        from spice_kernel_db.cli import _location_kind
+        real = tmp_path / "r.bc"
+        real.write_bytes(b"x")
+        link = tmp_path / "l.bc"
+        link.symlink_to(real)
+        assert _location_kind(str(real)) == "real file"
+        assert _location_kind(str(link)) == "→ r.bc"
+        assert _location_kind(str(tmp_path / "gone.bc")) == "missing"

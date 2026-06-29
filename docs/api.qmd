@@ -170,7 +170,7 @@ Returns `None` if nothing matches, otherwise a dict:
 }
 ```
 
-Every distinct filename a content hash is registered under is recorded in the `kernel_aliases` table (`(sha256, filename, first_seen, source_url)`, PK `(sha256, filename)`), populated by `register_file` on each registration — including the as-referenced name when a dedup symlink is registered, so the trail is never lost. The companion `alias_counts(shas: list[str]) -> dict[str, int]` maps each hash to its number of known names.
+Aliases are **derived from `locations`**, not stored separately: the read-only view `kernel_aliases (sha256, filename)` exposes every distinct on-disk basename each content hash appears under, so a deduplicated kernel (identical bytes under several names) is followable with zero extra bookkeeping — the trade-off is that a name is forgotten once its file is pruned. The companion `alias_counts(shas: list[str]) -> dict[str, int]` maps each hash to its number of known names, and `alias_counts_by_name(filenames: list[str]) -> dict[str, int]` maps each filename to how many *other* names its content is known under (used to render the `(+N aliases)` annotation in kernel listings).
 
 ---
 

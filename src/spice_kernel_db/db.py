@@ -275,31 +275,6 @@ class KernelDB:
         cols = {r[1] for r in self.con.execute("PRAGMA table_info(kernels)").fetchall()}
         if "superseded_by" not in cols:
             self.con.execute("ALTER TABLE kernels ADD COLUMN superseded_by VARCHAR")
-        # Dedup alias trail: every distinct filename a content hash has been
-        # registered under, deduped or not. `kernels.filename` keeps only the
-        # first-seen name as canonical; this table preserves the full set so a
-        # deduplicated kernel stays followable (see KernelDB.aliases / the
-        # `aliases` command). Capturing the name happens in register_file.
-        alias_existed = self.con.execute(
-            "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_name = 'kernel_aliases'"
-        ).fetchone()[0] > 0
-        self.con.execute("""
-            CREATE TABLE IF NOT EXISTS kernel_aliases (
-                sha256       VARCHAR NOT NULL,
-                filename     VARCHAR NOT NULL,
-                first_seen   TIMESTAMP DEFAULT current_timestamp,
-                source_url   VARCHAR,
-                PRIMARY KEY (sha256, filename)
-            )
-        """)
-        if not alias_existed:
-            # Backfill for pre-existing DBs: seed the trail from the canonical
-            # names already in `kernels` so `aliases` works immediately.
-            self.con.execute("""
-                INSERT OR IGNORE INTO kernel_aliases (sha256, filename)
-                SELECT sha256, filename FROM kernels WHERE filename IS NOT NULL
-            """)
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS locations (
                 sha256       VARCHAR,
@@ -309,6 +284,23 @@ class KernelDB:
                 scanned_at   TIMESTAMP DEFAULT current_timestamp,
                 PRIMARY KEY (sha256, abs_path)
             )
+        """)
+        # Dedup alias trail: `kernel_aliases` is a VIEW derived from
+        # `locations`, not a stored table — every distinct on-disk basename a
+        # content hash appears under is an alias for it. Deriving it keeps it
+        # always-correct with zero sync; the trade-off (accepted) is that a
+        # name is forgotten once its file is pruned. Drop any real table of
+        # that name left by an earlier version before defining the view.
+        if self.con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'kernel_aliases' AND table_type = 'BASE TABLE'"
+        ).fetchone()[0] > 0:
+            self.con.execute("DROP TABLE kernel_aliases")
+        self.con.execute("""
+            CREATE OR REPLACE VIEW kernel_aliases AS
+            SELECT DISTINCT sha256, regexp_extract(abs_path, '[^/]+$') AS filename
+            FROM locations
+            WHERE regexp_extract(abs_path, '[^/]+$') <> ''
         """)
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS metakernel_entries (
@@ -489,11 +481,6 @@ class KernelDB:
         If ``expected_hash`` is provided, the computed hash is verified
         against it before storing. Raises ValueError on mismatch (Issue 7).
         """
-        # Capture the as-referenced basename *before* resolving — when
-        # `path` is a dedup symlink (alias → canonical), resolve() would
-        # otherwise collapse it to the target's name and the alias would be
-        # lost. This is the name recorded in `kernel_aliases`.
-        requested_name = Path(path).name
         p = Path(path).resolve()
         if not p.is_file():
             raise FileNotFoundError(p)
@@ -603,14 +590,6 @@ class KernelDB:
                     INSERT OR REPLACE INTO locations VALUES
                         (?, ?, ?, ?, current_timestamp)
                 """, [h, str(p), m, source_url])
-                # Record the dedup trail: both the as-referenced name and
-                # the resolved canonical name (deduped to one row each).
-                for alias in {requested_name, fname}:
-                    cur.execute("""
-                        INSERT OR IGNORE INTO kernel_aliases
-                            (sha256, filename, source_url)
-                        VALUES (?, ?, ?)
-                    """, [h, alias, source_url])
                 cur.execute("COMMIT")
             except Exception:
                 cur.execute("ROLLBACK")
@@ -724,6 +703,40 @@ class KernelDB:
             shas,
         ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def alias_counts_by_name(self, filenames: list[str]) -> dict[str, int]:
+        """For each filename, how many *other* names its content is known
+        under (i.e. how deduplicated it is).
+
+        Returns ``{filename: extra_count}`` containing only names whose
+        content has at least one alias (``extra_count >= 1``); names with
+        no aliases — or that aren't in the DB — are omitted. Matching is
+        case-insensitive; keys are returned exactly as passed in. Used to
+        annotate kernel listings with ``(+N aliases)``.
+        """
+        if not filenames:
+            return {}
+        if self.con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'kernel_aliases'"
+        ).fetchone()[0] == 0:
+            return {}
+        lowered = {n.lower(): n for n in filenames}
+        placeholders = ", ".join("?" for _ in lowered)
+        name_to_sha = {
+            r[0]: r[1] for r in self.con.execute(
+                f"SELECT LOWER(filename), sha256 FROM kernel_aliases "
+                f"WHERE LOWER(filename) IN ({placeholders})",
+                list(lowered.keys()),
+            ).fetchall()
+        }
+        counts = self.alias_counts(list(set(name_to_sha.values())))
+        out: dict[str, int] = {}
+        for low, original in lowered.items():
+            sha = name_to_sha.get(low)
+            if sha and counts.get(sha, 0) > 1:
+                out[original] = counts[sha] - 1
+        return out
 
     def scan_directory(
         self,
@@ -1832,6 +1845,11 @@ class KernelDB:
             sizes.get(kernel_urls[i]) or 0 for i in missing_indices
         )
 
+        # (+N aliases): flag in-db kernels whose content is shared under
+        # other filenames, pointing the user at `aliases <name>`.
+        alias_extra = self.alias_counts_by_name(
+            [filenames[i] for i in found_indices]
+        )
         table = Table(title=f"Metakernel: {mk_name} ({total} kernels)")
         table.add_column("Kernel")
         table.add_column("Size", justify="right")
@@ -1842,7 +1860,14 @@ class KernelDB:
             sz_str = _format_size(sz) if sz is not None else "unknown"
             status = "in db" if i in found_indices else "missing"
             style = "green" if status == "in db" else "red"
-            table.add_row(fname, sz_str, f"[{style}]{status}[/{style}]")
+            label = fname
+            n_alias = alias_extra.get(fname)
+            if n_alias:
+                label = (
+                    f"{fname} [cyan](+{n_alias} "
+                    f"alias{'es' if n_alias > 1 else ''})[/cyan]"
+                )
+            table.add_row(label, sz_str, f"[{style}]{status}[/{style}]")
         console.print(table)
 
         console.print(Panel(

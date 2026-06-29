@@ -32,6 +32,7 @@ from spice_kernel_db.remote import (
 )
 
 console = Console()
+err_console = Console(stderr=True)
 
 
 def main(argv: list[str] | None = None):
@@ -54,6 +55,7 @@ commands:
     {_g}coverage{_r}        Check SPK body coverage in a metakernel
     {_g}metakernels{_r}     List tracked metakernels or show details  (alias: {_g}mk{_r})
     {_g}resolve{_r}         Find local path for a kernel filename
+    {_g}aliases{_r}         Show every filename a deduplicated kernel is known under
     {_g}stats{_r}           Show database statistics
     {_g}duplicates{_r}      Report duplicate kernels
 
@@ -228,9 +230,10 @@ quick start:
         epilog="See also: resolve, duplicates",
     )
     p_aliases.add_argument(
-        "name_or_hash",
+        "name_or_hash", nargs="?", default=None,
         help="A kernel filename (canonical or alias) or a SHA-256 "
-             "(full or >=6-char prefix)",
+             "(full or >=6-char prefix). Omit to pick from deduplicated "
+             "kernels interactively.",
     )
 
     # --- metakernels ---
@@ -516,7 +519,7 @@ quick start:
             metakernel = _require_metakernel(args.metakernel, db, args.mission)
             if metakernel is None:
                 return
-            _list_kernels(metakernel, kernel_type=args.kernel_type)
+            _list_kernels(metakernel, db=db, kernel_type=args.kernel_type)
 
         elif args.command == "check":
             metakernel = _require_metakernel(args.metakernel, db, args.mission)
@@ -626,9 +629,14 @@ quick start:
                 print(picked)
 
         elif args.command == "aliases":
-            info = db.aliases(args.name_or_hash)
+            target = args.name_or_hash
+            if target is None:
+                target = _interactive_pick_deduplicated_kernel(db)
+                if target is None:
+                    return
+            info = db.aliases(target)
             if info is None:
-                print(f"Not found: {args.name_or_hash}", file=sys.stderr)
+                print(f"Not found: {target}", file=sys.stderr)
                 print(
                     "  Hint: give a known kernel filename (canonical or alias) "
                     "or a SHA-256 prefix.",
@@ -657,10 +665,15 @@ quick start:
                 tbl.add_row(name, f"[{style}]{marker}[/{style}]")
             _con.print(tbl)
             loc_tbl = _Table(title=f"On disk ({len(info['locations'])} location(s))")
-            loc_tbl.add_column("Path")
+            # overflow="fold" wraps long paths instead of ellipsizing them, so
+            # the distinguishing tail stays visible even in a narrow terminal.
+            loc_tbl.add_column("Path", overflow="fold")
+            loc_tbl.add_column("Kind")
             loc_tbl.add_column("Mission")
             for loc in info["locations"]:
-                loc_tbl.add_row(loc["abs_path"], loc["mission"] or "")
+                kind = _location_kind(loc["abs_path"])
+                kind_disp = "[red]missing[/red]" if kind == "missing" else kind
+                loc_tbl.add_row(loc["abs_path"], kind_disp, loc["mission"] or "")
             _con.print(loc_tbl)
 
         elif args.command in ("metakernels", "mk"):
@@ -1011,8 +1024,12 @@ def _show_default_summary():
         )
 
 
-def _list_kernels(metakernel: str, kernel_type: str | None = None):
-    """Parse a metakernel and list its kernels in a rich table."""
+def _list_kernels(metakernel: str, db=None, kernel_type: str | None = None):
+    """Parse a metakernel and list its kernels in a rich table.
+
+    When ``db`` is given, kernels whose content is deduplicated are
+    annotated with ``(+N aliases)``.
+    """
     from spice_kernel_db import parse_metakernel
 
     parsed = parse_metakernel(metakernel)
@@ -1044,6 +1061,11 @@ def _list_kernels(metakernel: str, kernel_type: str | None = None):
     table.add_column("Type", style="bold")
     table.add_column("Kernel")
 
+    display_names = [
+        k.replace("\\", "/").rsplit("/", 1)[-1] for k in kernels
+    ]
+    alias_extra = db.alias_counts_by_name(display_names) if db is not None else {}
+
     for i, k in enumerate(kernels, 1):
         # Extract type from path
         parts = k.replace("\\", "/").split("/")
@@ -1054,7 +1076,14 @@ def _list_kernels(metakernel: str, kernel_type: str | None = None):
                 break
         # Show just the filename
         filename = parts[-1] if parts else k
-        table.add_row(str(i), ktype, filename)
+        n_alias = alias_extra.get(filename)
+        label = filename
+        if n_alias:
+            label = (
+                f"{filename} [cyan](+{n_alias} "
+                f"alias{'es' if n_alias > 1 else ''})[/cyan]"
+            )
+        table.add_row(str(i), ktype, label)
 
     console.print(table)
 
@@ -1359,6 +1388,75 @@ def _guess_mission_from_url(url: str) -> str | None:
     """Extract mission name from a metakernel URL."""
     from spice_kernel_db.hashing import guess_mission
     return guess_mission(url)
+
+
+def _location_kind(path: str) -> str:
+    """Describe an on-disk location: a real file, a symlink (→ target name),
+    or missing. Used to annotate the `aliases` on-disk listing."""
+    p = Path(path)
+    if p.is_symlink():
+        try:
+            return f"→ {p.readlink().name}"
+        except OSError:
+            return "→ ?"
+    return "real file" if p.exists() else "missing"
+
+
+def _interactive_pick_deduplicated_kernel(db: KernelDB) -> str | None:
+    """Show a picker over deduplicated kernels and return the chosen name.
+
+    Lists kernels whose content is shared under more than one filename
+    (the only ones for which `aliases` shows a non-trivial trail), with an
+    alias count, sorted most-aliased first. Returns the canonical filename
+    of the selection, or ``None`` if there are none or the user cancels.
+    """
+    has_aliases = db.con.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_name = 'kernel_aliases'"
+    ).fetchone()[0] > 0
+    rows = []
+    if has_aliases:
+        rows = db.con.execute("""
+            SELECT k.filename, k.kernel_type, k.size_bytes,
+                   count(a.filename) AS n_names
+            FROM kernels k
+            JOIN kernel_aliases a ON a.sha256 = k.sha256
+            GROUP BY k.sha256, k.filename, k.kernel_type, k.size_bytes
+            HAVING count(a.filename) > 1
+            ORDER BY n_names DESC, LOWER(k.filename)
+        """).fetchall()
+
+    if not rows:
+        err_console.print(
+            "[yellow]No deduplicated kernels in the database — every kernel "
+            "has a unique name.\nPass a name or hash explicitly: "
+            "spice-kernel-db aliases <name|hash>[/yellow]"
+        )
+        return None
+
+    table = Table(title="Deduplicated kernels")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Kernel")
+    table.add_column("Aliases", justify="right")
+    table.add_column("Type")
+    table.add_column("Size", justify="right")
+    for i, (fn, kt, sz, n) in enumerate(rows, 1):
+        size_str = _format_size(sz) if sz else ""
+        table.add_row(str(i), fn, f"+{n - 1}", kt or "", size_str)
+    console.print(table)
+
+    try:
+        raw = input(f"\nSelect kernel [1-{len(rows)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    try:
+        idx = int(raw)
+    except ValueError:
+        return None
+    if 1 <= idx <= len(rows):
+        return rows[idx - 1][0]
+    return None
 
 
 def _interactive_pick_local_metakernel(
