@@ -1,4 +1,4 @@
-{% set version = "0.17.0" %}
+{% set version = "0.18.0" %}
 
 package:
   name: spice-kernel-db
@@ -6,7 +6,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/s/spice-kernel-db/spice_kernel_db-{{ version }}.tar.gz
-  sha256: bcf40a005958e9bb11e46fd7260bfd27d9b844a24ed26226a55e0711ebdffd25
+  sha256: 8ec1e4b9f5477dcb043b227ae75cb2c71ae6e78807eeece0a686aa5c64e84b2f
 
 build:
   entry_points:
