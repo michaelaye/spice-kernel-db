@@ -18,7 +18,7 @@ from spice_kernel_db.config import (
     setup_interactive,
     show_config,
 )
-from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
+from spice_kernel_db.db import KernelDB, MetakernelUnreachableError, _format_size
 from spice_kernel_db import planetarypy_bridge, registry
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
@@ -219,6 +219,18 @@ quick start:
     p_resolve.add_argument(
         "--metakernel", dest="resolve_mk", default=None,
         help="Resolve all kernels in a .tm metakernel",
+    )
+
+    # --- aliases ---
+    p_aliases = sub.add_parser(
+        "aliases",
+        help="Show every filename a deduplicated kernel is known under",
+        epilog="See also: resolve, duplicates",
+    )
+    p_aliases.add_argument(
+        "name_or_hash",
+        help="A kernel filename (canonical or alias) or a SHA-256 "
+             "(full or >=6-char prefix)",
     )
 
     # --- metakernels ---
@@ -470,7 +482,7 @@ quick start:
     # --- All other commands need a DB connection ---
     # Read-only commands can share the DB with a running writer.
     read_only_commands = {"stats", "duplicates", "check", "list", "resolve",
-                          "metakernels", "mk", "coverage"}
+                          "metakernels", "mk", "coverage", "aliases"}
     read_only = args.command in read_only_commands
     # `mk --remove` is a destructive variant of an otherwise read-only
     # command; it needs a writable connection.
@@ -612,6 +624,44 @@ quick start:
                 if picked is None:
                     sys.exit(1)
                 print(picked)
+
+        elif args.command == "aliases":
+            info = db.aliases(args.name_or_hash)
+            if info is None:
+                print(f"Not found: {args.name_or_hash}", file=sys.stderr)
+                print(
+                    "  Hint: give a known kernel filename (canonical or alias) "
+                    "or a SHA-256 prefix.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            from rich.console import Console as _Console
+            from rich.panel import Panel as _Panel
+            from rich.table import Table as _Table
+            _con = _Console()
+            sz = _format_size(info["size_bytes"]) if info["size_bytes"] else "?"
+            header = (
+                f"[bold]{info['sha256'][:16]}…[/bold]  "
+                f"({info['kernel_type'] or '?'}, {sz})"
+            )
+            if info["superseded"]:
+                header += "  [yellow](superseded)[/yellow]"
+            _con.print(_Panel(header, title=info["canonical"] or "kernel"))
+            n = len(info["aliases"])
+            tbl = _Table(title=f"Known under {n} name(s)")
+            tbl.add_column("Filename")
+            tbl.add_column("")
+            for name in info["aliases"]:
+                marker = "canonical" if name == info["canonical"] else "alias"
+                style = "green" if marker == "canonical" else "dim"
+                tbl.add_row(name, f"[{style}]{marker}[/{style}]")
+            _con.print(tbl)
+            loc_tbl = _Table(title=f"On disk ({len(info['locations'])} location(s))")
+            loc_tbl.add_column("Path")
+            loc_tbl.add_column("Mission")
+            for loc in info["locations"]:
+                loc_tbl.add_row(loc["abs_path"], loc["mission"] or "")
+            _con.print(loc_tbl)
 
         elif args.command in ("metakernels", "mk"):
             if args.remove:

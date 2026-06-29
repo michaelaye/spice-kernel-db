@@ -42,6 +42,29 @@ spice-kernel-db scan /path/to/kernels
 By default, the tool skips files that match both the expected size and SHA-256 hash. If files were corrupted or partially downloaded, they'll be re-downloaded. Use `--force` to bypass all skip checks.
 
 
+## `Hash mismatch for <name>: computed X, expected Y` during get/update
+
+This was a download bug, fixed by writing each download to a temporary file and atomically replacing the destination (rather than `open(dest, "wb")`, which followed symlinks).
+
+The cause: content-addressed deduplication leaves a symlink at an alias filename pointing to the shared canonical kernel. When the alias and its target later **diverge upstream** (e.g. a mission's predict CK and a measured CK that were once byte-identical), re-downloading wrote the new bytes straight *through* the symlink into the shared file. Parallel downloads of several aliases pointing at one file would clobber each other, and the corruption surfaced as this hash-mismatch error (the integrity check correctly refusing the bad file).
+
+If you hit this on an older version, recover by removing the affected files and re-fetching:
+
+```bash
+# Re-fetch the metakernels that touch the corrupted kernels
+spice-kernel-db get <metakernel-url> --force
+# Then re-run dedup so identical content is re-linked cleanly
+spice-kernel-db dedup
+```
+
+To inspect which alias filenames share a physical file, look for cross-name symlinks in the kernel tree:
+
+```bash
+find <kernel-dir> -type l -exec sh -c \
+  '[ "$(basename "$1")" != "$(basename "$(readlink "$1")")" ] && echo "$1 -> $(readlink "$1")"' _ {} \;
+```
+
+
 ## Metakernel paths don't work with SpiceyPy
 
 SPICE resolves `PATH_VALUES` relative to the **current working directory**, not the metakernel file location. The tool writes absolute `PATH_VALUES` in saved `.tm` files so they work from any directory.

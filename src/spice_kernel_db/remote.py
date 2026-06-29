@@ -369,14 +369,29 @@ def download_kernel(
     *expected_hash* was given and does not match.
     """
     import hashlib
+    import os
+    import tempfile
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     bytes_written = 0
     hasher = hashlib.sha256()
+    # C9: download to a temp file in the SAME directory, then os.replace()
+    # it into place. A plain open(dest, "wb") FOLLOWS a symlink at `dest`
+    # and overwrites the file it points to — so when dedup has left a
+    # symlink there (alias → canonical kernel), the download silently
+    # corrupts the shared canonical file with this kernel's bytes (only
+    # caught later by register_file's hash check). Writing a fresh temp +
+    # atomic replace swaps the symlink entry itself, so every download
+    # always lands as its own independent real file.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp",
+    )
+    tmp = Path(tmp_name)
     try:
-        with urllib.request.urlopen(url) as resp:
-            content_length = resp.headers.get("Content-Length")
-            expected_size = int(content_length) if content_length else None
-            with open(dest, "wb") as f:
+        with os.fdopen(fd, "wb") as f:
+            with urllib.request.urlopen(url) as resp:
+                content_length = resp.headers.get("Content-Length")
+                expected_size = int(content_length) if content_length else None
                 while True:
                     chunk = resp.read(64 * 1024)
                     if not chunk:
@@ -404,10 +419,15 @@ def download_kernel(
                 f"Hash mismatch on download from {url}: got "
                 f"{actual_hash[:16]}..., expected {expected_hash[:16]}..."
             )
+        # C9: atomic, symlink-safe commit. Replaces a stale dedup symlink
+        # at `dest` with this fresh real file instead of writing through it.
+        os.replace(tmp, dest)
     except Exception:
-        # Clean up partial file on any error
-        if dest.exists():
-            dest.unlink()
+        # Clean up the temp file; leave any pre-existing `dest` untouched.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
         raise
     return dest, actual_hash
 

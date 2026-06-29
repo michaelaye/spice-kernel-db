@@ -5194,3 +5194,180 @@ class TestBrowseArchivedRendering:
             assert results[0]["n_versions"] == 3
         finally:
             db.close()
+
+
+class _FakeResp:
+    """Minimal urlopen() stand-in: yields `data` once, then EOF."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self.headers = {"Content-Length": str(len(data))}
+        self._sent = False
+
+    def read(self, n: int = -1) -> bytes:
+        if self._sent:
+            return b""
+        self._sent = True
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestDownloadWriteSafety:
+    """C9: download_kernel must never write *through* a dedup symlink."""
+
+    def test_download_does_not_corrupt_symlink_target(self, tmp_path):
+        """Downloading to a path that is a dedup symlink replaces the link
+        with a fresh real file and leaves the shared target untouched.
+
+        Mirrors the BepiColombo bug where `hga_scm_*` symlinks pointed at
+        `hga_zero…` and a download wrote the wrong kernel into the shared
+        file (silent corruption, caught only by register_file's hash check).
+        """
+        from spice_kernel_db.remote import download_kernel
+
+        ck = tmp_path / "ck"
+        ck.mkdir()
+        canonical = ck / "canonical.bc"
+        canonical.write_bytes(b"CANONICAL CONTENT A")
+
+        # `dest` is a dedup symlink -> canonical (the dangerous setup).
+        dest = ck / "alias.bc"
+        dest.symlink_to(canonical)
+
+        new_bytes = b"DIFFERENT DOWNLOADED CONTENT B - longer"
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            return_value=_FakeResp(new_bytes),
+        ):
+            out, sha = download_kernel("http://example/alias.bc", dest)
+
+        assert out == dest
+        assert sha == hashlib.sha256(new_bytes).hexdigest()
+        # The shared target must be untouched.
+        assert canonical.read_bytes() == b"CANONICAL CONTENT A"
+        # `dest` is now its OWN real file (not a symlink) with the new bytes.
+        assert not dest.is_symlink()
+        assert dest.read_bytes() == new_bytes
+
+    def test_failed_download_leaves_existing_dest_untouched(self, tmp_path):
+        """A download that fails its completeness check must not clobber a
+        pre-existing file at `dest`, and must leave no temp files behind."""
+        from spice_kernel_db.remote import download_kernel
+
+        ck = tmp_path / "ck"
+        ck.mkdir()
+        dest = ck / "kernel.bc"
+        dest.write_bytes(b"PREEXISTING GOOD BYTES")
+
+        # Claim 999 bytes via Content-Length but deliver fewer -> IOError.
+        resp = _FakeResp(b"short")
+        resp.headers = {"Content-Length": "999"}
+        with patch(
+            "spice_kernel_db.remote.urllib.request.urlopen",
+            return_value=resp,
+        ):
+            with pytest.raises(IOError):
+                download_kernel("http://example/kernel.bc", dest)
+
+        # Existing file survives, and no .tmp litter remains.
+        assert dest.read_bytes() == b"PREEXISTING GOOD BYTES"
+        assert list(ck.glob(".*tmp")) == []
+        assert list(ck.glob("*.tmp")) == []
+
+
+class TestAliasTrail:
+    """Workstream B: deduplicated kernels remain followable by every name."""
+
+    def _make_db(self, tmp_path):
+        return KernelDB(tmp_path / "alias.duckdb")
+
+    def test_identical_content_records_both_names(self, tmp_path):
+        """Two files with identical bytes dedup to one kernels row but both
+        names are retained in kernel_aliases and surfaced by aliases()."""
+        db = self._make_db(tmp_path)
+        try:
+            content = b"DEDUP ME - identical bytes"
+            a = tmp_path / "predict.bc"
+            b = tmp_path / "measured.bc"
+            a.write_bytes(content)
+            b.write_bytes(content)
+            db.register_file(a, mission="TEST")
+            db.register_file(b, mission="TEST")
+
+            # one physical kernel, two alias names
+            n_kernels = db.con.execute(
+                "SELECT count(*) FROM kernels"
+            ).fetchone()[0]
+            assert n_kernels == 1
+            info = db.aliases("measured.bc")
+            assert info is not None
+            assert set(info["aliases"]) == {"predict.bc", "measured.bc"}
+            # both names resolve to the same content
+            assert db.aliases("predict.bc")["sha256"] == info["sha256"]
+        finally:
+            db.close()
+
+    def test_aliases_lookup_by_hash_canonical_and_alias(self, tmp_path):
+        db = self._make_db(tmp_path)
+        try:
+            content = b"trail content"
+            for name in ("first.bc", "second.bc"):
+                p = tmp_path / name
+                p.write_bytes(content)
+                db.register_file(p, mission="TEST")
+            sha = db.con.execute("SELECT sha256 FROM kernels").fetchone()[0]
+
+            by_hash = db.aliases(sha[:12])
+            by_canon = db.aliases("first.bc")
+            by_alias = db.aliases("second.bc")
+            assert by_hash["sha256"] == sha
+            assert by_canon["sha256"] == sha
+            assert by_alias["sha256"] == sha
+            assert db.aliases("nonexistent.bc") is None
+        finally:
+            db.close()
+
+    def test_records_pre_resolve_symlink_name(self, tmp_path):
+        """Registering a symlink path records the *link* name, not just the
+        resolved target name (the trail the old code discarded)."""
+        db = self._make_db(tmp_path)
+        try:
+            real = tmp_path / "canonical.bc"
+            real.write_bytes(b"shared bytes")
+            link = tmp_path / "alias_name.bc"
+            link.symlink_to(real)
+            db.register_file(link, mission="TEST")
+            info = db.aliases("alias_name.bc")
+            assert info is not None
+            assert "alias_name.bc" in info["aliases"]
+        finally:
+            db.close()
+
+    def test_backfill_seeds_from_existing_kernels(self, tmp_path):
+        """A DB whose kernel_aliases table is created later is backfilled
+        from the canonical names already in `kernels`."""
+        dbpath = tmp_path / "backfill.duckdb"
+        db = KernelDB(dbpath)
+        try:
+            p = tmp_path / "k.bc"
+            p.write_bytes(b"x")
+            db.register_file(p, mission="TEST")
+        finally:
+            db.close()
+        # Simulate a pre-B database: drop the alias table, reopen → migrate.
+        import duckdb
+        con = duckdb.connect(str(dbpath))
+        con.execute("DROP TABLE kernel_aliases")
+        con.close()
+        db2 = KernelDB(dbpath)
+        try:
+            info = db2.aliases("k.bc")
+            assert info is not None
+            assert "k.bc" in info["aliases"]
+        finally:
+            db2.close()

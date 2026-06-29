@@ -148,6 +148,30 @@ Returns `(path, warnings)` where `path` is the resolved absolute path (or `None`
 3. Path-suffix match (file on disk registered under different name) → warning
 4. Not found → `(None, [])` + hint to run `scan`
 
+#### `aliases`
+
+```python
+db.aliases(name_or_hash: str) -> dict | None
+```
+
+Follow the deduplication trail for a kernel. `name_or_hash` may be a full or partial (≥6-char) SHA-256, the canonical filename, or *any* alias filename the content has been registered under.
+
+Returns `None` if nothing matches, otherwise a dict:
+
+```python
+{
+    "sha256": str,
+    "canonical": str,          # first-seen filename (kernels.filename)
+    "kernel_type": str,
+    "size_bytes": int,
+    "superseded": bool,
+    "aliases": list[str],      # every filename this content is known under
+    "locations": list[dict],   # {"abs_path", "mission", "source_url"}
+}
+```
+
+Every distinct filename a content hash is registered under is recorded in the `kernel_aliases` table (`(sha256, filename, first_seen, source_url)`, PK `(sha256, filename)`), populated by `register_file` on each registration — including the as-referenced name when a dedup symlink is registered, so the trail is never lost. The companion `alias_counts(shas: list[str]) -> dict[str, int]` maps each hash to its number of known names.
+
 ---
 
 ### Metakernel operations

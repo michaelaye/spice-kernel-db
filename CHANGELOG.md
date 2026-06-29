@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-06-29
+
+### Added
+
+- **`aliases` command — follow the deduplication trail.** Content-addressed
+  dedup stores one physical file per content hash under a single canonical
+  name; other identical-content filenames previously vanished from the
+  database (`register_file` resolved the symlink before recording the
+  location, so only the target's name survived). A new `kernel_aliases`
+  table now records *every* filename a hash has ever been registered under —
+  including the as-referenced name when a dedup symlink is registered — and
+  `spice-kernel-db aliases <name-or-hash>` prints the content hash, canonical
+  name, every alias filename, and all on-disk locations. Look up by canonical
+  name, any alias name, or a SHA-256 prefix. New `KernelDB.aliases()` and
+  `KernelDB.alias_counts()` API methods. Existing databases are backfilled
+  from their canonical kernel names on first open (additive, auto-migrating).
+
+### Fixed
+
+- **Downloads no longer corrupt deduplicated kernels (write-through-symlink
+  bug).** `download_kernel` opened the destination with `open(dest, "wb")`,
+  which follows a symlink. When content-addressed dedup had left a symlink at
+  the destination (an alias name pointing at a shared canonical kernel),
+  downloading a *now-diverged* kernel wrote its bytes straight through the link
+  and overwrote the shared file; several aliases pointing at one inode and
+  downloaded in parallel would clobber each other. The damage surfaced as
+  `ValueError: Hash mismatch for <name>: computed X, expected Y` during
+  `get`/`update` (the integrity check correctly refusing the corrupted file).
+  Downloads now stream to a temp file in the same directory and `os.replace()`
+  it into place atomically, so each download lands as its own independent real
+  file and a stale dedup symlink is replaced rather than written through. A
+  failed download also no longer clobbers a pre-existing file at the
+  destination. See `docs/troubleshooting.qmd` for recovery on older versions.
+
 ## [0.16.0] - 2026-05-22
 
 ### Added
@@ -744,6 +778,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.17.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.13.4...v0.14.0

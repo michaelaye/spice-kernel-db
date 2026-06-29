@@ -275,6 +275,31 @@ class KernelDB:
         cols = {r[1] for r in self.con.execute("PRAGMA table_info(kernels)").fetchall()}
         if "superseded_by" not in cols:
             self.con.execute("ALTER TABLE kernels ADD COLUMN superseded_by VARCHAR")
+        # Dedup alias trail: every distinct filename a content hash has been
+        # registered under, deduped or not. `kernels.filename` keeps only the
+        # first-seen name as canonical; this table preserves the full set so a
+        # deduplicated kernel stays followable (see KernelDB.aliases / the
+        # `aliases` command). Capturing the name happens in register_file.
+        alias_existed = self.con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'kernel_aliases'"
+        ).fetchone()[0] > 0
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS kernel_aliases (
+                sha256       VARCHAR NOT NULL,
+                filename     VARCHAR NOT NULL,
+                first_seen   TIMESTAMP DEFAULT current_timestamp,
+                source_url   VARCHAR,
+                PRIMARY KEY (sha256, filename)
+            )
+        """)
+        if not alias_existed:
+            # Backfill for pre-existing DBs: seed the trail from the canonical
+            # names already in `kernels` so `aliases` works immediately.
+            self.con.execute("""
+                INSERT OR IGNORE INTO kernel_aliases (sha256, filename)
+                SELECT sha256, filename FROM kernels WHERE filename IS NOT NULL
+            """)
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS locations (
                 sha256       VARCHAR,
@@ -464,6 +489,11 @@ class KernelDB:
         If ``expected_hash`` is provided, the computed hash is verified
         against it before storing. Raises ValueError on mismatch (Issue 7).
         """
+        # Capture the as-referenced basename *before* resolving — when
+        # `path` is a dedup symlink (alias → canonical), resolve() would
+        # otherwise collapse it to the target's name and the alias would be
+        # lost. This is the name recorded in `kernel_aliases`.
+        requested_name = Path(path).name
         p = Path(path).resolve()
         if not p.is_file():
             raise FileNotFoundError(p)
@@ -573,11 +603,127 @@ class KernelDB:
                     INSERT OR REPLACE INTO locations VALUES
                         (?, ?, ?, ?, current_timestamp)
                 """, [h, str(p), m, source_url])
+                # Record the dedup trail: both the as-referenced name and
+                # the resolved canonical name (deduped to one row each).
+                for alias in {requested_name, fname}:
+                    cur.execute("""
+                        INSERT OR IGNORE INTO kernel_aliases
+                            (sha256, filename, source_url)
+                        VALUES (?, ?, ?)
+                    """, [h, alias, source_url])
                 cur.execute("COMMIT")
             except Exception:
                 cur.execute("ROLLBACK")
                 raise
         return h
+
+    def aliases(self, name_or_hash: str) -> dict | None:
+        """Follow the dedup trail for a kernel.
+
+        ``name_or_hash`` may be a full or partial SHA-256, the canonical
+        filename, or *any* alias filename the content has been seen under.
+        Returns a dict with the content hash, canonical name, kernel type,
+        size, every known filename (``aliases``), and all on-disk
+        ``locations`` — or ``None`` if nothing matches.
+
+        This exists because content-addressed dedup stores one physical
+        file per hash under a single canonical name; this surfaces every
+        other name that file is known by so the deduplication is followable.
+        """
+        key = name_or_hash.strip()
+        sha: str | None = None
+        # The alias table may be absent on a database that hasn't been
+        # migrated yet (read-only opens skip _init_schema). Degrade to a
+        # canonical-name-only view rather than erroring.
+        has_aliases = self.con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'kernel_aliases'"
+        ).fetchone()[0] > 0
+
+        # Hash (full or >=6-char prefix)?
+        if len(key) >= 6 and all(c in "0123456789abcdef" for c in key.lower()):
+            row = self.con.execute(
+                "SELECT sha256 FROM kernels "
+                "WHERE sha256 = ? OR sha256 LIKE ? || '%'",
+                [key.lower(), key.lower()],
+            ).fetchone()
+            if row:
+                sha = row[0]
+
+        # Filename (alias first, then canonical), case-insensitive.
+        if sha is None:
+            row = None
+            if has_aliases:
+                row = self.con.execute(
+                    "SELECT sha256 FROM kernel_aliases "
+                    "WHERE LOWER(filename) = LOWER(?) LIMIT 1",
+                    [key],
+                ).fetchone()
+            if row is None:
+                row = self.con.execute(
+                    "SELECT sha256 FROM kernels "
+                    "WHERE LOWER(filename) = LOWER(?) LIMIT 1",
+                    [key],
+                ).fetchone()
+            if row:
+                sha = row[0]
+
+        if sha is None:
+            return None
+
+        krow = self.con.execute(
+            "SELECT filename, kernel_type, size_bytes, superseded_by "
+            "FROM kernels WHERE sha256 = ?",
+            [sha],
+        ).fetchone()
+        if has_aliases:
+            names = [
+                r[0] for r in self.con.execute(
+                    "SELECT filename FROM kernel_aliases "
+                    "WHERE sha256 = ? ORDER BY LOWER(filename)",
+                    [sha],
+                ).fetchall()
+            ]
+        else:
+            names = [krow[0]] if krow and krow[0] else []
+        locations = [
+            {"abs_path": r[0], "mission": r[1], "source_url": r[2]}
+            for r in self.con.execute(
+                "SELECT abs_path, mission, source_url FROM locations "
+                "WHERE sha256 = ? ORDER BY abs_path",
+                [sha],
+            ).fetchall()
+        ]
+        return {
+            "sha256": sha,
+            "canonical": krow[0] if krow else None,
+            "kernel_type": krow[1] if krow else None,
+            "size_bytes": krow[2] if krow else None,
+            "superseded": bool(krow[3]) if krow and krow[3] else False,
+            "aliases": names,
+            "locations": locations,
+        }
+
+    def alias_counts(self, shas: list[str]) -> dict[str, int]:
+        """Map each sha256 to how many filenames it's known under.
+
+        Used to annotate listings with ``(+N aliases)`` without a per-row
+        query. Counts > 1 mean the kernel has been deduplicated.
+        """
+        if not shas:
+            return {}
+        if self.con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'kernel_aliases'"
+        ).fetchone()[0] == 0:
+            return {}
+        placeholders = ", ".join("?" for _ in shas)
+        rows = self.con.execute(
+            f"SELECT sha256, count(*) FROM kernel_aliases "
+            f"WHERE sha256 IN ({placeholders}) GROUP BY sha256",
+            shas,
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def scan_directory(
         self,

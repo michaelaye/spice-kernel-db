@@ -145,6 +145,25 @@ spice-kernel-db resolve mro_sc_2024.bc --mission JUICE
 Prints the resolved path to stdout and any warnings to stderr.
 
 
+## `aliases`
+
+Show every filename a deduplicated kernel is known under. Content-addressed deduplication stores one physical file per unique content hash under a single canonical name; other filenames with identical content become aliases. This command lets you follow that trail from any name (or hash) back to the content and to all the sibling names it shares.
+
+```bash
+spice-kernel-db aliases <name-or-hash>
+```
+
+| Option | Description |
+|--------|-------------|
+| `name_or_hash` | A kernel filename (canonical *or* alias) or a SHA-256 (full or ≥6-char prefix) |
+
+```bash
+spice-kernel-db aliases bc_mpo_hga_scm_20220101_20230101_s20221229_v01.bc
+```
+
+Prints the content hash, canonical name, kernel type and size, the full list of alias filenames (with the canonical one marked), and every on-disk location. Exits non-zero if the name or hash is unknown.
+
+
 ## `verify`
 
 Deeply cross-check a metakernel against the database. Every entry in `KERNELS_TO_LOAD` is walked through `PATH_VALUES`/`PATH_SYMBOLS` substitution and validated.
