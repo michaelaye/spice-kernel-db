@@ -330,14 +330,31 @@ Parse a metakernel and store its entries in the `metakernel_entries` table for f
 #### `list_metakernels`
 
 ```python
-db.list_metakernels(mission: str | None = None) -> list[dict]
+db.list_metakernels(mission: str | None = None, show: bool = True) -> list[dict]
 ```
 
 List all tracked metakernels, optionally filtered by mission. Each entry includes the number of kernel entries.
 
 Alias rows (symlink metakernels created by `get`) inherit their target's entry count and content fingerprint, so the listing reads consistently — both rows show the same kernel count and one of them is annotated `↳ identical to <target>`.
 
-Prints a summary table and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, plus `identical_to` (set when another row has the same content fingerprint).
+Prints a summary table (unless `show=False`) and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, plus `identical_to` (set when another row has the same content fingerprint).
+
+#### `metakernels_covering`
+
+```python
+db.metakernels_covering(body_id: int, et: float | None = None, mission: str | None = None) -> list[dict]
+```
+
+Tracked metakernels whose SPK kernels cover a body, for code that needs to pick a metakernel rather than show one. Prints nothing and writes nothing, so it works with `read_only=True`. Coverage is read from the SPK files each metakernel loads (those present on disk); identical aliases are skipped. With `et`, only metakernels covering that ephemeris time are returned; without it, any coverage counts.
+
+Returns the `list_metakernels` rows with an added `intervals` key, the `(et_start, et_end)` windows for the body. Needs SpiceyPy.
+
+```python
+import spiceypy
+db = KernelDB(read_only=True)
+spiceypy.furnsh("naif0012.tls")
+rows = db.metakernels_covering(-121, spiceypy.utc2et("2027-06-01"))   # BepiColombo MPO
+```
 
 #### `info_metakernel`
 

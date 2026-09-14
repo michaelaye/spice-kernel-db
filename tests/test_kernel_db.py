@@ -1014,6 +1014,40 @@ class TestMetakernelListingInfo:
         assert "test.tm" in captured.out
         assert "JUICE" in captured.out
 
+    def test_list_metakernels_show_false_prints_nothing(self, populated_db, tmp_path, capsys):
+        self._get_test_mk(populated_db, tmp_path)
+        capsys.readouterr()
+        results = populated_db.list_metakernels(show=False)
+        assert any(r["filename"] == "test.tm" for r in results)
+        assert capsys.readouterr().out == ""
+
+    def test_metakernels_covering_filters_by_body_and_time(
+        self, populated_db, tmp_path, capsys,
+    ):
+        """Only metakernels whose SPKs cover the body at `et` come back, quietly."""
+        from spice_kernel_db.coverage import CoverageInterval
+
+        self._get_test_mk(populated_db, tmp_path)
+        capsys.readouterr()
+
+        def coverage(path, body_id):
+            if Path(path).name == "new_kernel.bsp" and body_id == -121:
+                return [CoverageInterval(et_start=100.0, et_end=200.0)]
+            return []
+
+        with patch("spice_kernel_db.coverage.spk_coverage", side_effect=coverage):
+            inside = populated_db.metakernels_covering(-121, et=150.0)
+            outside = populated_db.metakernels_covering(-121, et=250.0)
+            any_time = populated_db.metakernels_covering(-121)
+            other_body = populated_db.metakernels_covering(-28)
+
+        assert [r["filename"] for r in inside] == ["test.tm"]
+        assert inside[0]["intervals"] == [(100.0, 200.0)]
+        assert outside == []
+        assert [r["filename"] for r in any_time] == ["test.tm"]
+        assert other_body == []
+        assert capsys.readouterr().out == ""
+
     def test_list_metakernels_filter_by_mission(self, populated_db, tmp_path):
         """list_metakernels filters by mission."""
         self._get_test_mk(populated_db, tmp_path)

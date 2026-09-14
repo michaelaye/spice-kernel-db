@@ -2181,10 +2181,13 @@ class KernelDB:
     # Metakernel listing / info
     # ------------------------------------------------------------------
 
-    def list_metakernels(self, mission: str | None = None) -> list[dict]:
+    def list_metakernels(
+        self, mission: str | None = None, show: bool = True,
+    ) -> list[dict]:
         """List all tracked metakernels, optionally filtered by mission.
 
         The *mission* filter is case-insensitive with prefix matching.
+        With ``show=False`` nothing is printed; the rows are only returned.
         """
         if mission:
             rows = self.con.execute("""
@@ -2219,7 +2222,8 @@ class KernelDB:
             })
 
         if not results:
-            print("No tracked metakernels.")
+            if show:
+                print("No tracked metakernels.")
             return results
 
         # Compute content fingerprints to detect identical metakernels
@@ -2270,6 +2274,9 @@ class KernelDB:
             else:
                 r["identical_to"] = None
 
+        if not show:
+            return results
+
         # Print summary table
         table = Table(title="Tracked metakernels")
         table.add_column("Mission")
@@ -2291,6 +2298,53 @@ class KernelDB:
             )
         console.print(table)
         return results
+
+    def metakernels_covering(
+        self,
+        body_id: int,
+        et: float | None = None,
+        mission: str | None = None,
+    ) -> list[dict]:
+        """Tracked metakernels whose SPK kernels cover a body.
+
+        Prints nothing and writes nothing, so it works on a
+        ``read_only=True`` database. Coverage comes from the SPK files each
+        metakernel loads that exist on disk; identical aliases are skipped.
+
+        Args:
+            body_id: NAIF ID of the body, e.g. ``-121`` for BepiColombo MPO.
+            et: Ephemeris time that must be covered. ``None`` accepts any
+                coverage at all.
+            mission: Optional case-insensitive mission prefix filter.
+
+        Returns:
+            The matching ``list_metakernels`` rows, each with an added
+            ``intervals`` key: the ``(et_start, et_end)`` windows for the body.
+
+        Raises:
+            ImportError: SpiceyPy is not installed.
+        """
+        from spice_kernel_db.coverage import spk_coverage
+
+        matches = []
+        for row in self.list_metakernels(mission=mission, show=False):
+            mk_path = Path(row["mk_path"])
+            if row.get("identical_to") or not mk_path.is_file():
+                continue
+            parsed = parse_metakernel(mk_path)
+            intervals = []
+            for raw in parsed.kernels:
+                path = Path(parsed.resolve(raw))
+                if path.suffix.lower() == ".bsp" and path.is_file():
+                    intervals += [
+                        (iv.et_start, iv.et_end) for iv in spk_coverage(path, body_id)
+                    ]
+            if not intervals:
+                continue
+            if et is not None and not any(start <= et <= end for start, end in intervals):
+                continue
+            matches.append({**row, "intervals": intervals})
+        return matches
 
     def info_metakernel(self, name: str) -> dict | None:
         """Show detailed info about a tracked metakernel.

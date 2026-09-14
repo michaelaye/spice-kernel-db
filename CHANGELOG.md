@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`KernelDB.metakernels_covering(body_id, et=None, mission=None)`** — the
+  tracked metakernels whose SPK kernels cover a body, optionally at a given
+  ephemeris time, with the coverage windows. It prints nothing and writes
+  nothing, so programs (planetarypy's `plp spicer --observer MPO`) can pick a
+  metakernel from a `read_only=True` database.
+- **`list_metakernels(show=False)`** returns the rows without printing the
+  summary table.
+
 ### Changed
 
 - **One default database path.** Without a config file, `KernelDB()` opened
