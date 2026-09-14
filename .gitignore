@@ -20,3 +20,6 @@ docs/.gitignore
 
 # Work notes written by an AI assistant session; they belong in its own archive.
 /MEMORY/
+
+# Design plans and working notes stay local: never in git, never in a release.
+Plans/

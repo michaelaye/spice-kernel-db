@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`Plans/` from git and from the sdist.** Design plans are local working notes;
+  `Plans/` is now git-ignored and excluded from source distributions, so a
+  release built from a working tree with draft plans in it can't publish them.
+
 - **`mission add --use-planetarypy`, the `[planetarypy]` extra and the
   `planetarypy_bridge` module**, together with the registry's `planetarypy`
   flag and `registry.is_planetarypy_managed`. The delegation was a stub that

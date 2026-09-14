@@ -44,5 +44,8 @@ Issues = "https://github.com/michaelaye/spice-kernel-db/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/spice_kernel_db"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["Plans/", "MEMORY/"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
