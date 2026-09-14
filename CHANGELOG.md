@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Ctrl+C during a download left a partial `.<name>.<random>.tmp` file.**
+  The cleanup only caught `Exception`, and `KeyboardInterrupt` is not one, so
+  interrupting `get` stranded the half-written kernel next to its destination
+  (one found at 167 MB). The temp file is now removed on any interruption.
+- **`__version__` said 0.13.4 while the package was 0.18.0.** It was a
+  hand-edited string that version bumps never touched; it now reads the
+  installed package's metadata, the same source `--version` uses.
+- **`KernelDB.get_metakernel()` ignored the configured kernel directory** when
+  called from Python without `download_dir`, always writing under
+  `~/.local/share/spice-kernel-db/kernels`. It now uses `kernel_dir` from the
+  config, as the CLI already did.
+- **The conda recipe shipped only the `spice-kernel-db` command**, not the
+  short `skd` alias that `pyproject.toml` declares.
+- **The mission-discovery tutorial linked an internal planning file** that is
+  not part of the published docs.
+
 ## [0.18.0] - 2026-06-29
 
 ### Added

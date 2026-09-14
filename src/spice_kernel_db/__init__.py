@@ -1,5 +1,7 @@
 """Content-addressed SPICE kernel database for deduplication and metakernel rewriting."""
 
+from importlib.metadata import version as _package_version
+
 from spice_kernel_db.config import Config, ensure_config
 from spice_kernel_db.db import (
     ConcurrentModificationError,
@@ -25,4 +27,4 @@ __all__ = [
     "parse_metakernel_text",
     "resolve_kernel_urls",
 ]
-__version__ = "0.13.4"
+__version__ = _package_version("spice-kernel-db")

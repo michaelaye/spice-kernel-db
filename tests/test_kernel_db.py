@@ -752,6 +752,22 @@ class TestGetMetakernel:
         assert mk_file.is_file()
         assert "KERNELS_TO_LOAD" in mk_file.read_text()
 
+    def test_get_defaults_to_configured_kernel_dir(self, populated_db, tmp_path):
+        """Without download_dir, get_metakernel uses config.kernel_dir, as the CLI does."""
+        from spice_kernel_db.config import Config
+
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        kernel_dir = tmp_path / "configured_kernels"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=self._mock_download_kernels_parallel), \
+             patch("spice_kernel_db.config.load_config",
+                   return_value=Config(kernel_dir=str(kernel_dir))):
+            populated_db.get_metakernel(mk_url, mission="JUICE", yes=True)
+
+        assert (kernel_dir / "JUICE" / "mk" / "test.tm").is_file()
+
     def test_get_registers_in_metakernel_registry(self, populated_db, tmp_path):
         """get_metakernel registers the .tm in metakernel_registry on confirm."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
@@ -2191,6 +2207,23 @@ class TestIssue4PartialDownloadDetection:
 
         # Partial file should be cleaned up
         assert not dest.exists(), "Partial file should be deleted"
+
+    def test_interrupted_download_leaves_no_temp_file(self, tmp_path):
+        """Ctrl+C mid-download must not strand a partial .tmp next to dest."""
+        from spice_kernel_db.remote import download_kernel
+
+        dest = tmp_path / "test.bsp"
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": "1000"}
+        mock_resp.read = MagicMock(side_effect=[b"x" * 500, KeyboardInterrupt])
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", return_value=mock_resp):
+            with pytest.raises(KeyboardInterrupt):
+                download_kernel("http://example.com/test.bsp", dest)
+
+        assert list(tmp_path.iterdir()) == []
 
     def test_zero_byte_download_raises(self, tmp_path):
         """download_kernel should raise on zero-byte downloads."""
@@ -5476,3 +5509,11 @@ class TestLocationKind:
         assert _location_kind(str(real)) == "real file"
         assert _location_kind(str(link)) == "→ r.bc"
         assert _location_kind(str(tmp_path / "gone.bc")) == "missing"
+
+
+def test_version_matches_installed_metadata():
+    from importlib.metadata import version
+
+    import spice_kernel_db
+
+    assert spice_kernel_db.__version__ == version("spice-kernel-db")

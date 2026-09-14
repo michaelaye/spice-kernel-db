@@ -422,8 +422,9 @@ def download_kernel(
         # C9: atomic, symlink-safe commit. Replaces a stale dedup symlink
         # at `dest` with this fresh real file instead of writing through it.
         os.replace(tmp, dest)
-    except Exception:
-        # Clean up the temp file; leave any pre-existing `dest` untouched.
+    except BaseException:
+        # Clean up the temp file, on Ctrl+C too; leave any pre-existing
+        # `dest` untouched.
         try:
             tmp.unlink()
         except FileNotFoundError:

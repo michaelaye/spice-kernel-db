@@ -17,3 +17,6 @@ docs/_site/
 docs/.quarto/
 docs/.gitignore
 3i_atlas.bsp
+
+# Work notes written by an AI assistant session; they belong in its own archive.
+/MEMORY/

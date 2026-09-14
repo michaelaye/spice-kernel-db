@@ -11,6 +11,7 @@ source:
 build:
   entry_points:
     - spice-kernel-db = spice_kernel_db.cli:main
+    - skd = spice_kernel_db.cli:main
   noarch: python
   script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
   number: 0

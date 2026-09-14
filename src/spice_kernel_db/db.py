@@ -1693,7 +1693,8 @@ class KernelDB:
 
         Args:
             url: URL to a remote .tm metakernel file.
-            download_dir: Where to store downloaded kernels. Preserves the
+            download_dir: Where to store downloaded kernels (default: the
+                configured ``kernel_dir``). Preserves the
                 remote subdirectory structure (lsk/, spk/, etc.).
             mission: Override auto-detected mission name.
             yes: If True, skip the confirmation prompt.
@@ -1710,7 +1711,9 @@ class KernelDB:
         """
         # 0. Resolve download_dir early (needed for saving .tm)
         if download_dir is None:
-            download_dir = Path("~/.local/share/spice-kernel-db/kernels").expanduser()
+            from spice_kernel_db.config import DEFAULT_KERNEL_DIR, load_config
+            config = load_config()
+            download_dir = config.kernel_dir if config else DEFAULT_KERNEL_DIR
         download_dir = Path(download_dir).expanduser().resolve()
 
         # 1. Fetch and parse
