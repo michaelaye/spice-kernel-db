@@ -216,11 +216,13 @@ class KernelDB:
 
     def __init__(self, db_path: str | Path | None = None, read_only: bool = False):
         if db_path is None:
-            from spice_kernel_db.config import load_config
+            from spice_kernel_db.config import default_db_path, load_config
             config = load_config()
-            db_path = config.db_path if config else "~/.spice_kernels.duckdb"
+            db_path = config.db_path if config else default_db_path()
         self.db_path = str(Path(db_path).expanduser())
         self.read_only = read_only
+        if not read_only:
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(self.db_path, read_only=read_only)
         if not read_only:
             self._init_schema()
@@ -2145,9 +2147,9 @@ class KernelDB:
         if local_mk is None:
             # get_metakernel writes to download_dir/mission/mk/filename
             if download_dir is None:
-                download_dir = Path(
-                    "~/.local/share/spice-kernel-db/kernels"
-                ).expanduser()
+                from spice_kernel_db.config import DEFAULT_KERNEL_DIR, load_config
+                config = load_config()
+                download_dir = config.kernel_dir if config else DEFAULT_KERNEL_DIR
             candidate = (
                 Path(download_dir).expanduser().resolve()
                 / mission / "mk" / mk_filename

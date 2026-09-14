@@ -5517,3 +5517,51 @@ def test_version_matches_installed_metadata():
     import spice_kernel_db
 
     assert spice_kernel_db.__version__ == version("spice-kernel-db")
+
+
+class TestDefaultDbPath:
+    """Without a config file: new default, with the old path found until 0.21.0."""
+
+    @pytest.fixture(autouse=True)
+    def _home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return tmp_path
+
+    def test_new_default_when_nothing_exists(self):
+        import warnings
+
+        from spice_kernel_db.config import DEFAULT_DB_PATH, default_db_path
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert default_db_path() == DEFAULT_DB_PATH
+
+    def test_legacy_database_is_used_with_a_warning(self, tmp_path):
+        from spice_kernel_db.config import LEGACY_DB_PATH, default_db_path
+
+        (tmp_path / ".spice_kernels.duckdb").write_bytes(b"")
+        with pytest.warns(FutureWarning, match="0.21.0"):
+            assert default_db_path() == LEGACY_DB_PATH
+
+    def test_new_database_wins_over_legacy(self, tmp_path):
+        import warnings
+
+        from spice_kernel_db.config import DEFAULT_DB_PATH, default_db_path
+
+        (tmp_path / ".spice_kernels.duckdb").write_bytes(b"")
+        new = tmp_path / ".local/share/spice-kernel-db/kernels.duckdb"
+        new.parent.mkdir(parents=True)
+        new.write_bytes(b"")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert default_db_path() == DEFAULT_DB_PATH
+
+    def test_kerneldb_without_config_creates_the_new_default(self, tmp_path):
+        with patch("spice_kernel_db.config.load_config", return_value=None):
+            db = KernelDB()
+        try:
+            assert db.db_path == str(tmp_path / ".local/share/spice-kernel-db/kernels.duckdb")
+            assert Path(db.db_path).is_file()
+        finally:
+            db.close()
+

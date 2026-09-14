@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **One default database path.** Without a config file, `KernelDB()` opened
+  `~/.spice_kernels.duckdb`, while first-run setup and the docs used
+  `~/.local/share/spice-kernel-db/kernels.duckdb`, so the library and the CLI
+  could quietly work on different databases. Both now use the latter.
+
+### Deprecated
+
+- **The old `~/.spice_kernels.duckdb` default.** Through 0.20.x a database that
+  exists only there is still opened, with a `FutureWarning` saying to move it
+  or run `spice-kernel-db config --setup`. The lookup is removed in 0.21.0.
+
 ### Fixed
+
+- **`update_metakernel()` also ignored the configured kernel directory** when
+  called without `download_dir`, the same defect as `get_metakernel()` below.
+- **The API docs said `read_only=True` works while another process writes.**
+  DuckDB's file lock refuses that; the docs now say so.
 
 - **Ctrl+C during a download left a partial `.<name>.<random>.tmp` file.**
   The cleanup only caught `Exception`, and `KeyboardInterrupt` is not one, so

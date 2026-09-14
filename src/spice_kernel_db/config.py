@@ -13,6 +13,10 @@ from pathlib import Path
 DEFAULT_DB_PATH = "~/.local/share/spice-kernel-db/kernels.duckdb"
 DEFAULT_KERNEL_DIR = "~/.local/share/spice-kernel-db/kernels"
 
+# Without a config file, KernelDB() used to open this path. Still found during
+# the 0.19.x and 0.20.x releases; remove the lookup in 0.21.0.
+LEGACY_DB_PATH = "~/.spice_kernels.duckdb"
+
 CONFIG_DIR = Path("~/.config/spice-kernel-db").expanduser()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
@@ -23,6 +27,29 @@ class Config:
 
     db_path: str = DEFAULT_DB_PATH
     kernel_dir: str = DEFAULT_KERNEL_DIR
+
+
+def default_db_path() -> str:
+    """The database path to use when no config file exists.
+
+    That is ``DEFAULT_DB_PATH``, unless only the pre-0.19 default
+    ``LEGACY_DB_PATH`` holds a database; then that one is used, with a
+    ``FutureWarning`` saying where to move it.
+    """
+    import warnings
+
+    if (not Path(DEFAULT_DB_PATH).expanduser().exists()
+            and Path(LEGACY_DB_PATH).expanduser().is_file()):
+        warnings.warn(
+            f"spice-kernel-db is using its database at the old default "
+            f"{LEGACY_DB_PATH}. From version 0.21.0 on it only looks in "
+            f"{DEFAULT_DB_PATH}: move the file there, or run "
+            f"`spice-kernel-db config --setup` to record where it lives.",
+            FutureWarning,
+            stacklevel=3,
+        )
+        return LEGACY_DB_PATH
+    return DEFAULT_DB_PATH
 
 
 def load_config() -> Config | None:
