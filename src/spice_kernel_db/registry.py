@@ -21,7 +21,6 @@ _REGISTRY_RESOURCE = "mission_registry.toml"
 @dataclass(frozen=True)
 class MissionEntry:
     candidates: tuple[str, ...] = ()
-    planetarypy: bool = False
 
 
 def _parse_registry(path: Path) -> Mapping[str, MissionEntry]:
@@ -30,7 +29,6 @@ def _parse_registry(path: Path) -> Mapping[str, MissionEntry]:
     parsed = {
         name: MissionEntry(
             candidates=tuple(entry.get("candidates", [])),
-            planetarypy=bool(entry.get("planetarypy", False)),
         )
         for name, entry in data.items()
         if isinstance(entry, dict)
@@ -69,9 +67,3 @@ def registry_candidates(mission: str, server_url: str) -> list[str]:
             seen.add(url)
             out.append(url)
     return out
-
-
-def is_planetarypy_managed(mission: str) -> bool:
-    """Return True if the registry marks *mission* as planetarypy-managed."""
-    entry = load_registry().get(mission)
-    return bool(entry and entry.planetarypy)

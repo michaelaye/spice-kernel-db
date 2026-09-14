@@ -4717,8 +4717,6 @@ class TestRegistry:
         entries = fixture_registry.load_registry()
         assert "LRO" in entries
         assert "MSL" in entries
-        assert entries["LRO"].planetarypy is True
-        assert entries["MSL"].planetarypy is False
         assert len(entries["LRO"].candidates) == 2
 
     def test_registry_candidates_expands_placeholders(self, fixture_registry):
@@ -4738,11 +4736,6 @@ class TestRegistry:
 
     def test_registry_candidates_unknown_mission(self, fixture_registry):
         assert fixture_registry.registry_candidates("APOLLO", "https://x/") == []
-
-    def test_is_planetarypy_managed(self, fixture_registry):
-        assert fixture_registry.is_planetarypy_managed("LRO") is True
-        assert fixture_registry.is_planetarypy_managed("MSL") is False
-        assert fixture_registry.is_planetarypy_managed("UNKNOWN") is False
 
     def test_bundled_registry_loads(self):
         """The TOML shipped inside the package must at least parse."""
@@ -4846,26 +4839,6 @@ class TestDiscoverMkUrl:
             assert discover_mk_url("https://x/", "Z") == []
 
 
-class TestPlanetarypyBridge:
-    def test_unavailable_when_not_installed(self, monkeypatch):
-        import importlib.util
-        from spice_kernel_db import planetarypy_bridge
-
-        monkeypatch.setattr(
-            importlib.util, "find_spec",
-            lambda name: None if name == "planetarypy" else importlib.util.find_spec(name),
-        )
-        assert planetarypy_bridge.is_available() is False
-
-    def test_delegate_returns_none(self):
-        from spice_kernel_db import planetarypy_bridge
-        assert planetarypy_bridge.delegate_mission_add("LRO", "https://x/") is None
-
-    def test_tracking_issue_url(self):
-        from spice_kernel_db import planetarypy_bridge
-        assert planetarypy_bridge.tracking_issue().startswith("https://")
-
-
 class TestMissionAddNoninteractive:
     """Drive `_mission_add_noninteractive` directly with a constructed args namespace.
 
@@ -4877,7 +4850,7 @@ class TestMissionAddNoninteractive:
         import types
         defaults = dict(
             name=None, server_url=None, mk_dir_url=None,
-            no_dedup=False, use_planetarypy=False,
+            no_dedup=False,
         )
         defaults.update(overrides)
         return types.SimpleNamespace(**defaults)

@@ -18,9 +18,5 @@
 # responds 200 is used. The default ``kernels/mk/`` path is always appended
 # automatically by the auto-probe layer, so it does not need to appear here.
 #
-# Set planetarypy = true for missions managed by the planetarypy library; when
-# the [planetarypy] extra is installed and --use-planetarypy is given, the
-# mission-add flow will offer to delegate kernel management.
-#
 # Contributions welcome — please verify the path returns HTTP 200 before
 # submitting a PR. See docs/troubleshooting.qmd.

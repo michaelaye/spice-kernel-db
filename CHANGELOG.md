@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`mission add --use-planetarypy`, the `[planetarypy]` extra and the
+  `planetarypy_bridge` module**, together with the registry's `planetarypy`
+  flag and `registry.is_planetarypy_managed`. The delegation was a stub that
+  never did anything: with the bundled registry empty the flag was a silent
+  no-op, while the docs described it as working. For missions without a
+  metakernel directory, planetarypy covers the need on its own:
+  `plp spice fetch <mission> --start … --stop …` for a PDS-archive date range,
+  and `plp spice spk <mission>` for a live mission's current trajectory.
+  Automatic support stays tracked in #2.
+
 ### Added
 
 - **`KernelDB.metakernels_covering(body_id, et=None, mission=None)`** — the

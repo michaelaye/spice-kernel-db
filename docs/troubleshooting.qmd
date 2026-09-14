@@ -202,7 +202,7 @@ After a `get` or `rewrite`, run `spice-kernel-db verify <mk>` to cross-check the
 When the default path 404s, you have two productive options:
 
 1. **Manual override** — pass `--mk-dir-url <URL>` to `mission add`. The URL is HEAD-checked but otherwise used as-is. Use this when you've found the metakernel directory yourself — typically on a PDS node such as `pds-imaging.jpl.nasa.gov` or `pds-smallbodies.astro.umd.edu`.
-2. **planetarypy** — for PDS-archived missions, the [planetarypy](https://github.com/michaelaye/planetarypy) library is the right tool. Install the optional bridge with `pip install spice-kernel-db[planetarypy]` and pass `--use-planetarypy` on `mission add`. Full delegation is tracked in the issue tracker — the current stub prints a notice and falls back to normal discovery.
+2. **planetarypy** — the [planetarypy](https://github.com/michaelaye/planetarypy) library covers both remaining cases without spice-kernel-db. `plp spice fetch <mission> --start <date> --stop <date>` builds a metakernel for a date range from the mission's PDS SPICE archive, and `plp spice spk <mission>` downloads a live mission's current trajectory from NAIF's operational server (planetarypy 0.84 or newer). Automatic support for missions without `mk/` is tracked in [issue #2](https://github.com/michaelaye/spice-kernel-db/issues/2).
 
 The curated `mission_registry.toml` exists as an extension point: if you confirm a working metakernel directory (anywhere on the web), please open a PR adding an entry so other users benefit:
 
@@ -212,7 +212,6 @@ candidates = [
   "{server}{m}/some/alt/path/mk/",
   "https://some-pds-node.example/spice/your-mission/mk/",
 ]
-planetarypy = false   # set to true if planetarypy manages this mission
 ```
 
 Registry entries can use absolute URLs (PDS nodes, mission websites) — the `{server}`/`{m}` placeholders are convenient but not required.

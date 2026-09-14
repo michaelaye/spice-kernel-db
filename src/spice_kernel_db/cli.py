@@ -19,7 +19,7 @@ from spice_kernel_db.config import (
     show_config,
 )
 from spice_kernel_db.db import KernelDB, MetakernelUnreachableError, _format_size
-from spice_kernel_db import planetarypy_bridge, registry
+from spice_kernel_db import registry
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
     _head_ok,
@@ -359,11 +359,6 @@ quick start:
     p_mission_add.add_argument(
         "--no-dedup", action="store_true",
         help="Disable deduplication for this mission.",
-    )
-    p_mission_add.add_argument(
-        "--use-planetarypy", action="store_true",
-        help="Delegate kernel management to planetarypy if the [planetarypy] "
-             "extra is installed and the mission is registry-flagged.",
     )
     mission_sub.add_parser("list", help="List configured missions")
     p_mission_rm = mission_sub.add_parser("remove", help="Remove a mission")
@@ -1750,37 +1745,6 @@ def _choose_dedup(mission_name: str) -> bool:
     return answer not in ("n", "no")
 
 
-def _maybe_offer_planetarypy(mission_name: str, *, force: bool = False) -> bool:
-    """Offer planetarypy delegation when applicable. Returns True if user opted in."""
-    if not registry.is_planetarypy_managed(mission_name):
-        return False
-    if not planetarypy_bridge.is_available():
-        if force:
-            print(
-                f"--use-planetarypy requested but planetarypy is not installed. "
-                f"Install with: pip install 'spice-kernel-db[planetarypy]'",
-                file=sys.stderr,
-            )
-        return False
-    if force:
-        opted_in = True
-    else:
-        answer = input(
-            f"\n{mission_name} is registered as planetarypy-managed. "
-            f"Delegate to planetarypy? [y/N]: "
-        ).strip().lower()
-        opted_in = answer in ("y", "yes")
-    if not opted_in:
-        return False
-    print(
-        f"planetarypy delegation requested but full integration is not yet "
-        f"implemented (tracked at {planetarypy_bridge.tracking_issue()}). "
-        f"Falling back to normal discovery.",
-        file=sys.stderr,
-    )
-    return False
-
-
 def _save_mission(
     db: KernelDB, mission_name: str, server_label: str, server_url: str,
     mk_dir_url: str, dedup: bool,
@@ -1803,7 +1767,6 @@ def _mission_add_interactive(db: KernelDB, args) -> None:
     if chosen is None:
         return
     mission_name, mk_dir_url = chosen
-    _maybe_offer_planetarypy(mission_name, force=bool(args.use_planetarypy))
     dedup = False if args.no_dedup else _choose_dedup(mission_name)
     _save_mission(db, mission_name, server_label, server_url, mk_dir_url, dedup)
 
@@ -1852,8 +1815,6 @@ def _mission_add_noninteractive(db: KernelDB, args) -> None:
         )
         sys.exit(2)
     server_label = server_label_for(server_url)
-
-    _maybe_offer_planetarypy(mission_name, force=bool(args.use_planetarypy))
 
     if args.mk_dir_url:
         mk_dir_url = args.mk_dir_url

@@ -611,7 +611,7 @@ Reads `mission_registry.toml` shipped with the package. Used by `mission add` to
 
 ### `MissionEntry`
 
-Dataclass: `name`, `candidates: tuple[str, ...]` (URL templates with `{server}`/`{m}` placeholders), `planetarypy: bool`.
+Dataclass with one field, `candidates: tuple[str, ...]`: URL templates with `{server}`/`{m}` placeholders.
 
 ### `load_registry`
 
@@ -628,38 +628,6 @@ registry.registry_candidates(mission: str, server_url: str) -> list[str]
 ```
 
 Return registry-defined candidate metakernel URLs for *mission* with placeholders expanded. Empty list when the mission has no registry entry.
-
-### `is_planetarypy_managed`
-
-```python
-registry.is_planetarypy_managed(mission: str) -> bool
-```
-
-True when the registry marks *mission* as managed by [planetarypy](https://github.com/michaelaye/planetarypy).
-
-## planetarypy bridge
-
-```python
-from spice_kernel_db import planetarypy_bridge
-```
-
-Optional integration hook for the planetarypy library. Activated via the `[planetarypy]` extra: `pip install spice-kernel-db[planetarypy]`.
-
-### `is_available`
-
-```python
-planetarypy_bridge.is_available() -> bool
-```
-
-True when planetarypy is importable in the current environment.
-
-### `delegate_mission_add`
-
-```python
-planetarypy_bridge.delegate_mission_add(mission: str, server_url: str) -> dict | None
-```
-
-Stub delegation hook. Currently returns `None`; full integration is tracked in the project's issue tracker.
 
 ## Exceptions
 

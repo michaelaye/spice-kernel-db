@@ -519,7 +519,6 @@ spice-kernel-db mission add
 | `--server-url <URL>` | Archive server base URL. Required with positional name unless the mission name is unambiguous on a known server. |
 | `--mk-dir-url <URL>` | Override the metakernel directory URL (bypasses auto-discovery). Validated with a HEAD request. |
 | `--no-dedup` | Disable deduplication for this mission. |
-| `--use-planetarypy` | Delegate kernel management to planetarypy if the `[planetarypy]` extra is installed and the mission is registry-flagged. |
 
 ```bash
 # Interactive
