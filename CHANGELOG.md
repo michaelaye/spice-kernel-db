@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-09-18
+
+### Changed
+
+- **Remote size queries reuse connections.** `query_remote_sizes` (behind
+  `get` and `update`) opened a fresh TCP+TLS connection for every kernel, so a
+  102-kernel metakernel paid 102 handshakes. It now keeps one `requests`
+  session alive per worker thread, paying one handshake per thread instead.
+  Measured on `juice_crema_5_2.tm` (102 kernels) against the ESA archive:
+  135 s before, 17-31 s after, depending on how the server is feeling.
+
+- **`requests>=2.31` is now a runtime dependency**, replacing `urllib` for the
+  size queries.
+
+### Fixed
+
+- **Missing sizes no longer cause needless re-downloads.** A HEAD request that
+  failed was swallowed and recorded as "size unknown", which showed the kernel
+  as `unknown` in the table, left it out of the download total, and made
+  `get` re-download a file that was already complete on disk. On the same
+  102-kernel metakernel, 11 kernels hit this; with per-thread keep-alive plus
+  two retries, all 102 sizes come back.
+
+- **Size queries can no longer hang indefinitely.** They had no timeout, so one
+  unresponsive connection blocked its worker for as long as the server held the
+  socket open (70 s in one measured case). Connect and read timeouts are now
+  15 s and 10 s, chosen from measured ESA handshake latency.
+
 ## [0.19.0] - 2026-09-14
 
 ### Removed
@@ -880,6 +908,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.19.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.16.0...v0.17.0

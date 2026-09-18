@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-import shutil
+import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
+import requests
+from requests.adapters import HTTPAdapter, Retry
 from rich.progress import (
     BarColumn,
     DownloadColumn,
@@ -316,13 +318,62 @@ def resolve_kernel_urls(
     return urls
 
 
+# Timeouts for the size queries, measured against spiftp.esac.esa.int on
+# 2026-09-18 with 30 fresh connections at 8-way concurrency:
+#
+#   TCP+TLS handshake      median 3.30 s   p90 5.44 s   max 12.58 s
+#   response after that    median 0.05 s   p90 1.06 s   max  4.05 s
+#
+# Two of those 30 connections never completed the handshake at all, hanging
+# for 19 s and 70 s. With no timeout (the pre-0.19.1 behaviour) a single such
+# connection stalls its worker for as long as the server keeps the socket
+# open, which is the main reason a 102-kernel metakernel could take minutes.
+#
+# The connect timeout has to clear the *handshake* tail, not just the 0.05 s
+# TCP connect: urllib3 leaves the connect timeout on the socket while it
+# wraps it in TLS, so a slow ESA handshake is charged against this budget.
+CONNECT_TIMEOUT = 15.0
+READ_TIMEOUT = 10.0
+
+_thread_local = threading.local()
+
+
+def _size_session() -> requests.Session:
+    """Return this thread's keep-alive session for size queries.
+
+    One session per worker thread, so the ~1-3 s TLS handshake to the archive
+    is paid once per thread instead of once per kernel. A session per thread
+    (rather than one shared session) also keeps us clear of the thread-safety
+    caveats around sharing a ``requests.Session``.
+    """
+    session = getattr(_thread_local, "size_session", None)
+    if session is None:
+        adapter = HTTPAdapter(
+            max_retries=Retry(
+                total=2,
+                backoff_factor=0.3,
+                status_forcelist=(500, 502, 503, 504),
+            ),
+        )
+        session = requests.Session()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _thread_local.size_session = session
+    return session
+
+
 def _head_size(url: str) -> tuple[str, int | None]:
     """Return (url, content_length_or_None) via HTTP HEAD."""
     try:
-        req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req) as resp:
-            cl = resp.headers.get("Content-Length")
-            return url, int(cl) if cl else None
+        # allow_redirects is explicit: requests defaults it to False for HEAD,
+        # while the urlopen() this replaced followed redirects.
+        resp = _size_session().head(
+            url,
+            allow_redirects=True,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
+        cl = resp.headers.get("Content-Length")
+        return url, int(cl) if cl else None
     except Exception:
         return url, None
 
@@ -330,7 +381,13 @@ def _head_size(url: str) -> tuple[str, int | None]:
 def query_remote_sizes(
     urls: list[str], *, max_workers: int = 8
 ) -> dict[str, int | None]:
-    """Query Content-Length for multiple URLs in parallel."""
+    """Query Content-Length for multiple URLs in parallel.
+
+    Connections are kept alive per worker thread, so *max_workers* is also the
+    number of TLS handshakes performed. Raising it is not automatically
+    faster: the ESA archive's handshakes slow down measurably when several
+    are opened at once (median 1.3 s serial vs 3.3 s at 8-way concurrency).
+    """
     out: dict[str, int | None] = {}
     with Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
