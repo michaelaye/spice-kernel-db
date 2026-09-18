@@ -191,6 +191,36 @@ class MetakernelUnreachableError(LookupError):
         )
 
 
+def _prefer_exact_name(hits: list[dict], filename: str) -> list[dict]:
+    """Order *hits* so locations actually named *filename* come first.
+
+    `find_by_filename` joins on sha256, so two byte-identical files under
+    different names share one `kernels` row and either name matches both
+    `locations` rows. Without this the winner was whichever path the scanner
+    happened to walk last, and resolving `juice_crema_5_2.tm` could hand back
+    `juice_crema_5_2_v473_20260819_001.tm` (issue #9).
+
+    Content-only matches are kept, just after the exact ones, because they are
+    the point of the sha256 join: `jup365.bsp` resolving to a location named
+    `jup365_19900101_20500101.bsp` is a legitimate hit when no file of the
+    requested name is registered. Each group keeps `find_by_filename`'s
+    deterministic order. C8: the comparison is case-insensitive.
+    """
+    wanted = filename.lower()
+    # sorted() is stable, so each group keeps find_by_filename's ordering.
+    return sorted(hits, key=lambda h: Path(h["abs_path"]).name.lower() != wanted)
+
+
+def _warn_if_renamed(warnings: list[str], filename: str, hit: dict) -> None:
+    """Record that *hit* is a content match under a different name."""
+    actual = Path(hit["abs_path"]).name
+    if actual.lower() != filename.lower():
+        warnings.append(
+            f"{filename}: no file of that name registered, using "
+            f"byte-identical {actual} in [{hit['mission']}]"
+        )
+
+
 def _format_size(n: int) -> str:
     """Format byte count as human-readable string."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -905,6 +935,11 @@ class KernelDB:
           4. Metakernel registry match (for ``.tm`` files acquired via ``get``)
           5. None — suggest ``spice-kernel-db scan`` to re-index
 
+        Steps 1 and 2 match on content, so a location actually named *filename*
+        always wins over a byte-identical file registered under another name
+        (issue #9); the latter is used only when no file of the requested name
+        is registered, and adds a warning when it is.
+
         Returns:
             (resolved_path, warnings) where warnings is a list of
             human-readable strings about fallback decisions.
@@ -912,7 +947,7 @@ class KernelDB:
         warnings: list[str] = []
 
         # --- 1. Exact filename, preferred mission ---
-        hits = self.find_by_filename(filename)
+        hits = _prefer_exact_name(self.find_by_filename(filename), filename)
         if preferred_mission and hits:
             same_mission = [
                 h for h in hits
@@ -920,7 +955,9 @@ class KernelDB:
                 and Path(h["abs_path"]).is_file()
             ]
             if same_mission:
-                return same_mission[0]["abs_path"], warnings
+                h = same_mission[0]
+                _warn_if_renamed(warnings, filename, h)
+                return h["abs_path"], warnings
 
         # --- 2. Exact filename, any mission ---
         for h in hits:
@@ -930,6 +967,7 @@ class KernelDB:
                         f"{filename}: not found in [{preferred_mission}] registry, "
                         f"using copy from [{h['mission']}]"
                     )
+                _warn_if_renamed(warnings, filename, h)
                 return h["abs_path"], warnings
 
         # --- 3. Path-suffix match ---

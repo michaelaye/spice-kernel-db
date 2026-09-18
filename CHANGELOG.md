@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`resolve_kernel` no longer returns a different filename than the one asked
+  for** (#9). `find_by_filename` joins on `sha256`, so two byte-identical files
+  under different names share one `kernels` row and either name matches both of
+  their `locations` rows. The winner was whichever path the scanner walked last,
+  so `resolve juice_crema_5_2.tm` could hand back
+  `juice_crema_5_2_v473_20260819_001.tm`. A location actually named as requested
+  now always wins.
+
+  No caller could ever have loaded different data than it asked for: the join is
+  on content, so every path returned was byte-identical to the file requested.
+  What was wrong was the name, which matters for recording which file a run used.
+
+  The content match is kept as the documented fallback — `jup365.bsp` resolving
+  to a location named `jup365_19900101_20500101.bsp` when no file of the
+  requested name is registered — and now adds a warning naming the file used.
+
 ## [0.20.0] - 2026-09-18
 
 Released first as 0.19.1, then re-released as 0.20.0: the change adds a

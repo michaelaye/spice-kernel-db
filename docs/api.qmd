@@ -148,7 +148,13 @@ Returns `(path, warnings)` where `path` is the resolved absolute path (or `None`
 1. Exact filename match in `preferred_mission` → no warning
 2. Exact filename match in any mission → warning
 3. Path-suffix match (file on disk registered under different name) → warning
-4. Not found → `(None, [])` + hint to run `scan`
+4. Metakernel registry match, for `.tm` files acquired via `get` → warning only on a cross-mission hit
+5. Not found → `(None, [])` + hint to run `scan`
+
+Steps 1 and 2 match on content, so a name can have several hits when two
+byte-identical files are registered under different names. A location actually
+named `filename` always wins; a differently-named copy is used only when no
+file of the requested name is registered, and says so in a warning.
 
 #### `aliases`
 

@@ -54,6 +54,8 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 
 Each fallback step emits a warning. Fuzzy prefix matching was removed in v0.10.0 due to silent data corruption risk.
 
+Steps 1 and 2 go through `find_by_filename`, which joins on `sha256`, so identical content under two names produces one `kernels` row and a `locations` row per name — and either name matches both. `_prefer_exact_name` puts the location actually named `filename` first, so a name always resolves to its own file; the differently-named copy is used only when nothing of that name is registered, with a warning (issue #9).
+
 **Metakernel rewriting** only modifies `PATH_VALUES` — the header, `PATH_SYMBOLS`, `KERNELS_TO_LOAD`, and all comments are preserved verbatim. A symlink tree bridges between where the metakernel expects files and where they actually live.
 
 **Remote browsing** parses Apache `mod_autoindex` HTML directory listings. Version tags like `_v461_20251127_001` are stripped to group versioned snapshots under their base metakernel name.

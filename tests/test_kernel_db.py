@@ -397,6 +397,61 @@ class TestResolveKernel:
         assert "not found in [MRO]" in warnings[0]
 
 
+    def test_resolve_prefers_the_name_asked_for(self, db, tmp_spice_tree):
+        """Two byte-identical files under different names each resolve to
+        themselves, not to whichever the scanner walked last (issue #9)."""
+        mk_dir = tmp_spice_tree / "JUICE" / "kernels" / "mk"
+        pointer = mk_dir / "juice_crema_5_2.tm"
+        snapshot = mk_dir / "juice_crema_5_2_v473_20260819_001.tm"
+        content = "KPL/MK\n\nFAKE shared metakernel content\n"
+        pointer.write_text(content)
+        snapshot.write_text(content)
+        db.scan_directory(tmp_spice_tree / "JUICE" / "kernels")
+
+        for wanted in (pointer, snapshot):
+            path, warnings = db.resolve_kernel(
+                wanted.name, preferred_mission="JUICE"
+            )
+            assert path == str(wanted)
+            assert warnings == []
+
+    def test_resolve_prefers_exact_name_without_preferred_mission(
+        self, db, tmp_spice_tree
+    ):
+        """The same holds when no mission is given, where resolution falls
+        through to the 'any mission' step."""
+        mk_dir = tmp_spice_tree / "JUICE" / "kernels" / "mk"
+        pointer = mk_dir / "juice_crema_5_2.tm"
+        snapshot = mk_dir / "juice_crema_5_2_v473_20260819_001.tm"
+        content = "KPL/MK\n\nFAKE shared metakernel content\n"
+        pointer.write_text(content)
+        snapshot.write_text(content)
+        db.scan_directory(tmp_spice_tree / "JUICE" / "kernels")
+
+        for wanted in (pointer, snapshot):
+            path, warnings = db.resolve_kernel(wanted.name)
+            assert path == str(wanted)
+            assert warnings == []
+
+    def test_resolve_still_uses_identical_content_under_another_name(
+        self, populated_db, tmp_spice_tree
+    ):
+        """With no file of the requested name registered, the sha256 join is
+        still the point: jup365.bsp resolves to the time-ranged copy, and says
+        so in a warning."""
+        generic = (tmp_spice_tree / "generic_kernels" / "spk" / "satellites"
+                   / "jup365.bsp")
+        ranged = (tmp_spice_tree / "JUICE" / "kernels" / "spk"
+                  / "jup365_19900101_20500101.bsp")
+        assert sha256_file(generic) == sha256_file(ranged)
+        generic.unlink()
+
+        path, warnings = populated_db.resolve_kernel("jup365.bsp")
+        assert path == str(ranged)
+        assert len(warnings) == 1
+        assert "jup365_19900101_20500101.bsp" in warnings[0]
+
+
 class TestDuplicates:
     def test_report_duplicates(self, populated_db):
         dups = populated_db.report_duplicates()

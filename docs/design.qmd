@@ -137,6 +137,25 @@ Consider a scenario where both JUICE and generic_kernels have `pck00011.tpc`. Th
 
 By always checking the preferred mission first, the tool naturally handles this: it uses the mission's own copy when available, and only falls back to other sources when necessary — always with a warning so you know what happened.
 
+### Same content, two names
+
+Steps 1 and 2 look the kernel up by content: the `kernels` table is keyed by
+SHA-256, so two byte-identical files under different names share one row and
+either name matches both of their `locations` rows. Asking for one name could
+therefore return the other file's path, decided by nothing more than the order
+the scanner happened to walk the directory.
+
+ESA's metakernel directory is the everyday case. `juice_crema_5_2.tm` is a
+moving pointer and `juice_crema_5_2_v473_20260819_001.tm` is the versioned
+snapshot it currently matches, byte for byte, until ESA republishes the pointer.
+Both names have to keep resolving to their own file, because a study that
+records which file it loaded is recording which trajectory it ran on.
+
+So a location actually named `filename` always wins. The content match is kept
+as the fallback it was meant to be: `jup365.bsp` resolving to a location named
+`jup365_19900101_20500101.bsp` is a real hit when no file of the requested name
+is registered, and it now arrives with a warning naming the file used.
+
 ### Path-suffix matching
 
 The third resolution step handles cases where a kernel exists on disk and is registered in the database, but under a different canonical name. This uses a path-suffix match: if the requested filename appears as the last component of any registered `abs_path`, it's considered a match.
