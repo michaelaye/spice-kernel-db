@@ -325,7 +325,7 @@ def resolve_kernel_urls(
 #   response after that    median 0.05 s   p90 1.06 s   max  4.05 s
 #
 # Two of those 30 connections never completed the handshake at all, hanging
-# for 19 s and 70 s. With no timeout (the pre-0.19.1 behaviour) a single such
+# for 19 s and 70 s. With no timeout (the pre-0.20.0 behaviour) a single such
 # connection stalls its worker for as long as the server keeps the socket
 # open, which is the main reason a 102-kernel metakernel could take minutes.
 #

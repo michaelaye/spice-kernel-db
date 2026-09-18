@@ -41,7 +41,7 @@ spice-kernel-db scan /path/to/kernels
 
 By default, the tool skips files that match both the expected size and SHA-256 hash. If files were corrupted or partially downloaded, they'll be re-downloaded. Use `--force` to bypass all skip checks.
 
-Before 0.19.1 this could also happen to intact files. The skip check needs the remote size, and a HEAD request that failed was silently recorded as "size unknown" — which the check reads as "cannot confirm", so the file was fetched again. Such kernels show as `unknown` in the size column. Size queries now retry and reuse connections, so a transient failure no longer costs you a download.
+Before 0.20.0 this could also happen to intact files. The skip check needs the remote size, and a HEAD request that failed was silently recorded as "size unknown" — which the check reads as "cannot confirm", so the file was fetched again. Such kernels show as `unknown` in the size column. Size queries now retry and reuse connections, so a transient failure no longer costs you a download.
 
 
 ## `Hash mismatch for <name>: computed X, expected Y` during get/update
@@ -71,7 +71,7 @@ find <kernel-dir> -type l -exec sh -c \
 
 Before running anything, `get` asks the archive for each kernel's size, one HEAD request per entry in `KERNELS_TO_LOAD`. Large metakernels are therefore slow against a slow server: `juice_crema_5_2.tm` has 102 kernels, and the ESA archive's TLS handshake alone was measured at 1.3 s serial and 3.3 s (median) under concurrency.
 
-Connections are kept alive per worker thread since 0.19.1, so the handshake is paid once per thread rather than once per kernel. What remains is one round trip per kernel, which is the archive's latency rather than anything local. `--force` skips the size query entirely, at the cost of re-downloading everything.
+Connections are kept alive per worker thread since 0.20.0, so the handshake is paid once per thread rather than once per kernel. What remains is one round trip per kernel, which is the archive's latency rather than anything local. `--force` skips the size query entirely, at the cost of re-downloading everything.
 
 
 ## Metakernel paths don't work with SpiceyPy
