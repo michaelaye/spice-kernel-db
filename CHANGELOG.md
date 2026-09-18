@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.1] - 2026-09-19
 
 ### Fixed
 
@@ -932,6 +932,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.20.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.19.0...v0.20.0
 [0.19.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.18.0...v0.19.0
