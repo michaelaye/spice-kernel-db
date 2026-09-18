@@ -89,10 +89,10 @@ Tests use `pytest-tmp-files` for temporary directory fixtures. The main fixture 
 5. Push to GitHub: `git push`
 6. Publish to PyPI: `rm -rf dist/ && python -m build && python -m twine upload dist/*`
 7. Create GitHub release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."`
-8. Build conda package: `grayskull pypi spice-kernel-db` (in /tmp), then `conda-build /tmp/spice-kernel-db --output-folder /tmp/conda-output --no-anaconda-upload`
+8. Build conda package from the in-repo recipe: `conda-build conda/ --output-folder /tmp/conda-output --no-anaconda-upload` (bump `version`, `sha256` and any new run deps in `conda/meta.yaml` first; `grayskull pypi spice-kernel-db` regenerates a recipe from scratch if the in-repo one ever drifts)
 9. Upload to anaconda.org: `anaconda --site anaconda upload /tmp/conda-output/noarch/spice-kernel-db-X.Y.Z-py_0.conda`
 
 **Notes:**
 - The `--site anaconda` flag is required for `anaconda` commands (bypasses an interactive prompt that fails in non-TTY environments)
-- `grayskull`, `conda-build`, and `anaconda-client` are installed in the `py314` conda env
+- `grayskull`, `conda-build` and `anaconda-client` live in the conda `base` env (`/Users/maye/miniforge3/bin/`), not in `py314` — conda-build's docs require base, and a `conda` inside a work env breaks VS Code's environment discovery for it
 - The conda recipe maintainer in `meta.yaml` should be `michaelaye` (grayskull defaults to a placeholder)
