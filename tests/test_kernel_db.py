@@ -5971,6 +5971,19 @@ class TestCheckUntrackedMetakernel:
             db.close()
 
     def test_cli_prints_one_line_and_exits_1(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        KernelDB(tmp_path / "t.duckdb").close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "k"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg):
+            with pytest.raises(SystemExit) as exc:
+                main(["check", "never_downloaded.tm"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1, f"expected one line, got: {err!r}"
+        assert "not tracked locally" in err
+        assert "Traceback" not in err and "FileNotFoundError" not in err
 
 
 class TestVerboseReachesGetAndUpdate:
@@ -5989,16 +6002,6 @@ class TestVerboseReachesGetAndUpdate:
         KernelDB(tmp_path / "t.duckdb").close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
                      kernel_dir=str(tmp_path / "k"))
-        with patch("spice_kernel_db.config.load_config", return_value=cfg):
-            with pytest.raises(SystemExit) as exc:
-                main(["check", "never_downloaded.tm"])
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert err.count("\n") == 1, f"expected one line, got: {err!r}"
-        assert "not tracked locally" in err
-        assert "Traceback" not in err and "FileNotFoundError" not in err
-
-
         seen = {}
 
         def fake_get(self, url, **kwargs):

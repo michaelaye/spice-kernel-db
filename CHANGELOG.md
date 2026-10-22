@@ -41,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown one prints one line naming the `get` command to run, then exits 1.
   New: `KernelDB.resolve_metakernel_path()` and `MetakernelNotTracked`.
 
+
+- **`get` and `update` now honour `-v/--verbose`** (#4). The flag was parsed
+  globally and forwarded by `scan` and `check`, but neither `get_metakernel()`
+  nor `update_metakernel()` had the parameter, so it was silently dropped.
+  Following `check`'s convention, verbose adds detail rather than removing it:
+  `get` lists each resolved URL under the status table, `update` names each
+  directory it re-scans. The status table stays unconditional because it
+  precedes the download prompt.
+
+- **`update --mission` help text matches the other verbs** (#3): "Override
+  auto-detected mission name".
+
 ### Changed
 
 - The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
