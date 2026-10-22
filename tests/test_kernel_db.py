@@ -5909,8 +5909,6 @@ class TestPromptsWithoutATerminal:
         for name in ("_choose_server", "_choose_mission"):
             src = inspect.getsource(getattr(cli, name))
             assert "input(" not in src, f"{name} calls input() directly"
-
-
 class TestCheckUntrackedMetakernel:
     """Issue #11: `check <name>.tm` raised FileNotFoundError from the parser."""
 
