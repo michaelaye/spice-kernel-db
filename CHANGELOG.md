@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an HTTP status is an answer (absent), anything that prevents getting a status
   is unreachable, and `get` says so and names the timeout instead.
 
+- **`mission add <name>` no longer picks a server silently when the mission is
+  on several** (#13). It returned the first match in `SPICE_SERVERS`, so
+  `mission add JUICE` configured NASA's NAIF mirror although ESA publishes
+  JUICE first and the mirror can lag. It now lists the candidates and exits 2,
+  which is what the `--server-url` help text already promised.
+
+- **Interactive prompts no longer traceback when stdin is not a terminal**
+  (#14). `mission add` raised `EOFError` under CI, redirection or
+  `ssh host skd mission add`. It now explains and exits 2, and every prompt
+  goes through a wrapper: menus report EOF and exit, `[y/N]` confirmations
+  treat EOF as no. The `db --delete` and `dedup --execute` confirmations were
+  affected too, contrary to what #14 assumed, and are fixed here.
+
 ### Changed
 
 - The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
