@@ -5807,3 +5807,105 @@ class TestGetDistinguishesMissingFromUnreachable:
         code, err = self._run(tmp_path, probe, capsys)
         assert code == 1
         assert "could not reach" in err.lower()
+
+
+class TestMissionAddAmbiguousServer:
+    """Issue #13: the first server that had the mission was taken silently."""
+
+    def test_two_servers_stops_and_lists_them(self, capsys):
+        from spice_kernel_db.cli import AmbiguousServer, _infer_server_url
+
+        with patch("spice_kernel_db.cli.list_remote_missions",
+                   return_value=["JUICE", "MARS2020"]):
+            with pytest.raises(AmbiguousServer) as exc:
+                _infer_server_url("JUICE", None)
+        assert len(exc.value.urls) == 2
+        assert exc.value.mission == "JUICE"
+
+    def test_single_server_still_resolves(self):
+        from spice_kernel_db.cli import _infer_server_url
+        from spice_kernel_db.remote import SPICE_SERVERS
+
+        esa = SPICE_SERVERS["ESA"]
+
+        def only_esa(url):
+            return ["JUICE"] if url == esa else ["OTHER"]
+
+        with patch("spice_kernel_db.cli.list_remote_missions", side_effect=only_esa):
+            assert _infer_server_url("JUICE", None) == esa
+
+    def test_explicit_server_url_bypasses_the_check(self):
+        from spice_kernel_db.cli import _infer_server_url
+        assert _infer_server_url("JUICE", "https://x/") == "https://x/"
+        assert _infer_server_url("JUICE", "https://x") == "https://x/"
+
+    def test_cli_exits_2_and_names_both_servers(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "k"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.cli.list_remote_missions",
+                   return_value=["JUICE"]):
+            with pytest.raises(SystemExit) as exc:
+                main(["mission", "add", "JUICE"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "2 known servers" in err
+        assert "--server-url" in err
+        assert "naif.jpl.nasa.gov" in err and "esac.esa.int" in err
+
+
+class TestPromptsWithoutATerminal:
+    """Issue #14: interactive prompts raised EOFError when stdin was not a tty."""
+
+    def test_mission_add_without_a_tty_exits_2(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "k"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("sys.stdin.isatty", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                main(["mission", "add"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "needs a terminal" in err
+        assert "--server-url" in err
+        assert "EOFError" not in err and "Traceback" not in err
+
+    def test_ask_reports_eof_instead_of_raising(self, capsys):
+        from spice_kernel_db.cli import _ask
+        with patch("builtins.input", side_effect=EOFError):
+            with pytest.raises(SystemExit) as exc:
+                _ask("Select [1-2]: ")
+        assert exc.value.code == 2
+        assert "stdin closed" in capsys.readouterr().err
+
+    def test_confirm_treats_eof_as_no(self, capsys):
+        from spice_kernel_db.cli import _confirm
+        with patch("builtins.input", side_effect=EOFError):
+            assert _confirm("Delete everything? [y/N]: ") is False
+        assert "assuming no" in capsys.readouterr().err
+
+    def test_confirm_reads_yes(self):
+        from spice_kernel_db.cli import _confirm
+        for answer, expected in (("y", True), ("yes", True),
+                                 ("n", False), ("", False)):
+            with patch("builtins.input", return_value=answer):
+                assert _confirm("? ") is expected
+
+    def test_dedup_prompt_keeps_its_default_on_eof(self, capsys):
+        """This one defaults to YES, so EOF must not flip it to no."""
+        from spice_kernel_db.cli import _choose_dedup
+        with patch("builtins.input", side_effect=EOFError):
+            assert _choose_dedup("JUICE") is True
+
+    def test_no_bare_input_calls_remain_in_menus(self):
+        """Regression guard: a new menu must go through _ask/_confirm."""
+        import inspect
+        from spice_kernel_db import cli
+
+        for name in ("_choose_server", "_choose_mission"):
+            src = inspect.getsource(getattr(cli, name))
+            assert "input(" not in src, f"{name} calls input() directly"
