@@ -33,7 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes through a wrapper: menus report EOF and exit, `[y/N]` confirmations
   treat EOF as no. The `db --delete` and `dedup --execute` confirmations were
   affected too, contrary to what #14 assumed, and are fixed here.
-
 - **`check <name>.tm` no longer tracebacks for a metakernel that was never
   downloaded** (#11). The name went straight to the parser, which raised
   `FileNotFoundError`. A bare name is now resolved through
@@ -58,7 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
   below the p90 TLS handshake (5.44 s) that this project measured against ESA,
   so roughly one probe in ten could fail against a healthy server.
-
 ## [0.20.1] - 2026-09-19
 
 ### Fixed
