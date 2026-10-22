@@ -6,6 +6,7 @@ from spice_kernel_db.config import Config, ensure_config
 from spice_kernel_db.db import (
     ConcurrentModificationError,
     KernelDB,
+    MetakernelNotTracked,
     MetakernelUnreachableError,
 )
 from spice_kernel_db.parser import parse_metakernel, parse_metakernel_text
@@ -19,6 +20,7 @@ __all__ = [
     "ConcurrentModificationError",
     "Config",
     "KernelDB",
+    "MetakernelNotTracked",
     "MetakernelUnreachableError",
     "ensure_config",
     "fetch_metakernel",

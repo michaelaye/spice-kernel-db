@@ -18,7 +18,12 @@ from spice_kernel_db.config import (
     setup_interactive,
     show_config,
 )
-from spice_kernel_db.db import KernelDB, MetakernelUnreachableError, _format_size
+from spice_kernel_db.db import (
+    KernelDB,
+    MetakernelNotTracked,
+    MetakernelUnreachableError,
+    _format_size,
+)
 from spice_kernel_db import registry
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
@@ -568,9 +573,13 @@ quick start:
             metakernel = _require_metakernel(args.metakernel, db, args.mission)
             if metakernel is None:
                 return
-            db.check_metakernel(
-                metakernel, mission=args.mission, verbose=args.verbose,
-            )
+            try:
+                db.check_metakernel(
+                    metakernel, mission=args.mission, verbose=args.verbose,
+                )
+            except MetakernelNotTracked as exc:
+                print(f"check: {exc}", file=sys.stderr)
+                sys.exit(1)
 
         elif args.command == "verify":
             metakernel = _require_metakernel(args.metakernel, db, args.mission)

@@ -5909,3 +5909,78 @@ class TestPromptsWithoutATerminal:
         for name in ("_choose_server", "_choose_mission"):
             src = inspect.getsource(getattr(cli, name))
             assert "input(" not in src, f"{name} calls input() directly"
+
+
+class TestCheckUntrackedMetakernel:
+    """Issue #11: `check <name>.tm` raised FileNotFoundError from the parser."""
+
+    def _db(self, tmp_path):
+        db = KernelDB(tmp_path / "t.duckdb")
+        return db
+
+    def test_untracked_name_raises_a_typed_error_not_filenotfound(self, tmp_path):
+        from spice_kernel_db import MetakernelNotTracked
+
+        db = self._db(tmp_path)
+        try:
+            with pytest.raises(MetakernelNotTracked) as exc:
+                db.check_metakernel("never_downloaded.tm")
+            assert "not tracked locally" in str(exc.value)
+            assert "spice-kernel-db get never_downloaded.tm" in str(exc.value)
+        finally:
+            db.close()
+
+    def test_a_real_path_still_works(self, tmp_path):
+        db = self._db(tmp_path)
+        mk = tmp_path / "local.tm"
+        mk.write_text(
+            "\\begindata\n"
+            "PATH_VALUES = ( '/data' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/lsk/naif0012.tls' )\n"
+            "\\begintext\n"
+        )
+        try:
+            result = db.check_metakernel(mk)
+            assert "missing" in result
+        finally:
+            db.close()
+
+    def test_registered_name_resolves_to_its_path(self, tmp_path):
+        """A bare name that IS tracked must resolve, as `resolve` does."""
+        db = self._db(tmp_path)
+        mk = tmp_path / "tracked.tm"
+        mk.write_text(
+            "\\begindata\n"
+            "PATH_VALUES = ( '/data' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/lsk/naif0012.tls' )\n"
+            "\\begintext\n"
+        )
+        try:
+            db.con.execute(
+                "INSERT INTO metakernel_registry "
+                "(mk_path, mission, source_url, filename, acquired_at) "
+                "VALUES (?, ?, ?, ?, now())",
+                [str(mk), "JUICE", "http://x/tracked.tm", "tracked.tm"],
+            )
+            assert db.resolve_metakernel_path("tracked.tm") == mk
+            result = db.check_metakernel("tracked.tm")
+            assert "missing" in result
+        finally:
+            db.close()
+
+    def test_cli_prints_one_line_and_exits_1(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        KernelDB(tmp_path / "t.duckdb").close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "k"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg):
+            with pytest.raises(SystemExit) as exc:
+                main(["check", "never_downloaded.tm"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1, f"expected one line, got: {err!r}"
+        assert "not tracked locally" in err
+        assert "Traceback" not in err and "FileNotFoundError" not in err
