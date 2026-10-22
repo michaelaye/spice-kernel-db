@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import re
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -24,6 +26,34 @@ from rich.progress import (
 )
 
 from spice_kernel_db.parser import ParsedMetakernel
+
+# Network timeouts, measured against spiftp.esac.esa.int on
+# 2026-09-18 with 30 fresh connections at 8-way concurrency:
+#
+#   TCP+TLS handshake      median 3.30 s   p90 5.44 s   max 12.58 s
+#   response after that    median 0.05 s   p90 1.06 s   max  4.05 s
+#
+# Two of those 30 connections never completed the handshake at all, hanging
+# for 19 s and 70 s. With no timeout (the pre-0.20.0 behaviour) a single such
+# connection stalls its worker for as long as the server keeps the socket
+# open, which is the main reason a 102-kernel metakernel could take minutes.
+#
+# The connect timeout has to clear the *handshake* tail, not just the 0.05 s
+# TCP connect: urllib3 leaves the connect timeout on the socket while it
+# wraps it in TLS, so a slow ESA handshake is charged against this budget.
+#
+# As of this change these bound EVERY request in this module, not only the
+# size queries: before, list_remote_metakernels, list_remote_missions,
+# _fetch_metakernel and download_kernel called urlopen() with no timeout at
+# all, so one stalled ESA socket hung browse/get/update indefinitely (#12).
+#
+# PROBE_TIMEOUT covers a single user-requested HEAD. It used to be 5.0 s,
+# below the p90 handshake above, so roughly one probe in ten failed on a
+# healthy server and get reported the metakernel as missing (#10).
+CONNECT_TIMEOUT = 15.0
+READ_TIMEOUT = 10.0
+
+PROBE_TIMEOUT = CONNECT_TIMEOUT
 
 # Known SPICE archive servers
 SPICE_SERVERS: dict[str, str] = {
@@ -78,7 +108,7 @@ def list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]:
     if not mk_dir_url.endswith("/"):
         mk_dir_url += "/"
 
-    with urllib.request.urlopen(mk_dir_url) as resp:
+    with urllib.request.urlopen(mk_dir_url, timeout=CONNECT_TIMEOUT) as resp:
         html = resp.read().decode("utf-8", errors="replace")
 
     results: list[RemoteMetakernel] = []
@@ -125,7 +155,7 @@ def list_remote_missions(server_url: str) -> list[str]:
     if not server_url.endswith("/"):
         server_url += "/"
 
-    with urllib.request.urlopen(server_url) as resp:
+    with urllib.request.urlopen(server_url, timeout=CONNECT_TIMEOUT) as resp:
         html = resp.read().decode("utf-8", errors="replace")
 
     missions: list[str] = []
@@ -155,14 +185,71 @@ DEFAULT_ALT_MK_PATHS: tuple[str, ...] = (
 )
 
 
-def _head_ok(url: str, timeout: float = 5.0) -> bool:
-    """Return True if a HEAD request to *url* responds successfully."""
+class ProbeResult(enum.Enum):
+    """Outcome of a single HEAD probe.
+
+    Separate members for ABSENT and UNREACHABLE because the caller must not
+    report them the same way: a 404 means the file is not there, a timeout
+    means we do not know (#10). The old boolean collapsed both to False and
+    `get` printed "not found" for a server that was merely slow.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNREACHABLE = "unreachable"
+
+
+@dataclass
+class Probe:
+    """A probe outcome and, when it failed, why."""
+
+    result: ProbeResult
+    detail: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.result is ProbeResult.PRESENT
+
+    @property
+    def unreachable(self) -> bool:
+        return self.result is ProbeResult.UNREACHABLE
+
+
+def probe_url(url: str, timeout: float = PROBE_TIMEOUT) -> Probe:
+    """HEAD *url* and classify the outcome.
+
+    An HTTP status is an answer from the server, so 404 (and any other 4xx/5xx)
+    means ABSENT. Anything that prevents us getting a status at all -- timeout,
+    DNS failure, refused connection, reset -- is UNREACHABLE, because the file
+    may well exist.
+    """
+    req = urllib.request.Request(url, method="HEAD")
     try:
-        req = urllib.request.Request(url, method="HEAD")
         with urllib.request.urlopen(req, timeout=timeout):
-            return True
-    except Exception:
-        return False
+            return Probe(ProbeResult.PRESENT)
+    except urllib.error.HTTPError as exc:
+        return Probe(ProbeResult.ABSENT, f"HTTP {exc.code}")
+    except (TimeoutError, socket.timeout):
+        return Probe(ProbeResult.UNREACHABLE, f"no response within {timeout:.0f} s")
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return Probe(
+                ProbeResult.UNREACHABLE, f"no response within {timeout:.0f} s"
+            )
+        return Probe(ProbeResult.UNREACHABLE, str(reason))
+    except Exception as exc:  # pragma: no cover - defensive
+        return Probe(ProbeResult.UNREACHABLE, str(exc))
+
+
+def _head_ok(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
+    """Return True if a HEAD request to *url* responds successfully.
+
+    Kept for the bulk callers (availability sweeps), which only need a yes/no
+    and treat an unreachable server as "not available". Single, user-requested
+    probes should call probe_url() so they can tell the two apart.
+    """
+    return probe_url(url, timeout).ok
 
 
 def check_mk_availability(
@@ -268,7 +355,7 @@ def fetch_metakernel(url: str) -> str:
 
 def _fetch_metakernel(url: str) -> tuple[str, str]:
     """Download metakernel; return (text, final_url_after_redirects)."""
-    with urllib.request.urlopen(url) as resp:
+    with urllib.request.urlopen(url, timeout=CONNECT_TIMEOUT) as resp:
         text = resp.read().decode("utf-8", errors="replace")
         return text, resp.geturl()
 
@@ -317,23 +404,6 @@ def resolve_kernel_urls(
 
     return urls
 
-
-# Timeouts for the size queries, measured against spiftp.esac.esa.int on
-# 2026-09-18 with 30 fresh connections at 8-way concurrency:
-#
-#   TCP+TLS handshake      median 3.30 s   p90 5.44 s   max 12.58 s
-#   response after that    median 0.05 s   p90 1.06 s   max  4.05 s
-#
-# Two of those 30 connections never completed the handshake at all, hanging
-# for 19 s and 70 s. With no timeout (the pre-0.20.0 behaviour) a single such
-# connection stalls its worker for as long as the server keeps the socket
-# open, which is the main reason a 102-kernel metakernel could take minutes.
-#
-# The connect timeout has to clear the *handshake* tail, not just the 0.05 s
-# TCP connect: urllib3 leaves the connect timeout on the socket while it
-# wraps it in TLS, so a slow ESA handshake is charged against this budget.
-CONNECT_TIMEOUT = 15.0
-READ_TIMEOUT = 10.0
 
 _thread_local = threading.local()
 
@@ -446,7 +516,7 @@ def download_kernel(
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
-            with urllib.request.urlopen(url) as resp:
+            with urllib.request.urlopen(url, timeout=CONNECT_TIMEOUT) as resp:
                 content_length = resp.headers.get("Content-Length")
                 expected_size = int(content_length) if content_length else None
                 while True:
