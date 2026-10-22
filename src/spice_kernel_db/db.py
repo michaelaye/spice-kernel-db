@@ -1135,6 +1135,205 @@ class KernelDB:
             return Path(row[0])
         return None
 
+    def verify_against_server(
+        self,
+        mk_path: str | Path,
+        mission: str | None = None,
+        *,
+        check_hash: bool = False,
+        check_spice: bool = False,
+    ) -> dict:
+        """Compare each local kernel of a metakernel against the server.
+
+        `check` only asked whether a file of each name existed, so a local file
+        holding the wrong content counted as present. On
+        juice_crema_5_2_v473_20260819_001.tm that reported "Found locally:
+        102/102" while 10 files differed from the server, one of them a
+        245 MB DSK present locally as 11 MB (#15).
+
+        The checks, cheapest first:
+
+        * size -- one HEAD per kernel. A size mismatch already PROVES the files
+          differ, so this alone catches every case in the issue.
+        * hash -- only with *check_hash*, and only for kernels whose size
+          matched, since a mismatch is already decided. Downloads each kernel,
+          so it is opt-in.
+        * spice -- with *check_spice*, furnsh each local kernel in an isolated
+          kernel pool and report what SPICE refuses to read. Needs spiceypy.
+
+        Returns ``{'entries': [...], 'ok': int, 'bad': int, 'unchecked': int}``.
+        Status is one of ok, SIZE_MISMATCH, HASH_MISMATCH, UNREADABLE,
+        NO_REMOTE or MISSING_LOCAL.
+        """
+        from spice_kernel_db.hashing import sha256_file
+        from spice_kernel_db.remote import query_remote_sizes, resolve_kernel_urls
+
+        resolved_mk = self.resolve_metakernel_path(mk_path)
+        if resolved_mk is None:
+            raise MetakernelNotTracked(str(mk_path))
+        parsed = parse_metakernel(resolved_mk)
+        if mission is None:
+            mission = guess_mission(str(resolved_mk))
+
+        row = self.con.execute(
+            "SELECT source_url FROM metakernel_registry WHERE mk_path = ?",
+            [str(resolved_mk)],
+        ).fetchone()
+        mk_url = row[0] if row else None
+        if not mk_url:
+            return {
+                "entries": [{
+                    "filename": Path(resolved_mk).name,
+                    "status": "NO_REMOTE",
+                    "detail": "no source_url recorded; cannot compare to a server",
+                }],
+                "ok": 0, "bad": 0, "unchecked": len(parsed.kernels),
+            }
+
+        # Resolve the remote URLs from the REMOTE metakernel, not the local
+        # one. rewrite_metakernel() replaces PATH_VALUES with absolute local
+        # paths, and resolve_kernel_urls() interprets PATH_VALUES relative to
+        # the metakernel URL -- so a rewritten .tm yields URLs like
+        # https://server/tmp/kernels/lsk/naif0012.tls. The remote copy is the
+        # authority for where the files live on the server anyway.
+        from spice_kernel_db.remote import fetch_metakernel
+        from spice_kernel_db.parser import parse_metakernel_text
+
+        try:
+            remote_text = fetch_metakernel(mk_url)
+        except OSError as exc:
+            # Only network/IO failures are "could not fetch". Anything else is
+            # a bug here and must not be disguised as an unreachable server.
+            return {
+                "entries": [{
+                    "filename": Path(resolved_mk).name,
+                    "status": "NO_REMOTE",
+                    "detail": f"could not fetch {mk_url}: {exc}",
+                }],
+                "ok": 0, "bad": 0, "unchecked": len(parsed.kernels),
+            }
+        remote_parsed = parse_metakernel_text(remote_text, source=mk_url)
+
+        urls_by_name = {
+            Path(raw).name: url
+            for raw, url in zip(
+                remote_parsed.kernels,
+                resolve_kernel_urls(mk_url, remote_parsed),
+            )
+        }
+        locals_: dict[str, str | None] = {}
+        for raw in parsed.kernels:
+            fname = Path(raw).name
+            local, _ = self.resolve_kernel(fname, preferred_mission=mission)
+            locals_[fname] = local
+
+        sizes = query_remote_sizes(sorted(urls_by_name.values()))
+        entries: list[dict] = []
+        ok = bad = unchecked = 0
+        size_matched: list[tuple[str, str, str]] = []
+
+        for raw in parsed.kernels:
+            fname = Path(raw).name
+            url = urls_by_name.get(fname)
+            if url is None:
+                entries.append({"filename": fname, "status": "NO_REMOTE",
+                                "detail": "not listed in the remote metakernel"})
+                unchecked += 1
+                continue
+            local = locals_.get(fname)
+            if not local or not Path(local).is_file():
+                entries.append({"filename": fname, "status": "MISSING_LOCAL",
+                                "detail": "not present locally"})
+                bad += 1
+                continue
+            remote_size = sizes.get(url)
+            if remote_size is None:
+                entries.append({"filename": fname, "status": "NO_REMOTE",
+                                "detail": f"server did not report a size for {url}"})
+                unchecked += 1
+                continue
+            local_size = Path(local).stat().st_size
+            if local_size != remote_size:
+                entries.append({
+                    "filename": fname, "status": "SIZE_MISMATCH",
+                    "detail": f"local {local_size:,} bytes, server "
+                              f"{remote_size:,} bytes",
+                })
+                bad += 1
+                continue
+            size_matched.append((fname, local, url))
+
+        if check_hash:
+            import tempfile
+            import urllib.request
+
+            from spice_kernel_db.remote import CONNECT_TIMEOUT
+
+            for fname, local, url in size_matched:
+                try:
+                    with tempfile.NamedTemporaryFile() as tmp:
+                        with urllib.request.urlopen(
+                            url, timeout=CONNECT_TIMEOUT
+                        ) as resp:
+                            while chunk := resp.read(1 << 20):
+                                tmp.write(chunk)
+                        tmp.flush()
+                        remote_hash = sha256_file(tmp.name)
+                except Exception as exc:
+                    entries.append({"filename": fname, "status": "NO_REMOTE",
+                                    "detail": f"could not fetch for hashing: {exc}"})
+                    unchecked += 1
+                    continue
+                if sha256_file(local) != remote_hash:
+                    entries.append({
+                        "filename": fname, "status": "HASH_MISMATCH",
+                        "detail": "same size as the server but different content",
+                    })
+                    bad += 1
+                else:
+                    entries.append({"filename": fname, "status": "ok",
+                                    "detail": "size and hash match"})
+                    ok += 1
+        else:
+            for fname, _local, _url in size_matched:
+                entries.append({"filename": fname, "status": "ok",
+                                "detail": "size matches"})
+                ok += 1
+
+        if check_spice:
+            spice_entries = self._spice_readability(locals_)
+            entries.extend(spice_entries)
+            bad += sum(1 for e in spice_entries if e["status"] == "UNREADABLE")
+
+        return {"entries": entries, "ok": ok, "bad": bad, "unchecked": unchecked}
+
+    @staticmethod
+    def _spice_readability(locals_: dict[str, str | None]) -> list[dict]:
+        """furnsh each local kernel in isolation; report what SPICE refuses."""
+        try:
+            import spiceypy
+        except ImportError:
+            return [{
+                "filename": "-", "status": "NO_REMOTE",
+                "detail": "spiceypy not installed; skipped readability check",
+            }]
+        out = []
+        for fname, local in locals_.items():
+            if not local or not Path(local).is_file():
+                continue
+            try:
+                spiceypy.kclear()
+                spiceypy.furnsh(str(local))
+            except Exception as exc:
+                out.append({"filename": fname, "status": "UNREADABLE",
+                            "detail": str(exc).splitlines()[0][:120]})
+            finally:
+                try:
+                    spiceypy.kclear()
+                except Exception:
+                    pass
+        return out
+
     def check_metakernel(
         self,
         mk_path: str | Path,

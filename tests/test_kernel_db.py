@@ -5909,6 +5909,8 @@ class TestPromptsWithoutATerminal:
         for name in ("_choose_server", "_choose_mission"):
             src = inspect.getsource(getattr(cli, name))
             assert "input(" not in src, f"{name} calls input() directly"
+
+
 class TestCheckUntrackedMetakernel:
     """Issue #11: `check <name>.tm` raised FileNotFoundError from the parser."""
 
@@ -6058,3 +6060,160 @@ class TestMissionHelpTextIsConsistent:
                 main([verb, "--help"])
             out = capsys.readouterr().out
             assert expected in out, f"{verb} --help does not say {expected!r}"
+
+
+class TestVerifyAgainstServer:
+    """Issue #15: check only asked whether a file of each name existed.
+
+    On juice_crema_5_2_v473_20260819_001.tm it reported "Found locally:
+    102/102" while 10 of those differed from the server, including a 245 MB
+    DSK present locally as 11 MB.
+    """
+
+    MK_URL = "https://example.com/JUICE/kernels/mk/juice.tm"
+
+    def _setup(self, tmp_path, local_sizes):
+        kdir = tmp_path / "kernels" / "lsk"
+        kdir.mkdir(parents=True)
+        mk = tmp_path / "juice.tm"
+        entries = []
+        for name, size in local_sizes.items():
+            (kdir / name).write_bytes(b"x" * size)
+            entries.append(f"'$K/lsk/{name}'")
+        mk.write_text(
+            "\\begindata\n"
+            f"PATH_VALUES = ( '{tmp_path / 'kernels'}' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            f"KERNELS_TO_LOAD = ( {' '.join(entries)} )\n"
+            "\\begintext\n"
+        )
+        db = KernelDB(tmp_path / "t.duckdb")
+        db.add_mission("JUICE", "https://example.com/",
+                       "https://example.com/mk/", True)
+        db.scan_directory(str(tmp_path / "kernels"), mission="JUICE")
+        db.con.execute(
+            "INSERT INTO metakernel_registry "
+            "(mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, 'JUICE', ?, 'juice.tm', now())",
+            [str(mk), self.MK_URL],
+        )
+        return db, mk
+
+    def _url(self, name):
+        return f"https://example.com/JUICE/kernels/lsk/{name}"
+
+    def _remote_mk(self, names):
+        """What the server serves: conventional relative PATH_VALUES."""
+        entries = " ".join(f"'$K/lsk/{n}'" for n in names)
+        return (
+            "\\begindata\n"
+            "PATH_VALUES = ( '..' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            f"KERNELS_TO_LOAD = ( {entries} )\n"
+            "\\begintext\n"
+        )
+
+    def test_size_mismatch_is_caught(self, tmp_path):
+        """The pck00011 shape: right name, wrong bytes."""
+        db, mk = self._setup(tmp_path, {"pck00011.tpc": 133802})
+        try:
+            with patch("spice_kernel_db.remote.fetch_metakernel",
+                       return_value=self._remote_mk(["pck00011.tpc"])), \
+                 patch("spice_kernel_db.remote.query_remote_sizes",
+                       return_value={self._url("pck00011.tpc"): 131226}):
+                r = db.verify_against_server(str(mk), mission="JUICE")
+        finally:
+            db.close()
+        assert r["bad"] == 1
+        bad = [e for e in r["entries"] if e["status"] == "SIZE_MISMATCH"]
+        assert len(bad) == 1
+        assert "133,802" in bad[0]["detail"] and "131,226" in bad[0]["detail"]
+
+    def test_matching_size_is_ok(self, tmp_path):
+        db, mk = self._setup(tmp_path, {"naif0012.tls": 5000})
+        try:
+            with patch("spice_kernel_db.remote.fetch_metakernel",
+                       return_value=self._remote_mk(["naif0012.tls"])), \
+                 patch("spice_kernel_db.remote.query_remote_sizes",
+                       return_value={self._url("naif0012.tls"): 5000}):
+                r = db.verify_against_server(str(mk), mission="JUICE")
+        finally:
+            db.close()
+        assert r["bad"] == 0 and r["ok"] == 1
+
+    def test_server_without_a_size_is_unchecked_not_ok(self, tmp_path):
+        """A server that will not say must not be counted as verified."""
+        db, mk = self._setup(tmp_path, {"naif0012.tls": 5000})
+        try:
+            with patch("spice_kernel_db.remote.fetch_metakernel",
+                       return_value=self._remote_mk(["naif0012.tls"])), \
+                 patch("spice_kernel_db.remote.query_remote_sizes",
+                       return_value={self._url("naif0012.tls"): None}):
+                r = db.verify_against_server(str(mk), mission="JUICE")
+        finally:
+            db.close()
+        assert r["ok"] == 0 and r["bad"] == 0 and r["unchecked"] == 1
+
+    def test_no_source_url_reports_rather_than_claiming_ok(self, tmp_path):
+        db, mk = self._setup(tmp_path, {"naif0012.tls": 5000})
+        try:
+            db.con.execute("UPDATE metakernel_registry SET source_url = NULL")
+            r = db.verify_against_server(str(mk), mission="JUICE")
+        finally:
+            db.close()
+        assert r["ok"] == 0
+        assert r["entries"][0]["status"] == "NO_REMOTE"
+
+    def test_untracked_metakernel_raises_the_typed_error(self, tmp_path):
+        from spice_kernel_db import MetakernelNotTracked
+        db = KernelDB(tmp_path / "t.duckdb")
+        try:
+            with pytest.raises(MetakernelNotTracked):
+                db.verify_against_server("nope.tm")
+        finally:
+            db.close()
+
+    def test_cli_full_exits_1_on_a_mismatch(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        db, mk = self._setup(tmp_path, {"pck00011.tpc": 133802})
+        db.close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "kernels"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.remote.fetch_metakernel",
+                   return_value=self._remote_mk(["pck00011.tpc"])), \
+             patch("spice_kernel_db.remote.query_remote_sizes",
+                   return_value={self._url("pck00011.tpc"): 131226}):
+            with pytest.raises(SystemExit) as exc:
+                main(["check", str(mk), "--full"])
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "SIZE_MISMATCH" in out and "pck00011.tpc" in out
+
+    def test_plain_check_still_reports_it_as_found(self, tmp_path, capsys):
+        """The bug being fixed: without --full the wrong file counts as present."""
+        from spice_kernel_db.cli import main
+
+        db, mk = self._setup(tmp_path, {"pck00011.tpc": 133802})
+        db.close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "kernels"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg):
+            main(["check", str(mk)])
+        out = capsys.readouterr().out
+        assert "Found locally:  1/1" in out
+        assert "SIZE_MISMATCH" not in out
+
+    def test_hash_and_spice_require_full(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        db, mk = self._setup(tmp_path, {"naif0012.tls": 10})
+        db.close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "kernels"))
+        with patch("spice_kernel_db.config.load_config", return_value=cfg):
+            with pytest.raises(SystemExit) as exc:
+                main(["check", str(mk), "--hash"])
+        assert exc.value.code == 2
+        assert "require --full" in capsys.readouterr().err

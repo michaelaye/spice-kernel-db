@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`check --full` compares each local kernel against the server** (#15).
+  `check` only asked whether a file of each name existed, so a file holding
+  the wrong content counted as present: on
+  `juice_crema_5_2_v473_20260819_001.tm` it reported "Found locally: 102/102"
+  while 10 differed from the server, one a 245 MB DSK present as 11 MB.
+
+  Size is compared first, via one HEAD per kernel — a size mismatch already
+  proves the files differ, which catches every case in the issue. `--hash`
+  additionally compares sha256 for kernels whose size matched, downloading
+  each, and `--spice` furnshes every local kernel and reports what SPICE
+  cannot read. The command exits 1 when anything is wrong.
+
+  New: `KernelDB.verify_against_server()`.
+
+  Remote URLs are derived from the *remote* metakernel rather than the local
+  one. `rewrite_metakernel()` replaces `PATH_VALUES` with absolute local
+  paths, and `resolve_kernel_urls()` interprets them relative to the
+  metakernel URL, so a rewritten `.tm` would otherwise produce URLs like
+  `https://server/tmp/kernels/lsk/naif0012.tls`.
+
 ### Fixed
 
 - **Every HTTP request now carries a timeout** (#12). `list_remote_metakernels`,

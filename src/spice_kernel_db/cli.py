@@ -178,6 +178,21 @@ quick start:
         "metakernel", nargs="?", default=None,
         help="Path to .tm file (omit to select from local registry)",
     )
+    p_check.add_argument(
+        "--full", action="store_true",
+        help="Also compare each local kernel against the server (size). "
+             "Without this, check only asks whether a file of each name exists",
+    )
+    p_check.add_argument(
+        "--hash", action="store_true",
+        help="With --full, also compare sha256 for kernels whose size matched. "
+             "Downloads each one, so it is slow",
+    )
+    p_check.add_argument(
+        "--spice", action="store_true",
+        help="With --full, furnsh each local kernel and report what SPICE "
+             "cannot read (requires spiceypy)",
+    )
     p_check.add_argument("--mission", help="Filter by mission name")
 
     # --- verify ---
@@ -579,6 +594,20 @@ quick start:
                 db.check_metakernel(
                     metakernel, mission=args.mission, verbose=args.verbose,
                 )
+                if args.full:
+                    report = db.verify_against_server(
+                        metakernel,
+                        mission=args.mission,
+                        check_hash=args.hash,
+                        check_spice=args.spice,
+                    )
+                    _print_server_check(report, verbose=args.verbose)
+                    if report["bad"]:
+                        sys.exit(1)
+                elif args.hash or args.spice:
+                    print("check: --hash and --spice require --full",
+                          file=sys.stderr)
+                    sys.exit(2)
             except MetakernelNotTracked as exc:
                 print(f"check: {exc}", file=sys.stderr)
                 sys.exit(1)
@@ -1221,6 +1250,27 @@ def _print_coverage_table(results, body_id: int, metakernel: str):
             )
 
     console.print(table)
+
+
+def _print_server_check(report: dict, *, verbose: bool = False) -> None:
+    """Render verify_against_server()'s result.
+
+    Problems are always listed: the point of --full is that a silent
+    "Found locally: 102/102" hid ten wrong files (#15).
+    """
+    bad = [e for e in report["entries"] if e["status"] not in ("ok", "NO_REMOTE")]
+    unchecked = [e for e in report["entries"] if e["status"] == "NO_REMOTE"]
+    print("\n  Against the server:")
+    print(f"    Verified:     {report['ok']}")
+    print(f"    Problems:     {report['bad']}")
+    print(f"    Unchecked:    {report['unchecked']}")
+    for e in bad:
+        print(f"      {e['status']:<14} {e['filename']}  ({e['detail']})")
+    if unchecked and verbose:
+        for e in unchecked:
+            print(f"      {e['status']:<14} {e['filename']}  ({e['detail']})")
+    elif unchecked:
+        print(f"      (use -v to list the {len(unchecked)} unchecked)")
 
 
 def _require_metakernel(
