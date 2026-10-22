@@ -342,7 +342,9 @@ quick start:
         "metakernel", nargs="?", default=None,
         help="Metakernel filename or path (omit to select interactively)",
     )
-    p_update.add_argument("--mission", help="Override mission name")
+    p_update.add_argument(
+        "--mission", help="Override auto-detected mission name"
+    )
     p_update.add_argument(
         "--download-dir", default=None,
         help="Directory for downloaded kernels (default: from config)",
@@ -834,6 +836,7 @@ quick start:
                 yes=args.yes,
                 force=args.force,
                 alias_filename=alias_filename,
+                verbose=args.verbose,
             )
 
         elif args.command == "update":
@@ -847,6 +850,7 @@ quick start:
                     download_dir=args.download_dir,
                     yes=args.yes,
                     force=args.force,
+                    verbose=args.verbose,
                 )
             except MetakernelUnreachableError as e:
                 from rich.panel import Panel as _Panel

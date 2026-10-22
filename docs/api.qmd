@@ -231,6 +231,7 @@ db.get_metakernel(
     mission: str | None = None,
     yes: bool = False,
     force: bool = False,
+    verbose: bool = False,
 ) -> dict
 ```
 
@@ -247,6 +248,8 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 
 `download_dir` defaults to the configured `kernel_dir` from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
 
+`verbose=True` additionally lists each kernel's resolved URL beneath the status table. The table itself is always shown — it precedes the download prompt, so it is what you decide on.
+
 Returns a dict with keys: `found`, `missing`, `downloaded`, `warnings`.
 
 #### `update_metakernel`
@@ -258,6 +261,7 @@ db.update_metakernel(
     download_dir: str | Path | None = None,
     yes: bool = False,
     force: bool = False,
+    verbose: bool = False,
 ) -> dict
 ```
 
@@ -265,7 +269,7 @@ Re-fetch a metakernel from its source URL and download new or missing kernels. L
 
 Raises `LookupError` if the metakernel is not found in the registry or was added via scan without a source URL. Raises `MetakernelUnreachableError` (a `LookupError` subclass) when the remote returns 403/404/410 — typically because NAIF rotated the file into `former_versions/`; use `prune_metakernels()` to clean up the stale registry row.
 
-After downloading, automatically rescans the kernel directories referenced by the metakernel so newly downloaded files are immediately indexed.
+After downloading, automatically rescans the kernel directories referenced by the metakernel so newly downloaded files are immediately indexed. `verbose=True` names each directory as it is re-scanned; otherwise the count is reported in one line.
 
 Returns the same dict as `get_metakernel`.
 

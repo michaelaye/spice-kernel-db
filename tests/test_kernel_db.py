@@ -5971,6 +5971,19 @@ class TestCheckUntrackedMetakernel:
             db.close()
 
     def test_cli_prints_one_line_and_exits_1(self, tmp_path, capsys):
+
+
+class TestVerboseReachesGetAndUpdate:
+    """Issue #4: -v/--verbose was parsed but never passed to get or update."""
+
+    def test_both_methods_accept_verbose(self):
+        import inspect
+        for name in ("get_metakernel", "update_metakernel"):
+            sig = inspect.signature(getattr(KernelDB, name))
+            assert "verbose" in sig.parameters, f"{name} has no verbose parameter"
+            assert sig.parameters["verbose"].default is False
+
+    def test_cli_get_passes_verbose(self, tmp_path):
         from spice_kernel_db.cli import main
 
         KernelDB(tmp_path / "t.duckdb").close()
@@ -5984,3 +5997,63 @@ class TestCheckUntrackedMetakernel:
         assert err.count("\n") == 1, f"expected one line, got: {err!r}"
         assert "not tracked locally" in err
         assert "Traceback" not in err and "FileNotFoundError" not in err
+
+
+        seen = {}
+
+        def fake_get(self, url, **kwargs):
+            seen.update(kwargs)
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch.object(KernelDB, "get_metakernel", fake_get):
+            main(["-v", "get", "https://example.com/x.tm"])
+        assert seen.get("verbose") is True
+
+    def test_cli_update_passes_verbose(self, tmp_path):
+        from spice_kernel_db.cli import main
+
+        KernelDB(tmp_path / "t.duckdb").close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "k"))
+        seen = {}
+
+        def fake_update(self, name, **kwargs):
+            seen.update(kwargs)
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch.object(KernelDB, "update_metakernel", fake_update):
+            main(["-v", "update", "x.tm"])
+        assert seen.get("verbose") is True
+
+    def test_without_v_the_flag_is_false(self, tmp_path):
+        from spice_kernel_db.cli import main
+
+        KernelDB(tmp_path / "t.duckdb").close()
+        cfg = Config(db_path=str(tmp_path / "t.duckdb"),
+                     kernel_dir=str(tmp_path / "k"))
+        seen = {}
+
+        def fake_get(self, url, **kwargs):
+            seen.update(kwargs)
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch.object(KernelDB, "get_metakernel", fake_get):
+            main(["get", "https://example.com/x.tm"])
+        assert seen.get("verbose") is False
+
+
+class TestMissionHelpTextIsConsistent:
+    """Issue #3: update's --mission help differed from the other verbs."""
+
+    def test_all_verbs_describe_mission_the_same_way(self, capsys):
+        from spice_kernel_db.cli import main
+
+        expected = "Override auto-detected mission name"
+        for verb in ("scan", "get", "update", "browse"):
+            with pytest.raises(SystemExit):
+                main([verb, "--help"])
+            out = capsys.readouterr().out
+            assert expected in out, f"{verb} --help does not say {expected!r}"
