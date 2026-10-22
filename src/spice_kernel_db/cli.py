@@ -22,12 +22,15 @@ from spice_kernel_db.db import KernelDB, MetakernelUnreachableError, _format_siz
 from spice_kernel_db import registry
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
+    Probe,
+    ProbeResult,
     _head_ok,
     check_mk_availability,
     discover_mk_url,
     list_remote_metakernels,
     list_remote_missions,
     probe_mk_candidates,
+    probe_url,
     server_label_for,
 )
 
@@ -735,20 +738,40 @@ quick start:
                 filename = url
                 live_url = mk_dir_url + filename
                 archive_url = mk_dir_url + "former_versions/" + filename
-                if _head_ok(live_url):
+                live = probe_url(live_url)
+                archive = Probe(ProbeResult.ABSENT) if live.ok else probe_url(
+                    archive_url
+                )
+                if live.ok:
                     url = live_url
-                elif _head_ok(archive_url):
+                elif archive.ok:
                     console.print(
                         f"[dim]Not in mk/, using archived copy: "
                         f"former_versions/{filename}[/dim]"
                     )
                     url = archive_url
+                elif live.unreachable or archive.unreachable:
+                    # The server never gave us a status, so we do not know
+                    # whether the file is there. Saying "not found" here was
+                    # issue #10: a slow ESA handshake read as a missing file.
+                    unreachable = live if live.unreachable else archive
+                    print(
+                        f"Could not reach the server for '{filename}' "
+                        f"({unreachable.detail}).\n"
+                        f"  Tried:\n"
+                        f"    {live_url}  [{live.detail or 'ok'}]\n"
+                        f"    {archive_url}  [{archive.detail or 'ok'}]\n"
+                        f"  The metakernel may still exist. Retry, or raise the "
+                        f"timeout if this server is habitually slow.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 else:
                     print(
                         f"Metakernel '{filename}' not found.\n"
                         f"  Tried:\n"
-                        f"    {live_url}\n"
-                        f"    {archive_url}",
+                        f"    {live_url}  [{live.detail}]\n"
+                        f"    {archive_url}  [{archive.detail}]",
                         file=sys.stderr,
                     )
                     sys.exit(1)

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Every HTTP request now carries a timeout** (#12). `list_remote_metakernels`,
+  `list_remote_missions`, `_fetch_metakernel` and `download_kernel` called
+  `urlopen()` with none at all, so a stalled ESA socket could hang `browse`,
+  `get` and `update` indefinitely. 0.20.0 had bounded only the size queries.
+
+- **A slow server is no longer reported as a missing metakernel** (#10).
+  `_head_ok` caught every exception and returned `False`, so a 404, a timeout
+  and a connection failure were indistinguishable and `get` printed
+  "Metakernel not found" for files that existed. `probe_url()` now classifies:
+  an HTTP status is an answer (absent), anything that prevents getting a status
+  is unreachable, and `get` says so and names the timeout instead.
+
+### Changed
+
+- The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
+  below the p90 TLS handshake (5.44 s) that this project measured against ESA,
+  so roughly one probe in ten could fail against a healthy server.
+
 ## [0.20.1] - 2026-09-19
 
 ### Fixed

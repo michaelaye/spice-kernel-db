@@ -22,6 +22,8 @@ from spice_kernel_db.hashing import (
 )
 from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
 from spice_kernel_db.remote import (
+    Probe,
+    ProbeResult,
     RemoteMetakernel,
     check_mk_availability,
     list_remote_metakernels,
@@ -732,7 +734,7 @@ class TestGetMetakernel:
         \\begintext
     """)
 
-    def _mock_urlopen(self, req_or_url):
+    def _mock_urlopen(self, req_or_url, *args, **kwargs):
         """Mock urlopen that returns metakernel text or HEAD sizes."""
         mock_resp = MagicMock()
 
@@ -1039,7 +1041,7 @@ class TestGetMetakernel:
 class TestMetakernelListingInfo:
     REMOTE_MK_TEXT = TestGetMetakernel.REMOTE_MK_TEXT
 
-    def _mock_urlopen(self, req_or_url):
+    def _mock_urlopen(self, req_or_url, *args, **kwargs):
         return TestGetMetakernel._mock_urlopen(self, req_or_url)
 
     def _get_test_mk(self, db, tmp_path):
@@ -1433,7 +1435,7 @@ class TestListRemoteMetakernels:
 class TestBrowseRemoteMetakernels:
     SAMPLE_HTML = TestListRemoteMetakernels.SAMPLE_HTML
 
-    def _mock_urlopen(self, url):
+    def _mock_urlopen(self, url, *args, **kwargs):
         mock_resp = MagicMock()
         mock_resp.read.return_value = self.SAMPLE_HTML.encode()
         mock_resp.__enter__ = lambda s: s
@@ -5030,14 +5032,19 @@ class TestGetArchiveFallback:
         cfg = self._setup(tmp_path)
         captured: dict = {}
 
-        def fake_head_ok(url, timeout=5.0):
-            return "former_versions/" in url
+        def fake_probe(url, timeout=None):
+            # live 404s, archived copy is present
+            return (
+                Probe(ProbeResult.PRESENT)
+                if "former_versions/" in url
+                else Probe(ProbeResult.ABSENT, "HTTP 404")
+            )
 
         def fake_get_metakernel(self, url, **kwargs):
             captured["url"] = url
 
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli._head_ok", side_effect=fake_head_ok), \
+             patch("spice_kernel_db.cli.probe_url", side_effect=fake_probe), \
              patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
             main(["get", "juice_crema_2_0_ops_v200.tm", "--mission", "JUICE"])
 
@@ -5054,15 +5061,19 @@ class TestGetArchiveFallback:
         captured: dict = {}
         head_calls: list[str] = []
 
-        def fake_head_ok(url, timeout=5.0):
+        def fake_probe(url, timeout=None):
             head_calls.append(url)
-            return "former_versions/" not in url  # live yes, archive irrelevant
+            return (
+                Probe(ProbeResult.ABSENT, "HTTP 404")
+                if "former_versions/" in url
+                else Probe(ProbeResult.PRESENT)
+            )
 
         def fake_get_metakernel(self, url, **kwargs):
             captured["url"] = url
 
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli._head_ok", side_effect=fake_head_ok), \
+             patch("spice_kernel_db.cli.probe_url", side_effect=fake_probe), \
              patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
             main(["get", "juice_ops.tm", "--mission", "JUICE"])
 
@@ -5627,3 +5638,172 @@ class TestDefaultDbPath:
         finally:
             db.close()
 
+
+
+class TestProbeUrlClassification:
+    """probe_url must tell "the server said no" from "the server said nothing".
+
+    Issue #10: _head_ok returned False for both, so `get` printed "Metakernel
+    not found" for a metakernel that existed on a slow server.
+    """
+
+    def _raise(self, exc):
+        def _f(req, timeout=None):
+            raise exc
+        return _f
+
+    def test_http_404_is_absent(self):
+        from spice_kernel_db.remote import ProbeResult, probe_url
+        err = urllib.error.HTTPError("http://x/y.tm", 404, "Not Found", {}, None)
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._raise(err)):
+            p = probe_url("http://x/y.tm")
+        assert p.result is ProbeResult.ABSENT
+        assert "404" in p.detail
+        assert not p.unreachable
+
+    def test_socket_timeout_is_unreachable(self):
+        from spice_kernel_db.remote import ProbeResult, probe_url
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._raise(TimeoutError())):
+            p = probe_url("http://x/y.tm", timeout=7.0)
+        assert p.result is ProbeResult.UNREACHABLE
+        assert "7 s" in p.detail
+
+    def test_urlerror_wrapping_timeout_is_unreachable(self):
+        from spice_kernel_db.remote import ProbeResult, probe_url
+        err = urllib.error.URLError(TimeoutError("timed out"))
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._raise(err)):
+            p = probe_url("http://x/y.tm")
+        assert p.result is ProbeResult.UNREACHABLE
+
+    def test_connection_refused_is_unreachable(self):
+        from spice_kernel_db.remote import ProbeResult, probe_url
+        err = urllib.error.URLError(ConnectionRefusedError("refused"))
+        with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                   side_effect=self._raise(err)):
+            p = probe_url("http://x/y.tm")
+        assert p.result is ProbeResult.UNREACHABLE
+
+    def test_head_ok_still_false_for_both(self):
+        """The bulk helper keeps its yes/no contract for existing callers."""
+        from spice_kernel_db.remote import _head_ok
+        for exc in (urllib.error.HTTPError("u", 404, "NF", {}, None),
+                    TimeoutError()):
+            with patch("spice_kernel_db.remote.urllib.request.urlopen",
+                       side_effect=self._raise(exc)):
+                assert _head_ok("http://x/y.tm") is False
+
+
+class TestEveryRequestHasATimeout:
+    """Issue #12: four urlopen calls had no timeout and could hang forever."""
+
+    def test_listing_fetch_and_download_pass_a_timeout(self):
+        from spice_kernel_db import remote
+        seen = []
+
+        class _Resp:
+            headers = {"Content-Length": "0"}
+            def read(self, *a):
+                return b""
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def _spy(url, *args, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return _Resp()
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=_spy):
+            for call in (
+                lambda: remote.list_remote_metakernels("http://x/mk/"),
+                lambda: remote.list_remote_missions("http://x/"),
+                lambda: remote.fetch_metakernel("http://x/a.tm"),
+            ):
+                try:
+                    call()
+                except Exception:
+                    pass  # parsing an empty body is not what this test checks
+
+        assert seen, "no urlopen calls were made"
+        assert all(t is not None for t in seen), (
+            f"a request went out with no timeout: {seen}"
+        )
+        assert all(t == remote.CONNECT_TIMEOUT for t in seen)
+
+    def test_probe_timeout_clears_the_measured_handshake_p90(self):
+        """5 s sat below the p90 handshake recorded in remote.py (5.44 s)."""
+        from spice_kernel_db.remote import PROBE_TIMEOUT
+        assert PROBE_TIMEOUT >= 12.58, "must clear the measured handshake max"
+
+
+class TestGetDistinguishesMissingFromUnreachable:
+    """Issue #10: `get` claimed a metakernel did not exist when ESA was slow.
+
+    The real case: the file was downloadable by curl minutes earlier and was
+    listed in mk/, but a stalled handshake made both probes fail and skd
+    printed "Metakernel ... not found" and exited 1.
+    """
+
+    MK_DIR = "https://example.com/JUICE/kernels/mk/"
+    NAME = "juice_crema_5_1_150lb_23_1_a3.tm"
+
+    def _cfg(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission("JUICE", "https://example.com/", self.MK_DIR, True)
+        db.close()
+        return Config(
+            db_path=str(tmp_path / "test.duckdb"),
+            kernel_dir=str(tmp_path / "kernels"),
+        )
+
+    def _run(self, tmp_path, probe, capsys):
+        from spice_kernel_db.cli import main
+
+        cfg = self._cfg(tmp_path)
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.cli.probe_url", side_effect=probe), \
+             patch.object(KernelDB, "get_metakernel", lambda self, url, **k: None):
+            with pytest.raises(SystemExit) as exc:
+                main(["get", self.NAME, "--mission", "JUICE"])
+        return exc.value.code, capsys.readouterr().err
+
+    def test_timeout_does_not_claim_the_file_is_missing(self, tmp_path, capsys):
+        from spice_kernel_db.remote import Probe, ProbeResult
+
+        def probe(url, timeout=None):
+            return Probe(ProbeResult.UNREACHABLE, "no response within 15 s")
+
+        code, err = self._run(tmp_path, probe, capsys)
+        assert code == 1
+        assert "not found" not in err.lower(), (
+            "a timeout must not be reported as a missing metakernel"
+        )
+        assert "could not reach" in err.lower()
+        assert "no response within 15 s" in err
+
+    def test_real_404_still_says_not_found(self, tmp_path, capsys):
+        from spice_kernel_db.remote import Probe, ProbeResult
+
+        def probe(url, timeout=None):
+            return Probe(ProbeResult.ABSENT, "HTTP 404")
+
+        code, err = self._run(tmp_path, probe, capsys)
+        assert code == 1
+        assert "not found" in err.lower()
+        assert "could not reach" not in err.lower()
+
+    def test_archive_unreachable_is_not_reported_as_absent(self, tmp_path, capsys):
+        """Live 404s honestly, archive times out: we still do not know."""
+        from spice_kernel_db.remote import Probe, ProbeResult
+
+        def probe(url, timeout=None):
+            if "former_versions/" in url:
+                return Probe(ProbeResult.UNREACHABLE, "no response within 15 s")
+            return Probe(ProbeResult.ABSENT, "HTTP 404")
+
+        code, err = self._run(tmp_path, probe, capsys)
+        assert code == 1
+        assert "could not reach" in err.lower()
