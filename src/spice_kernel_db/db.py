@@ -175,6 +175,22 @@ class ConcurrentModificationError(RuntimeError):
     """
 
 
+class MetakernelNotTracked(LookupError):
+    """Raised when a metakernel name is neither on disk nor in the registry.
+
+    Issue #11: `skd check <name>.tm` used to hand the bare name straight to
+    parse_metakernel(), which raised FileNotFoundError from inside the parser
+    and printed a traceback. The name simply had not been downloaded yet.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(
+            f"'{name}' is not tracked locally; fetch it with "
+            f"`spice-kernel-db get {name}`"
+        )
+
+
 class MetakernelUnreachableError(LookupError):
     """Raised when the remote metakernel returns a permanent HTTP error
     (403/404/410), typically because NAIF rotated the file into
@@ -1098,6 +1114,27 @@ class KernelDB:
                 cur.execute("ROLLBACK")
                 raise
 
+    def resolve_metakernel_path(self, name: str | Path) -> Path | None:
+        """Return the on-disk path of a metakernel named *name*, or None.
+
+        Accepts a path (used as-is when it exists) or a bare filename, which is
+        looked up in metakernel_registry the way `info` and `resolve` do.
+        Issue #11: check_metakernel() passed its argument straight to
+        parse_metakernel(), so a bare name that was never downloaded produced a
+        FileNotFoundError traceback from deep inside the parser.
+        """
+        candidate = Path(name)
+        if candidate.is_file():
+            return candidate
+        row = self.con.execute(
+            "SELECT mk_path FROM metakernel_registry "
+            "WHERE filename = ? OR mk_path = ?",
+            [str(name), str(name)],
+        ).fetchone()
+        if row and Path(row[0]).is_file():
+            return Path(row[0])
+        return None
+
     def check_metakernel(
         self,
         mk_path: str | Path,
@@ -1117,6 +1154,10 @@ class KernelDB:
                 missing:  list of raw_entry
                 warnings: list of str
         """
+        resolved = self.resolve_metakernel_path(mk_path)
+        if resolved is None:
+            raise MetakernelNotTracked(str(mk_path))
+        mk_path = resolved
         parsed = parse_metakernel(mk_path)
         if mission is None:
             mission = guess_mission(str(mk_path))

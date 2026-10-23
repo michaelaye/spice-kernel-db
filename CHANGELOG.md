@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treat EOF as no. The `db --delete` and `dedup --execute` confirmations were
   affected too, contrary to what #14 assumed, and are fixed here.
 
+- **`check <name>.tm` no longer tracebacks for a metakernel that was never
+  downloaded** (#11). The name went straight to the parser, which raised
+  `FileNotFoundError`. A bare name is now resolved through
+  `metakernel_registry` first, as `resolve` and `info` already did, and an
+  unknown one prints one line naming the `get` command to run, then exits 1.
+  New: `KernelDB.resolve_metakernel_path()` and `MetakernelNotTracked`.
+
 ### Changed
 
 - The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
