@@ -34,6 +34,54 @@ from spice_kernel_db.remote import (
     server_label_for,
 )
 
+class AmbiguousServer(Exception):
+    """More than one known SPICE server carries the requested mission."""
+
+    def __init__(self, mission: str, urls: list[str]):
+        self.mission = mission
+        self.urls = urls
+        super().__init__(f"{mission} is on {len(urls)} servers")
+
+
+def _require_interactive(what: str) -> None:
+    """Exit cleanly when *what* needs a terminal and stdin is not one.
+
+    Issue #14: the interactive menus called input() unconditionally, so
+    `ssh host skd mission add`, a CI step or any redirected stdin produced a
+    raw EOFError traceback instead of an explanation.
+    """
+    if not sys.stdin.isatty():
+        print(
+            f"{what} needs a terminal for its menu.\n"
+            f"  Pass the values instead, e.g. "
+            f"spice-kernel-db mission add <NAME> --server-url <URL>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _ask(prompt: str) -> str:
+    """input() that reports EOF instead of raising it (#14)."""
+    try:
+        return input(prompt)
+    except EOFError:
+        print(
+            "\nstdin closed while waiting for input; aborting.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _confirm(prompt: str) -> bool:
+    """A [y/N] prompt. EOF counts as "no", which is the safe default (#14)."""
+    try:
+        answer = input(prompt).strip().lower()
+    except EOFError:
+        print("\nstdin closed; assuming no.", file=sys.stderr)
+        return False
+    return answer in ("y", "yes")
+
+
 console = Console()
 err_console = Console(stderr=True)
 
@@ -466,10 +514,7 @@ quick start:
             print(f"No database found at {db_path}")
             return
         if not args.yes:
-            answer = input(
-                f"Delete database at {db_path}? [y/N]: "
-            ).strip().lower()
-            if answer not in ("y", "yes"):
+            if not _confirm(f"Delete database at {db_path}? [y/N]: "):
                 print("Aborted.")
                 return
         db_path.unlink()
@@ -560,10 +605,7 @@ quick start:
             if args.execute and not args.yes:
                 # Show dry run first, then ask
                 db.deduplicate_with_symlinks(dry_run=True)
-                answer = input(
-                    "\nProceed with deduplication? [y/N]: "
-                ).strip().lower()
-                if answer not in ("y", "yes"):
+                if not _confirm("\nProceed with deduplication? [y/N]: "):
                     print("Aborted.")
                     return
             db.deduplicate_with_symlinks(dry_run=not args.execute)
@@ -1202,7 +1244,7 @@ def _resolve_body_interactive(name_or_id: str) -> int | None:
         console.print(f"  [{i}] {desc}  (NAIF ID {bid})")
     console.print()
     try:
-        raw = input(f"Select [1-{len(candidates)}]: ").strip()
+        raw = _ask(f"Select [1-{len(candidates)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -1261,7 +1303,7 @@ def _select_local_metakernel(
     )
 
     try:
-        raw = input(f"Select metakernel [1-{len(rows)}]: ").strip()
+        raw = _ask(f"Select metakernel [1-{len(rows)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -1335,7 +1377,7 @@ def _configure_new_missions(
             print(f"    [{i}] {sname}  ({SPICE_SERVERS[sname]})")
         print(f"    [{len(server_names) + 1}] Skip")
         while True:
-            choice = input(f"  Select [1-{len(server_names) + 1}]: ").strip()
+            choice = _ask(f"  Select [1-{len(server_names) + 1}]: ").strip()
             if choice.isdigit():
                 idx = int(choice)
                 if 1 <= idx <= len(server_names):
@@ -1387,7 +1429,7 @@ def _resolve_mission_mk_dir(
     console.print(table)
 
     try:
-        raw = input(f"\nSelect mission [1-{len(missions)}]: ").strip()
+        raw = _ask(f"\nSelect mission [1-{len(missions)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None, None
@@ -1464,7 +1506,7 @@ def _interactive_pick_deduplicated_kernel(db: KernelDB) -> str | None:
     console.print(table)
 
     try:
-        raw = input(f"\nSelect kernel [1-{len(rows)}]: ").strip()
+        raw = _ask(f"\nSelect kernel [1-{len(rows)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -1517,7 +1559,7 @@ def _interactive_pick_local_metakernel(
     console.print(table)
 
     try:
-        raw = input(f"\nSelect metakernel [1-{len(rows)}]: ").strip()
+        raw = _ask(f"\nSelect metakernel [1-{len(rows)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -1606,7 +1648,7 @@ def _interactive_select_metakernel(
     console.print(table)
 
     try:
-        raw = input(f"\nSelect metakernel [1-{len(choices)}]: ").strip()
+        raw = _ask(f"\nSelect metakernel [1-{len(choices)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -1666,7 +1708,7 @@ def _choose_server() -> tuple[str, str]:
         print(f"  [{i}] {name}  ({SPICE_SERVERS[name]})")
     print()
     while True:
-        choice = input(f"Select server [1-{len(server_names)}]: ").strip()
+        choice = _ask(f"Select server [1-{len(server_names)}]: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(server_names):
             server_label = server_names[int(choice) - 1]
             return server_label, SPICE_SERVERS[server_label]
@@ -1702,7 +1744,7 @@ def _select_mk_url_for_unsupported(server_url: str, mission_name: str) -> str | 
     for i, url in enumerate(hits, 1):
         print(f"  [{i}] {url}")
     while True:
-        choice = input(f"Select [1-{len(hits)}]: ").strip()
+        choice = _ask(f"Select [1-{len(hits)}]: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(hits):
             return hits[int(choice) - 1]
         print("Invalid choice.")
@@ -1738,7 +1780,7 @@ def _choose_mission(server_url: str, server_label: str) -> tuple[str, str] | Non
 
     print()
     while True:
-        choice = input(
+        choice = _ask(
             f"Select mission [1-{len(supported)}] or type name: "
         ).strip()
         if choice.isdigit() and 1 <= int(choice) <= len(supported):
@@ -1762,9 +1804,14 @@ def _choose_mission(server_url: str, server_label: str) -> tuple[str, str] | Non
 
 def _choose_dedup(mission_name: str) -> bool:
     """Prompt for deduplication preference. Returns True when enabled."""
-    answer = input(
-        f"\nEnable deduplication for {mission_name}? [Y/n]: "
-    ).strip().lower()
+    # Default-yes prompt, so EOF must mean yes here, not the _confirm default.
+    try:
+        answer = input(
+            f"\nEnable deduplication for {mission_name}? [Y/n]: "
+        ).strip().lower()
+    except EOFError:
+        print("\nstdin closed; keeping the default (enabled).", file=sys.stderr)
+        return True
     return answer not in ("n", "no")
 
 
@@ -1785,6 +1832,7 @@ def _save_mission(
 
 def _mission_add_interactive(db: KernelDB, args) -> None:
     """Interactive mission setup: choose server → pick mission → configure."""
+    _require_interactive("mission add")
     server_label, server_url = _choose_server()
     chosen = _choose_mission(server_url, server_label)
     if chosen is None:
@@ -1794,17 +1842,12 @@ def _mission_add_interactive(db: KernelDB, args) -> None:
     _save_mission(db, mission_name, server_label, server_url, mk_dir_url, dedup)
 
 
-def _infer_server_url(name: str, server_url_arg: str | None) -> str | None:
-    """Infer the server URL from --server-url, or a unique match in SPICE_SERVERS.
-
-    Returns None if nothing can be inferred (no --server-url and remote calls fail).
-    """
-    if server_url_arg:
-        return server_url_arg if server_url_arg.endswith("/") else server_url_arg + "/"
-
+def _servers_hosting(name: str) -> list[str]:
+    """Every known server that lists *name*, in SPICE_SERVERS order."""
     from concurrent.futures import ThreadPoolExecutor
 
     urls = list(SPICE_SERVERS.values())
+
     def _has_mission(url: str) -> bool:
         try:
             return any(m.lower() == name.lower() for m in list_remote_missions(url))
@@ -1813,10 +1856,28 @@ def _infer_server_url(name: str, server_url_arg: str | None) -> str | None:
 
     with ThreadPoolExecutor(max_workers=len(urls)) as pool:
         found = list(pool.map(_has_mission, urls))
-    for url, ok in zip(urls, found):
-        if ok:
-            return url
-    return None
+    return [url for url, ok in zip(urls, found) if ok]
+
+
+def _infer_server_url(name: str, server_url_arg: str | None) -> str | None:
+    """Infer the server URL from --server-url, or a UNIQUE match in SPICE_SERVERS.
+
+    Returns None when nothing can be inferred. Raises AmbiguousServer when more
+    than one known server carries the mission.
+
+    Issue #13: this used to return the first server that had the mission, so
+    `skd mission add JUICE` silently configured NASA's NAIF mirror even though
+    JUICE is published on ESA first and the mirror can lag. The help text had
+    always promised that a positional name needs --server-url "unless the name
+    is unambiguous on a known server"; now the code enforces that.
+    """
+    if server_url_arg:
+        return server_url_arg if server_url_arg.endswith("/") else server_url_arg + "/"
+
+    hits = _servers_hosting(name)
+    if len(hits) > 1:
+        raise AmbiguousServer(name, hits)
+    return hits[0] if hits else None
 
 
 def _mission_add_noninteractive(db: KernelDB, args) -> None:
@@ -1829,7 +1890,20 @@ def _mission_add_noninteractive(db: KernelDB, args) -> None:
         sys.exit(2)
 
     mission_name = args.name
-    server_url = _infer_server_url(mission_name, args.server_url)
+    try:
+        server_url = _infer_server_url(mission_name, args.server_url)
+    except AmbiguousServer as exc:
+        listed = "\n".join(
+            f"    --server-url {u}   ({server_label_for(u)})" for u in exc.urls
+        )
+        print(
+            f"mission add: '{mission_name}' is published on "
+            f"{len(exc.urls)} known servers:\n{listed}\n"
+            f"  Re-run with one of them. ESA missions are often published on "
+            f"ESA first, so the NAIF mirror can lag.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if server_url is None:
         print(
             f"mission add: cannot determine server URL for '{mission_name}'. "
