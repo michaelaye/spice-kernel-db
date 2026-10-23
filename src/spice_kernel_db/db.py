@@ -1769,6 +1769,7 @@ class KernelDB:
         yes: bool = False,
         force: bool = False,
         alias_filename: str | None = None,
+        verbose: bool = False,
     ) -> dict:
         """Fetch a remote metakernel, show status, and download missing kernels.
 
@@ -1779,6 +1780,9 @@ class KernelDB:
                 remote subdirectory structure (lsk/, spk/, etc.).
             mission: Override auto-detected mission name.
             yes: If True, skip the confirmation prompt.
+            verbose: If True, list each kernel's resolved URL under the status
+                table. The table itself is always shown: it precedes the
+                download prompt, so it is what the user decides on (#4).
             force: If True, treat all kernels as missing and re-download.
             alias_filename: Optional second name to expose this metakernel
                 under (e.g. the version-stripped ``juice_crema_5_2.tm`` when
@@ -1953,6 +1957,11 @@ class KernelDB:
                 )
             table.add_row(label, sz_str, f"[{style}]{status}[/{style}]")
         console.print(table)
+
+        if verbose:
+            console.print("[dim]Resolved URLs:[/dim]")
+            for relpath, kurl in zip(relpaths, urls):
+                console.print(f"  [dim]{relpath} -> {kurl}[/dim]")
 
         console.print(Panel(
             f"Total: [bold]{total}[/bold] | "
@@ -2150,6 +2159,7 @@ class KernelDB:
         download_dir: str | Path | None = None,
         yes: bool = False,
         force: bool = False,
+        verbose: bool = False,
     ) -> dict:
         """Re-fetch a metakernel from its source URL and download new kernels.
 
@@ -2158,7 +2168,9 @@ class KernelDB:
 
         Args:
             mk_path_or_name: mk_path or filename of a registered metakernel.
-            mission: Override mission name.
+            mission: Override auto-detected mission name.
+            verbose: If True, name each directory as it is re-scanned; otherwise
+                report the count in one line (#4).
             download_dir: Override kernel download directory.
             yes: Skip confirmation prompt.
 
@@ -2247,10 +2259,17 @@ class KernelDB:
                     if resolved.is_dir():
                         scan_dirs.add(resolved)
                 for sd in sorted(scan_dirs):
-                    console.print(
-                        f"[dim]Re-scanning {sd} for updated kernels...[/dim]"
-                    )
+                    if verbose:
+                        console.print(
+                            f"[dim]Re-scanning {sd} for updated kernels...[/dim]"
+                        )
                     self.scan_directory(str(sd), mission=mission)
+                if scan_dirs and not verbose:
+                    console.print(
+                        f"[dim]Re-scanned {len(scan_dirs)} "
+                        f"director{'y' if len(scan_dirs) == 1 else 'ies'} "
+                        f"for updated kernels.[/dim]"
+                    )
             except Exception as e:
                 logger.warning("Post-update rescan failed: %s", e)
 
