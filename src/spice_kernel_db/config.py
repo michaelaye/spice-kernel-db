@@ -13,8 +13,10 @@ from pathlib import Path
 DEFAULT_DB_PATH = "~/.local/share/spice-kernel-db/kernels.duckdb"
 DEFAULT_KERNEL_DIR = "~/.local/share/spice-kernel-db/kernels"
 
-# Without a config file, KernelDB() used to open this path. Still found during
-# the 0.19.x and 0.20.x releases; remove the lookup in 0.21.0.
+# The pre-0.19 default. 0.19.x and 0.20.x still opened a database found here,
+# with a FutureWarning naming 0.21.0 as the cut-off. 0.21.0 is this release, so
+# the automatic lookup is gone -- the name stays only so the error below can
+# point at the file and say what to do with it.
 LEGACY_DB_PATH = "~/.spice_kernels.duckdb"
 
 CONFIG_DIR = Path("~/.config/spice-kernel-db").expanduser()
@@ -29,26 +31,27 @@ class Config:
     kernel_dir: str = DEFAULT_KERNEL_DIR
 
 
+class LegacyDatabaseFound(RuntimeError):
+    """A database sits at the pre-0.19 default and nothing says to use it."""
+
+
 def default_db_path() -> str:
-    """The database path to use when no config file exists.
+    """The database path to use when no config file exists: ``DEFAULT_DB_PATH``.
 
-    That is ``DEFAULT_DB_PATH``, unless only the pre-0.19 default
-    ``LEGACY_DB_PATH`` holds a database; then that one is used, with a
-    ``FutureWarning`` saying where to move it.
+    Until 0.21.0 a database found only at ``LEGACY_DB_PATH`` was opened instead,
+    with a ``FutureWarning``. That lookup is gone. Rather than silently create
+    an empty database beside a populated legacy one -- which would look like
+    data loss -- this raises and names the two commands that fix it.
     """
-    import warnings
-
     if (not Path(DEFAULT_DB_PATH).expanduser().exists()
             and Path(LEGACY_DB_PATH).expanduser().is_file()):
-        warnings.warn(
-            f"spice-kernel-db is using its database at the old default "
-            f"{LEGACY_DB_PATH}. From version 0.21.0 on it only looks in "
-            f"{DEFAULT_DB_PATH}: move the file there, or run "
-            f"`spice-kernel-db config --setup` to record where it lives.",
-            FutureWarning,
-            stacklevel=3,
+        raise LegacyDatabaseFound(
+            f"A spice-kernel-db database exists at the pre-0.19 default "
+            f"{LEGACY_DB_PATH}, which is no longer opened automatically "
+            f"(the FutureWarning in 0.19.x and 0.20.x said 0.21.0 would stop).\n"
+            f"  Either move it:   mv {LEGACY_DB_PATH} {DEFAULT_DB_PATH}\n"
+            f"  or record it:     spice-kernel-db config --setup"
         )
-        return LEGACY_DB_PATH
     return DEFAULT_DB_PATH
 
 
