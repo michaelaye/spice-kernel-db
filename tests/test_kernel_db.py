@@ -6217,3 +6217,50 @@ class TestVerifyAgainstServer:
                 main(["check", str(mk), "--hash"])
         assert exc.value.code == 2
         assert "require --full" in capsys.readouterr().err
+
+
+class TestRemoteSizesAreActuallyChecked:
+    """The size column was never asserted on.
+
+    Before the offline guard these tests opened real sockets to NAIF, and
+    whatever Content-Length came back went unverified; after it, the lookup
+    fails and returns nothing, equally unverified. Either way, no coverage.
+    """
+
+    def test_query_remote_sizes_is_patchable_and_returns_what_it_is_given(
+        self, remote_sizes
+    ):
+        """Pin the seam the fixture relies on, so a rename is caught here."""
+        from spice_kernel_db import remote
+
+        url = "https://example.com/x.bsp"
+        with remote_sizes({url: 4096}):
+            assert remote.query_remote_sizes([url]) == {url: 4096}
+
+    def test_offline_guard_blocks_a_real_connection(self):
+        """The guard itself must work, or everything above is theatre."""
+        import socket
+
+        from tests._netguard import NetworkUseInOfflineTest
+
+        s = socket.socket()
+        try:
+            with pytest.raises(NetworkUseInOfflineTest):
+                s.connect(("naif.jpl.nasa.gov", 443))
+        finally:
+            s.close()
+
+    def test_localhost_is_still_allowed(self):
+        """Blocking loopback would break unrelated libraries."""
+        import socket
+
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        cli = socket.socket()
+        try:
+            cli.connect(("127.0.0.1", port))  # must not raise
+        finally:
+            cli.close()
+            srv.close()

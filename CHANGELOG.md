@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metakernel URL, so a rewritten `.tm` would otherwise produce URLs like
   `https://server/tmp/kernels/lsk/naif0012.tls`.
 
+
+### Changed
+
+- **The unit test suite no longer touches the network.** It already intended
+  not to — the fixtures patch `urlopen` — but `query_remote_sizes` goes
+  through a `requests` session, which that patch never covered, so a single
+  test opened six real TLS connections to `naif.jpl.nasa.gov`. They failed,
+  the failures were swallowed, and the test passed regardless. Blocking the
+  sockets changed no assertion, so the connections carried no coverage, only
+  ~0.66 s of handshake each and a dependency on JPL being reachable from CI.
+
+  `tests/conftest.py` now blocks non-loopback connections for any test not
+  marked `network`, and names the test that tried. Suite runtime 23.1 s to
+  9.4 s.
+
+- **Real network tests added** (`tests/test_network.py`), covering what was
+  previously only mocked: `probe_url` against a genuine 404 and an unroutable
+  address, the NASA and ESA directory listings against live `mod_autoindex`
+  output, `query_remote_sizes`, and the ESA handshake fitting inside
+  `PROBE_TIMEOUT`. Deselected by default; run with `pytest -m network`.
+
 ### Fixed
 
 - **Every HTTP request now carries a timeout** (#12). `list_remote_metakernels`,
