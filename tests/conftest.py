@@ -28,6 +28,7 @@ be up, while the fetching behaviour still gets exercised against real servers.
 
 from __future__ import annotations
 
+
 import socket
 
 import pytest
@@ -121,3 +122,156 @@ def remote_sizes():
             yield m
 
     return _patch
+
+
+# --- fixtures moved here when test_kernel_db.py was split by subsystem ---
+# These need the same imports the old test module had.
+import hashlib
+import logging
+import shutil
+import textwrap
+import urllib.error
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import pytest
+from spice_kernel_db import KernelDB, parse_metakernel
+from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.hashing import (
+    canonicalize_mission,
+    classify_kernel,
+    guess_mission,
+    sha256_file,
+)
+from spice_kernel_db.parser import parse_metakernel_text, write_metakernel
+from spice_kernel_db.remote import (
+    Probe,
+    ProbeResult,
+    RemoteMetakernel,
+    check_mk_availability,
+    list_remote_metakernels,
+    list_remote_missions,
+    resolve_kernel_urls,
+    SPICE_SERVERS,
+    _DIR_ENTRY_RE,
+    _VERSION_TAG_RE,
+)
+from tests.helpers import FIXTURE_REGISTRY
+
+
+@pytest.fixture
+def tmp_spice_tree(tmp_path):
+    """Create a realistic SPICE directory tree with known duplicates."""
+
+    # --- generic_kernels ---
+    gk = tmp_path / "generic_kernels"
+    for sub in ["lsk", "pck", "spk/planets", "spk/satellites"]:
+        (gk / sub).mkdir(parents=True)
+
+    (gk / "lsk/naif0012.tls").write_text("FAKE LSK naif0012")
+    (gk / "pck/pck00011.tpc").write_text("FAKE PCK pck00011")
+    (gk / "pck/gm_de431.tpc").write_text("FAKE PCK gm_de431")
+    (gk / "spk/planets/de432s.bsp").write_bytes(
+        b"FAKE SPK de432s" + b"\x00" * 100
+    )
+    # Note: generic name without time range
+    (gk / "spk/satellites/jup365.bsp").write_bytes(
+        b"FAKE SPK jup365" + b"\x00" * 200
+    )
+
+    # --- JUICE/kernels ---
+    juice = tmp_path / "JUICE" / "kernels"
+    for sub in ["ck", "fk", "ik", "lsk", "pck", "sclk", "spk", "mk"]:
+        (juice / sub).mkdir(parents=True)
+
+    # Duplicates of generic:
+    (juice / "lsk/naif0012.tls").write_text("FAKE LSK naif0012")
+    (juice / "pck/pck00011.tpc").write_text("FAKE PCK pck00011")
+    (juice / "pck/gm_de431.tpc").write_text("FAKE PCK gm_de431")
+    (juice / "spk/de432s.bsp").write_bytes(
+        b"FAKE SPK de432s" + b"\x00" * 100
+    )
+    # Same content as jup365.bsp but different name!
+    (juice / "spk/jup365_19900101_20500101.bsp").write_bytes(
+        b"FAKE SPK jup365" + b"\x00" * 200
+    )
+
+    # Mission-specific:
+    (juice / "ck/juice_sc_default_v01.bc").write_bytes(b"FAKE CK juice")
+    (juice / "fk/juice_v44.tf").write_text("FAKE FK juice_v44")
+    (juice / "ik/juice_janus_v08.ti").write_text("FAKE IK janus")
+    (juice / "sclk/juice_fict_160326_v02.tsc").write_text("FAKE SCLK")
+    (juice / "spk/juice_crema_5_1_a3_v01.bsp").write_bytes(
+        b"FAKE SPK juice trajectory"
+    )
+    (juice / "pck/juice_jup012.tpc").write_text("FAKE PCK juice_jup012")
+
+    # Metakernel
+    (juice / "mk/juice_test.tm").write_text(textwrap.dedent("""\
+        KPL/MK
+
+        Test JUICE metakernel
+        =====================
+
+           Source: https://spiftp.esac.esa.int/data/SPICE/JUICE/kernels/
+
+        \\begindata
+
+          PATH_VALUES  = ( '..' )
+          PATH_SYMBOLS = ( 'KERNELS' )
+
+          KERNELS_TO_LOAD = (
+
+            '$KERNELS/ck/juice_sc_default_v01.bc'
+            '$KERNELS/fk/juice_v44.tf'
+            '$KERNELS/ik/juice_janus_v08.ti'
+            '$KERNELS/lsk/naif0012.tls'
+            '$KERNELS/pck/pck00011.tpc'
+            '$KERNELS/pck/gm_de431.tpc'
+            '$KERNELS/pck/juice_jup012.tpc'
+            '$KERNELS/sclk/juice_fict_160326_v02.tsc'
+            '$KERNELS/spk/de432s.bsp'
+            '$KERNELS/spk/jup365_19900101_20500101.bsp'
+            '$KERNELS/spk/juice_crema_5_1_a3_v01.bsp'
+
+          )
+
+        \\begintext
+    """))
+
+    # --- MRO/kernels ---
+    mro = tmp_path / "MRO" / "kernels"
+    for sub in ["lsk", "pck", "spk", "ck"]:
+        (mro / sub).mkdir(parents=True)
+
+    (mro / "lsk/naif0012.tls").write_text("FAKE LSK naif0012")
+    (mro / "pck/pck00011.tpc").write_text("FAKE PCK pck00011")
+    (mro / "spk/de432s.bsp").write_bytes(
+        b"FAKE SPK de432s" + b"\x00" * 100
+    )
+    (mro / "ck/mro_sc_2024.bc").write_bytes(b"FAKE CK mro")
+
+    return tmp_path
+
+
+@pytest.fixture
+def db(tmp_path):
+    """Create a fresh KernelDB."""
+    return KernelDB(tmp_path / "test.duckdb")
+
+
+@pytest.fixture
+def populated_db(db, tmp_spice_tree):
+    """DB with all three mission trees scanned."""
+    db.scan_directory(tmp_spice_tree / "generic_kernels", mission="generic")
+    db.scan_directory(tmp_spice_tree / "JUICE" / "kernels")
+    db.scan_directory(tmp_spice_tree / "MRO" / "kernels")
+    return db
+
+
+@pytest.fixture
+def fixture_registry(monkeypatch):
+    """Point the registry loader at the test fixture (no cache, no bundled lookup)."""
+    from spice_kernel_db import registry as reg
+    reg.load_registry.cache_clear()
+    monkeypatch.setattr(reg, "load_registry", lambda: reg.load_registry_from(FIXTURE_REGISTRY))
+    yield reg
