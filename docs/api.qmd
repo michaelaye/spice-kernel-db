@@ -19,7 +19,7 @@ KernelDB(db_path: str | Path | None = None, read_only: bool = False)
 
 Opens (or creates) the database at the given path. When `db_path` is `None` (the default), the path is loaded from `~/.config/spice-kernel-db/config.toml`; without a config file it is `~/.local/share/spice-kernel-db/kernels.duckdb`. The schema is initialized automatically (unless `read_only=True`).
 
-Until 0.21.0, a database found only at the pre-0.19 default `~/.spice_kernels.duckdb` is still opened when no config file exists, with a `FutureWarning` asking you to move it.
+Before 0.21.0, a database found only at the pre-0.19 default `~/.spice_kernels.duckdb` was opened when no config file existed, with a `FutureWarning`. Since 0.21.0 it is not: if one is there and the new default is not, `spice-kernel-db` raises `LegacyDatabaseFound` naming the move command, rather than quietly starting an empty database beside it.
 
 Set `read_only=True` for commands that only query the database. Several read-only connections can be open at once, but DuckDB's file lock means none can open while another process has the database open for writing (for example during `get`); that raises `duckdb.IOException`.
 

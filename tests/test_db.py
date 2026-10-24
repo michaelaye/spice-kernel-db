@@ -1014,12 +1014,30 @@ class TestDefaultDbPath:
             warnings.simplefilter("error")
             assert default_db_path() == DEFAULT_DB_PATH
 
-    def test_legacy_database_is_used_with_a_warning(self, tmp_path):
-        from spice_kernel_db.config import LEGACY_DB_PATH, default_db_path
+    def test_legacy_database_now_raises_instead_of_being_opened(self, tmp_path):
+        """0.21.0 stopped opening it, as the FutureWarning promised.
+
+        It raises rather than quietly creating an empty database next to a
+        populated legacy one, which would look like data loss.
+        """
+        from spice_kernel_db.config import LegacyDatabaseFound, default_db_path
 
         (tmp_path / ".spice_kernels.duckdb").write_bytes(b"")
-        with pytest.warns(FutureWarning, match="0.21.0"):
-            assert default_db_path() == LEGACY_DB_PATH
+        with pytest.raises(LegacyDatabaseFound) as exc:
+            default_db_path()
+        msg = str(exc.value)
+        assert "~/.spice_kernels.duckdb" in msg
+        assert "config --setup" in msg and "mv " in msg
+
+    def test_legacy_file_is_ignored_once_the_new_one_exists(self, tmp_path):
+        """No error when the user has already migrated."""
+        from spice_kernel_db.config import DEFAULT_DB_PATH, default_db_path
+
+        (tmp_path / ".spice_kernels.duckdb").write_bytes(b"")
+        new = tmp_path / ".local/share/spice-kernel-db/kernels.duckdb"
+        new.parent.mkdir(parents=True)
+        new.write_bytes(b"")
+        assert default_db_path() == DEFAULT_DB_PATH
 
     def test_new_database_wins_over_legacy(self, tmp_path):
         import warnings

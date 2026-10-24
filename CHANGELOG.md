@@ -1,11 +1,4 @@
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
+## [0.21.0] - 2026-10-23
 
 ### Added
 
@@ -29,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metakernel URL, so a rewritten `.tm` would otherwise produce URLs like
   `https://server/tmp/kernels/lsk/naif0012.tls`.
 
-
 ### Changed
 
 - **The unit test suite no longer touches the network.** It already intended
@@ -49,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address, the NASA and ESA directory listings against live `mod_autoindex`
   output, `query_remote_sizes`, and the ESA handshake fitting inside
   `PROBE_TIMEOUT`. Deselected by default; run with `pytest -m network`.
+
+
+- The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
+  below the p90 TLS handshake (5.44 s) that this project measured against ESA,
+  so roughly one probe in ten could fail against a healthy server.
 
 ### Fixed
 
@@ -95,11 +92,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`update --mission` help text matches the other verbs** (#3): "Override
   auto-detected mission name".
 
-### Changed
+### Removed
 
-- The single-probe HEAD timeout rises from 5.0 s to 15.0 s. The old value sat
-  below the p90 TLS handshake (5.44 s) that this project measured against ESA,
-  so roughly one probe in ten could fail against a healthy server.
+- **The pre-0.19 database path is no longer opened automatically.** 0.19.x and
+  0.20.x still used a database found only at `~/.spice_kernels.duckdb`, with a
+  `FutureWarning` naming 0.21.0 as the cut-off. This is that release.
+
+  Rather than silently creating an empty database beside a populated legacy
+  one, which would look like data loss, `default_db_path()` now raises
+  `LegacyDatabaseFound` naming both fixes: move the file, or run
+  `spice-kernel-db config --setup`.
+
 ## [0.20.1] - 2026-09-19
 
 ### Fixed
