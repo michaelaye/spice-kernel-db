@@ -8,9 +8,9 @@ Keeping ``app`` in its own module avoids a circular import.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import typer
 
@@ -35,11 +35,28 @@ app = typer.Typer(
 
 @dataclass
 class State:
-    """Root options and the loaded config, shared by every command."""
+    """Root options plus the config, shared by every command.
 
-    db: str
+    The config is loaded on first use, not when the root callback runs:
+    Click invokes the root callback before a subcommand parses ``--help``,
+    so eager loading made ``skd get --help`` start first-time setup on a
+    machine without a config file.
+    """
+
+    db_override: str | None
     verbose: bool
-    config: Config
+    load_config: Callable[[], Config]
+    _config: Config | None = field(default=None, init=False, repr=False)
+
+    @property
+    def config(self) -> Config:
+        if self._config is None:
+            self._config = self.load_config()
+        return self._config
+
+    @property
+    def db(self) -> str:
+        return self.db_override or self.config.db_path
 
 
 def state(ctx: typer.Context) -> State:

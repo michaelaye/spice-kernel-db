@@ -45,9 +45,9 @@ def _root(
         # No subcommand — show a useful summary if possible, else help.
         _show_default_summary()
         return
-    # Config is loaded only here, past --help / --version / no-args.
-    config = ensure_config()
-    ctx.obj = State(db=db or config.db_path, verbose=verbose, config=config)
+    # ensure_config is handed over, not called: a command loads the config
+    # the first time it needs it, so `<command> --help` never prompts.
+    ctx.obj = State(db_override=db, verbose=verbose, load_config=ensure_config)
 
 
 def _show_default_summary() -> None:

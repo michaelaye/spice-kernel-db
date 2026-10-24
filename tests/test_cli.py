@@ -107,6 +107,20 @@ class TestCLIVersion:
             main(["--help"])
         assert exc_info.value.code == 0
 
+    def test_subcommand_help_does_not_load_config(self):
+        """`get --help` must not start first-time setup on a fresh machine.
+
+        Click runs the root callback before the subcommand sees --help, so
+        the config has to be loaded lazily, by the command that needs it.
+        """
+        from spice_kernel_db.cli import main
+
+        with patch("spice_kernel_db.cli.ensure_config",
+                   side_effect=AssertionError("ensure_config called")):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["get", "--help"])
+        assert exc_info.value.code == 0
+
     def test_no_args_does_not_crash(self, tmp_path):
         """Invoking with no args should not crash."""
         from spice_kernel_db.cli import main
