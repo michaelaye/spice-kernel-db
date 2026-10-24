@@ -43,7 +43,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission()` (path heuristic) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
 | `config.py` | `Config` dataclass, TOML persistence at `~/.config/spice-kernel-db/config.toml` |
-| `cli.py` | argparse CLI with interactive mission setup, metakernel selection, and dispatching to `KernelDB` |
+| `cli/` | Typer CLI, one module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py` (list, check, verify, coverage, metakernels, resolve, aliases, stats, duplicates), `transform.py` (scan, rewrite, dedup, prune), `configure.py` (mission, config, reset); `prompts.py` holds the shared interactive pickers, `_app.py` the `app` object and per-invocation state, `__init__.py` the root options and `main()` |
 
 ### Key Design Decisions
 
