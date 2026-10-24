@@ -154,12 +154,12 @@ class TestResolveBodyInteractiveReturnsNone:
     """_resolve_body_interactive returns None instead of sys.exit."""
 
     def test_unknown_body_returns_none(self):
-        from spice_kernel_db.cli import _resolve_body_interactive
+        from spice_kernel_db.cli.prompts import _resolve_body_interactive
         result = _resolve_body_interactive("ZZZZNOTABODY999")
         assert result is None
 
     def test_invalid_selection_returns_none(self):
-        from spice_kernel_db.cli import _resolve_body_interactive
+        from spice_kernel_db.cli.prompts import _resolve_body_interactive
         # "earth" is ambiguous (center vs barycenter) — give invalid input
         with patch("builtins.input", return_value="999"):
             result = _resolve_body_interactive("earth")
@@ -355,15 +355,15 @@ class TestMissionAddNoninteractive:
         return types.SimpleNamespace(**defaults)
 
     def test_explicit_mk_dir_url(self, db, monkeypatch):
-        from spice_kernel_db import cli
+        from spice_kernel_db.cli import configure as cli
 
         monkeypatch.setattr(
-            "spice_kernel_db.cli.probe_mk_candidates",
+            "spice_kernel_db.cli.configure.probe_mk_candidates",
             lambda urls, **_: list(urls),
         )
         # Bypass the server-URL guess (no network).
         monkeypatch.setattr(
-            "spice_kernel_db.cli._infer_server_url",
+            "spice_kernel_db.cli.configure._infer_server_url",
             lambda name, server_url_arg: server_url_arg,
         )
 
@@ -372,7 +372,9 @@ class TestMissionAddNoninteractive:
             server_url="https://example.com/",
             mk_dir_url="https://example.com/FOO/data/spice/mk/",
         )
-        cli._mission_add_noninteractive(db, args)
+        cli._mission_add_noninteractive(
+            db, args.name, args.server_url, args.mk_dir_url, args.no_dedup,
+        )
 
         m = db.get_mission("FOO")
         assert m is not None
@@ -380,13 +382,13 @@ class TestMissionAddNoninteractive:
         assert m["dedup"] is True
 
     def test_mk_dir_url_unreachable_exits(self, db, monkeypatch):
-        from spice_kernel_db import cli
+        from spice_kernel_db.cli import configure as cli
 
         monkeypatch.setattr(
-            "spice_kernel_db.cli.probe_mk_candidates", lambda urls, **_: []
+            "spice_kernel_db.cli.configure.probe_mk_candidates", lambda urls, **_: []
         )
         monkeypatch.setattr(
-            "spice_kernel_db.cli._infer_server_url",
+            "spice_kernel_db.cli.configure._infer_server_url",
             lambda name, server_url_arg: server_url_arg,
         )
 
@@ -395,54 +397,62 @@ class TestMissionAddNoninteractive:
             mk_dir_url="https://example.com/FOO/no/such/mk/",
         )
         with pytest.raises(SystemExit) as exc:
-            cli._mission_add_noninteractive(db, args)
+            cli._mission_add_noninteractive(
+            db, args.name, args.server_url, args.mk_dir_url, args.no_dedup,
+        )
         assert exc.value.code == 1
 
     def test_no_hits_exits(self, db, monkeypatch):
-        from spice_kernel_db import cli
+        from spice_kernel_db.cli import configure as cli
 
-        monkeypatch.setattr("spice_kernel_db.cli.discover_mk_url", lambda *a, **kw: [])
+        monkeypatch.setattr("spice_kernel_db.cli.configure.discover_mk_url", lambda *a, **kw: [])
         monkeypatch.setattr(
-            "spice_kernel_db.cli._infer_server_url",
+            "spice_kernel_db.cli.configure._infer_server_url",
             lambda name, server_url_arg: server_url_arg,
         )
 
         args = self._make_args(name="MYSTERY", server_url="https://example.com/")
         with pytest.raises(SystemExit) as exc:
-            cli._mission_add_noninteractive(db, args)
+            cli._mission_add_noninteractive(
+            db, args.name, args.server_url, args.mk_dir_url, args.no_dedup,
+        )
         assert exc.value.code == 1
 
     def test_multiple_hits_exits(self, db, monkeypatch):
-        from spice_kernel_db import cli
+        from spice_kernel_db.cli import configure as cli
 
         monkeypatch.setattr(
-            "spice_kernel_db.cli.discover_mk_url",
+            "spice_kernel_db.cli.configure.discover_mk_url",
             lambda *a, **kw: ["https://x/A/mk/", "https://x/B/mk/"],
         )
         monkeypatch.setattr(
-            "spice_kernel_db.cli._infer_server_url",
+            "spice_kernel_db.cli.configure._infer_server_url",
             lambda name, server_url_arg: server_url_arg,
         )
 
         args = self._make_args(name="M", server_url="https://x/")
         with pytest.raises(SystemExit) as exc:
-            cli._mission_add_noninteractive(db, args)
+            cli._mission_add_noninteractive(
+            db, args.name, args.server_url, args.mk_dir_url, args.no_dedup,
+        )
         assert exc.value.code == 1
 
     def test_single_hit_persists(self, db, monkeypatch):
-        from spice_kernel_db import cli
+        from spice_kernel_db.cli import configure as cli
 
         monkeypatch.setattr(
-            "spice_kernel_db.cli.discover_mk_url",
+            "spice_kernel_db.cli.configure.discover_mk_url",
             lambda *a, **kw: ["https://x/M/data/spice/mk/"],
         )
         monkeypatch.setattr(
-            "spice_kernel_db.cli._infer_server_url",
+            "spice_kernel_db.cli.configure._infer_server_url",
             lambda name, server_url_arg: server_url_arg,
         )
 
         args = self._make_args(name="M", server_url="https://x/", no_dedup=True)
-        cli._mission_add_noninteractive(db, args)
+        cli._mission_add_noninteractive(
+            db, args.name, args.server_url, args.mk_dir_url, args.no_dedup,
+        )
 
         m = db.get_mission("M")
         assert m is not None
@@ -486,7 +496,7 @@ class TestGetArchiveFallback:
             captured["url"] = url
 
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli.probe_url", side_effect=fake_probe), \
+             patch("spice_kernel_db.cli.browse.probe_url", side_effect=fake_probe), \
              patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
             main(["get", "juice_crema_2_0_ops_v200.tm", "--mission", "JUICE"])
 
@@ -515,7 +525,7 @@ class TestGetArchiveFallback:
             captured["url"] = url
 
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli.probe_url", side_effect=fake_probe), \
+             patch("spice_kernel_db.cli.browse.probe_url", side_effect=fake_probe), \
              patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
             main(["get", "juice_ops.tm", "--mission", "JUICE"])
 
@@ -526,6 +536,8 @@ class TestGetArchiveFallback:
     def test_both_fail_emits_error_with_both_urls(self, tmp_path, capsys):
         from spice_kernel_db.cli import main
 
+        from spice_kernel_db.remote import Probe, ProbeResult
+
         cfg = self._setup(tmp_path)
         called = {"get": False}
 
@@ -533,7 +545,8 @@ class TestGetArchiveFallback:
             called["get"] = True
 
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli._head_ok", return_value=False), \
+             patch("spice_kernel_db.cli.browse.probe_url",
+                   return_value=Probe(ProbeResult.ABSENT, "HTTP 404")), \
              patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
             with pytest.raises(SystemExit) as exc:
                 main(["get", "juice_nonexistent.tm", "--mission", "JUICE"])
@@ -541,6 +554,7 @@ class TestGetArchiveFallback:
         assert exc.value.code == 1
         assert called["get"] is False  # never reached get_metakernel
         err = capsys.readouterr().err
+        assert "not found" in err
         assert self.MK_DIR + "juice_nonexistent.tm" in err
         assert self.MK_DIR + "former_versions/juice_nonexistent.tm" in err
 
@@ -749,7 +763,7 @@ class TestAliasPicker:
     deduplicated kernels."""
 
     def test_picker_lists_dedup_and_returns_choice(self, tmp_path, monkeypatch):
-        from spice_kernel_db.cli import _interactive_pick_deduplicated_kernel
+        from spice_kernel_db.cli.prompts import _interactive_pick_deduplicated_kernel
         db = KernelDB(tmp_path / "p.duckdb")
         try:
             for n in ("a.bc", "b.bc"):           # identical content -> dedup
@@ -769,7 +783,7 @@ class TestAliasPicker:
             db.close()
 
     def test_picker_returns_none_without_dedup(self, tmp_path, monkeypatch):
-        from spice_kernel_db.cli import _interactive_pick_deduplicated_kernel
+        from spice_kernel_db.cli.prompts import _interactive_pick_deduplicated_kernel
         db = KernelDB(tmp_path / "p2.duckdb")
         try:
             u = tmp_path / "only.bc"
@@ -781,7 +795,7 @@ class TestAliasPicker:
             db.close()
 
     def test_picker_cancel_returns_none(self, tmp_path, monkeypatch):
-        from spice_kernel_db.cli import _interactive_pick_deduplicated_kernel
+        from spice_kernel_db.cli.prompts import _interactive_pick_deduplicated_kernel
         db = KernelDB(tmp_path / "p3.duckdb")
         try:
             for n in ("a.bc", "b.bc"):
@@ -827,7 +841,7 @@ class TestGetDistinguishesMissingFromUnreachable:
 
         cfg = self._cfg(tmp_path)
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli.probe_url", side_effect=probe), \
+             patch("spice_kernel_db.cli.browse.probe_url", side_effect=probe), \
              patch.object(KernelDB, "get_metakernel", lambda self, url, **k: None):
             with pytest.raises(SystemExit) as exc:
                 main(["get", self.NAME, "--mission", "JUICE"])
@@ -876,9 +890,9 @@ class TestMissionAddAmbiguousServer:
     """Issue #13: the first server that had the mission was taken silently."""
 
     def test_two_servers_stops_and_lists_them(self, capsys):
-        from spice_kernel_db.cli import AmbiguousServer, _infer_server_url
+        from spice_kernel_db.cli.configure import AmbiguousServer, _infer_server_url
 
-        with patch("spice_kernel_db.cli.list_remote_missions",
+        with patch("spice_kernel_db.cli.configure.list_remote_missions",
                    return_value=["JUICE", "MARS2020"]):
             with pytest.raises(AmbiguousServer) as exc:
                 _infer_server_url("JUICE", None)
@@ -886,7 +900,7 @@ class TestMissionAddAmbiguousServer:
         assert exc.value.mission == "JUICE"
 
     def test_single_server_still_resolves(self):
-        from spice_kernel_db.cli import _infer_server_url
+        from spice_kernel_db.cli.configure import _infer_server_url
         from spice_kernel_db.remote import SPICE_SERVERS
 
         esa = SPICE_SERVERS["ESA"]
@@ -894,11 +908,11 @@ class TestMissionAddAmbiguousServer:
         def only_esa(url):
             return ["JUICE"] if url == esa else ["OTHER"]
 
-        with patch("spice_kernel_db.cli.list_remote_missions", side_effect=only_esa):
+        with patch("spice_kernel_db.cli.configure.list_remote_missions", side_effect=only_esa):
             assert _infer_server_url("JUICE", None) == esa
 
     def test_explicit_server_url_bypasses_the_check(self):
-        from spice_kernel_db.cli import _infer_server_url
+        from spice_kernel_db.cli.configure import _infer_server_url
         assert _infer_server_url("JUICE", "https://x/") == "https://x/"
         assert _infer_server_url("JUICE", "https://x") == "https://x/"
 
@@ -908,7 +922,7 @@ class TestMissionAddAmbiguousServer:
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
                      kernel_dir=str(tmp_path / "k"))
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
-             patch("spice_kernel_db.cli.list_remote_missions",
+             patch("spice_kernel_db.cli.configure.list_remote_missions",
                    return_value=["JUICE"]):
             with pytest.raises(SystemExit) as exc:
                 main(["mission", "add", "JUICE"])
@@ -938,7 +952,7 @@ class TestPromptsWithoutATerminal:
         assert "EOFError" not in err and "Traceback" not in err
 
     def test_ask_reports_eof_instead_of_raising(self, capsys):
-        from spice_kernel_db.cli import _ask
+        from spice_kernel_db.cli.prompts import _ask
         with patch("builtins.input", side_effect=EOFError):
             with pytest.raises(SystemExit) as exc:
                 _ask("Select [1-2]: ")
@@ -946,13 +960,13 @@ class TestPromptsWithoutATerminal:
         assert "stdin closed" in capsys.readouterr().err
 
     def test_confirm_treats_eof_as_no(self, capsys):
-        from spice_kernel_db.cli import _confirm
+        from spice_kernel_db.cli.prompts import _confirm
         with patch("builtins.input", side_effect=EOFError):
             assert _confirm("Delete everything? [y/N]: ") is False
         assert "assuming no" in capsys.readouterr().err
 
     def test_confirm_reads_yes(self):
-        from spice_kernel_db.cli import _confirm
+        from spice_kernel_db.cli.prompts import _confirm
         for answer, expected in (("y", True), ("yes", True),
                                  ("n", False), ("", False)):
             with patch("builtins.input", return_value=answer):
@@ -960,14 +974,14 @@ class TestPromptsWithoutATerminal:
 
     def test_dedup_prompt_keeps_its_default_on_eof(self, capsys):
         """This one defaults to YES, so EOF must not flip it to no."""
-        from spice_kernel_db.cli import _choose_dedup
+        from spice_kernel_db.cli.configure import _choose_dedup
         with patch("builtins.input", side_effect=EOFError):
             assert _choose_dedup("JUICE") is True
 
     def test_no_bare_input_calls_remain_in_menus(self):
         """Regression guard: a new menu must go through _ask/_confirm."""
         import inspect
-        from spice_kernel_db import cli
+        from spice_kernel_db.cli import configure as cli
 
         for name in ("_choose_server", "_choose_mission"):
             src = inspect.getsource(getattr(cli, name))

@@ -987,7 +987,7 @@ class TestLocationKind:
     """`aliases` on-disk listing distinguishes real files from symlinks."""
 
     def test_real_symlink_and_missing(self, tmp_path):
-        from spice_kernel_db.cli import _location_kind
+        from spice_kernel_db.cli.inspect_cmds import _location_kind
         real = tmp_path / "r.bc"
         real.write_bytes(b"x")
         link = tmp_path / "l.bc"
