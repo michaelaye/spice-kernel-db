@@ -5,6 +5,11 @@ subtitle: "Command-line interface"
 
 On first run, the tool prompts for configuration (database path and kernel storage directory). These are saved to `~/.config/spice-kernel-db/config.toml`. All commands share a `--db` option to override the configured database path.
 
+The root options come before the command: `spice-kernel-db [--db PATH] [-v] COMMAND ...`.
+`spice-kernel-db --help` (or `-h`) lists the commands in four groups: browse & acquire,
+inspect, transform and configure. `spice-kernel-db --install-completion` installs shell
+completion for the current shell; `--show-completion` prints it instead.
+
 ## `scan`
 
 Recursively scan a directory and register all kernel files.

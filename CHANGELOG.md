@@ -1,3 +1,51 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- **The CLI is built on Typer instead of argparse.** Every command, flag,
+  default and exit code is unchanged (one exception below); what changed is
+  the shape of the code and of `--help`. `cli.py` (2014 lines: one argparse definition block and a
+  490-line `if args.command == ...` chain) is now the `cli/` package with one
+  module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py`
+  (list, check, verify, coverage, metakernels, resolve, aliases, stats,
+  duplicates), `transform.py` (scan, rewrite, dedup, prune) and
+  `configure.py` (mission, config, reset), plus `prompts.py` for the shared
+  interactive pickers. Each command is one typed function; adding a flag is
+  adding a parameter.
+
+  `--help` groups the commands into the same four panels the hand-written
+  epilog listed, generated from the registrations rather than maintained by
+  hand (the epilog had already missed `verify`). `-h` still works. New:
+  `--install-completion` and `--show-completion` for shell completion.
+
+  Usage errors (unknown command, bad option value) are worded by Click now
+  rather than argparse; they still exit 2.
+
+- **Abbreviated long options are no longer accepted.** argparse completed
+  any unambiguous prefix, so `--miss JUICE`, `--exec` and `--arch` worked.
+  Click does not; they now fail with exit 2 and name the full option
+  (`No such option: --miss (Possible options: --mission)`). Spell options
+  out in scripts and shell aliases.
+
+### Fixed
+
+- **"No locally acquired metakernels" crashed instead of printing.** Eleven
+  call sites passed `stderr=True` to `rich.Console.print()`, which has no such
+  argument, so every interactive picker that found nothing to pick (`check`,
+  `list`, `verify`, `coverage`, `update`, `resolve`, `aliases`, `get` with no
+  argument on an empty registry) died with a `TypeError`. They now write the
+  hint to stderr as intended.
+
+- The Keep a Changelog header and the `[Unreleased]` section, dropped by the
+  0.21.0 release commit, are back.
+
 ## [0.21.0] - 2026-10-23
 
 ### Added

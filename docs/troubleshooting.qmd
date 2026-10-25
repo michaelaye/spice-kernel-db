@@ -224,3 +224,10 @@ candidates = [
 ```
 
 Registry entries can use absolute URLs (PDS nodes, mission websites) — the `{server}`/`{m}` placeholders are convenient but not required.
+
+## `Error: No such option: --miss`
+
+Since 0.22 the CLI no longer accepts abbreviated long options. Earlier
+versions completed any unambiguous prefix, so `--miss JUICE` meant
+`--mission JUICE` and `--exec` meant `--execute`. Spell the option out; the
+error message names the full option.

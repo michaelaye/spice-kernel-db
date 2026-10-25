@@ -24,6 +24,7 @@ dependencies = [
     "duckdb>=1.0",
     "requests>=2.31",
     "rich>=13.0",
+    "typer>=0.27",
 ]
 
 [project.optional-dependencies]
