@@ -1,0 +1,33 @@
+{
+  "title": "spice-kernel-db: browse, get, and manage SPICE kernels across NASA and ESA mission archives",
+  "description": "<p>A content-addressed database and command-line tool for SPICE kernels and metakernels. It indexes local kernel trees by SHA-256, resolves metakernels against the NAIF and ESA archives, verifies local copies against the server, and finds duplicates across mission directories.</p>",
+  "upload_type": "software",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Aye, K.-Michael",
+      "affiliation": "Freie Universität Berlin",
+      "orcid": "0000-0002-4088-1928"
+    }
+  ],
+  "keywords": [
+    "SPICE",
+    "NAIF",
+    "kernels",
+    "metakernel",
+    "planetary science",
+    "ESA"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/michaelaye/spice-kernel-db",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://pypi.org/project/spice-kernel-db/",
+      "relation": "isIdenticalTo",
+      "scheme": "url"
+    }
+  ]
+}

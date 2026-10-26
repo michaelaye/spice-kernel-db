@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using these metadata.
+title: "spice-kernel-db: browse, get, and manage SPICE kernels across NASA and ESA mission archives"
+abstract: >-
+  A content-addressed database and command-line tool for SPICE kernels and
+  metakernels. It indexes local kernel trees by SHA-256, resolves metakernels
+  against the NAIF and ESA archives, verifies local copies against the server,
+  and finds duplicates across mission directories.
+type: software
+authors:
+  - family-names: Aye
+    given-names: K.-Michael
+    orcid: https://orcid.org/0000-0002-4088-1928
+    affiliation: Freie Universität Berlin
+repository-code: https://github.com/michaelaye/spice-kernel-db
+url: https://michaelaye.github.io/spice-kernel-db
+license: MIT
+version: 0.22.0
+date-released: "2026-10-26"
+keywords:
+  - SPICE
+  - NAIF
+  - kernels
+  - metakernel
+  - planetary science
+  - ESA

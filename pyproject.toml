@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Michael" },
+    { name = "K.-Michael Aye", email = "69774+michaelaye@users.noreply.github.com" },
 ]
 keywords = ["spice", "naif", "kernels", "planetary-science", "metakernel", "esa"]
 classifiers = [
