@@ -1,0 +1,58 @@
+context:
+  name: spice-kernel-db
+  version: "0.22.2"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://pypi.org/packages/source/s/${{ name }}/spice_kernel_db-${{ version }}.tar.gz
+  sha256: de6c6ea8b7ab2ce4f7830d70d810b2eb73071a52ad34f0553fe58e97b1432286
+
+build:
+  noarch: python
+  number: 0
+  script: python -m pip install . -vv --no-deps --no-build-isolation
+  python:
+    entry_points:
+      - spice-kernel-db = spice_kernel_db.cli:main
+      - skd = spice_kernel_db.cli:main
+
+requirements:
+  host:
+    - python >=3.11
+    - hatchling
+    - pip
+  run:
+    - python >=3.11
+    # conda-forge names the DuckDB Python bindings python-duckdb, while
+    # pyproject asks for `duckdb`; the rest match their PyPI names.
+    - python-duckdb >=1.0
+    - requests >=2.31
+    - rich >=13.0
+    - typer >=0.27
+
+tests:
+  - python:
+      imports:
+        - spice_kernel_db
+      pip_check: true
+  - script:
+      # both console scripts, because 0.22.0 moved the CLI to Typer and an
+      # import-only test would not have caught the entry point breaking
+      - spice-kernel-db --help
+      - skd --help
+      - skd --version
+
+about:
+  homepage: https://github.com/michaelaye/spice-kernel-db
+  repository: https://github.com/michaelaye/spice-kernel-db
+  documentation: https://michaelaye.github.io/spice-kernel-db
+  summary: Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives
+  license: MIT
+  license_file: LICENSE
+
+extra:
+  recipe-maintainers:
+    - michaelaye

@@ -84,17 +84,46 @@ Tests use `pytest-tmp-files` for temporary directory fixtures. The main fixture 
 
 **IMPORTANT: Always update the changelog when bumping the version. Never commit a version bump without a corresponding changelog entry.**
 
+The version string lives in **three** places and all three move together:
+`pyproject.toml`, `conda/recipe.yaml` (`context.version`) and `CITATION.cff`.
+
 1. Commit all changes with descriptive messages
-2. Update version in `pyproject.toml` (minor for features, patch for fixes)
+2. Update the version in all three files above (minor for features, patch for fixes)
 3. Add entry to `CHANGELOG.md` (Keep a Changelog format) with comparison link at bottom
 4. Commit as "Bump version to X.Y.Z: brief description"
 5. Push to GitHub: `git push`
 6. Publish to PyPI: `rm -rf dist/ && python -m build && python -m twine upload dist/*`
-7. Create GitHub release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."`
-8. Build conda package from the in-repo recipe: `conda-build conda/ --output-folder /tmp/conda-output --no-anaconda-upload` (bump `version`, `sha256` and any new run deps in `conda/meta.yaml` first; `grayskull pypi spice-kernel-db` regenerates a recipe from scratch if the in-repo one ever drifts)
-9. Upload to anaconda.org: `anaconda --site anaconda upload /tmp/conda-output/noarch/spice-kernel-db-X.Y.Z-py_0.conda`
+7. Create GitHub release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <file> --verify-tag`
+8. Put the **published** sdist's sha256 in `conda/recipe.yaml`, then build:
+   ```bash
+   curl -s https://pypi.org/pypi/spice-kernel-db/X.Y.Z/json \
+     | jq -r '.urls[] | select(.packagetype=="sdist") | .digests.sha256'
+   rattler-build build --recipe conda/recipe.yaml -c conda-forge --output-dir /tmp/skd-conda-out
+   ```
+9. Upload to anaconda.org:
+   ```bash
+   export ANACONDA_API_KEY=<token>
+   rattler-build upload anaconda -o michaelaye /tmp/skd-conda-out/noarch/spice-kernel-db-X.Y.Z-*.conda
+   ```
 
 **Notes:**
-- The `--site anaconda` flag is required for `anaconda` commands (bypasses an interactive prompt that fails in non-TTY environments)
-- `grayskull`, `conda-build` and `anaconda-client` live in the conda `base` env (`/Users/maye/miniforge3/bin/`), not in `py314` — conda-build's docs require base, and a `conda` inside a work env breaks VS Code's environment discovery for it
-- The conda recipe maintainer in `meta.yaml` should be `michaelaye` (grayskull defaults to a placeholder)
+- **Tag before building any artefact, and build from the tag.** A 0.22.x lesson:
+  the Typer port sat on `main` under the already-released 0.22.0 version string,
+  so a build from `main` would have published something the tag and the Zenodo
+  record did not describe. 0.22.1 then shipped a tag containing a stray build
+  directory that `git add -A` swept in. Check `git status` and the sdist's
+  contents before uploading, not after.
+- **`rattler-build` replaced `conda-build` here** (2026-10-26). It is a
+  standalone Rust binary with no Python or conda-build dependency, so nothing
+  has to live in `base` or in a work env. Installed via
+  `pixi global install rattler-build`, landing in `~/.pixi/bin`. The recipe is
+  `conda/recipe.yaml` in the v1 format (CEP 13/14); the old
+  `conda/meta.yaml` and the `grayskull`/`anaconda-client` steps are gone.
+- The v1 format is also conda-forge's direction, so the recipe should mostly
+  carry over if this ever moves to conda-forge. As of early 2026 conda-forge
+  still accepts both formats.
+- conda-forge calls the DuckDB bindings **`python-duckdb`**, while
+  `pyproject.toml` asks for `duckdb`. The recipe must use the conda name.
+- The recipe's tests exercise **both console scripts plus `--version`**. 0.22.0
+  moved the CLI to Typer, and an import-only test would not notice an entry
+  point breaking.
