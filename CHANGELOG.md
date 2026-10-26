@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-26
+
 ### Changed
 
 - **The CLI is built on Typer instead of argparse.** Every command, flag,
@@ -1078,6 +1080,8 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.22.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.19.0...v0.20.0
 [0.19.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.19.0...v0.19.1
