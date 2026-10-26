@@ -634,6 +634,50 @@ class KernelDB:
                         [h, superseded_old_hash],
                     )
 
+                # Issue 29: un-supersede content that is demonstrably present.
+                #
+                # `superseded_by` had exactly one writer -- the block above --
+                # and it only ever SET the column, so the state was
+                # unrecoverable. Whenever anything wrote non-kernel content to
+                # a tracked path (a pre-0.17.0 interrupted download, a Dropbox
+                # conflict copy, an editor), the real kernel's hash was marked
+                # superseded by that junk. A later correct download restored
+                # the file and re-inserted this location, but the flag stayed,
+                # and find_by_filename() excludes superseded rows. So resolve()
+                # reported "not found" for a byte-perfect file on disk,
+                # _should_skip_download() got db_hash=None, and every `update`
+                # re-downloaded it. Forever, with no shipped way to repair it.
+                #
+                # The condition is deliberately narrow: clear the flag only
+                # when the superseding content exists in NO live location. A
+                # genuine upstream update whose newer file is on disk keeps its
+                # supersession, otherwise resolve() could start handing back a
+                # real older version. Content that supersedes nothing findable
+                # was never a version, only damage.
+                #
+                # This also makes `scan` the repair path for existing damage:
+                # re-registering a file heals its row.
+                superseded_now = cur.execute(
+                    "SELECT superseded_by FROM kernels WHERE sha256 = ?", [h]
+                ).fetchone()
+                if superseded_now and superseded_now[0]:
+                    newer_hash = superseded_now[0]
+                    newer_paths = cur.execute(
+                        "SELECT abs_path FROM locations WHERE sha256 = ?",
+                        [newer_hash],
+                    ).fetchall()
+                    if not any(Path(r[0]).is_file() for r in newer_paths):
+                        cur.execute(
+                            "UPDATE kernels SET superseded_by = NULL "
+                            "WHERE sha256 = ?", [h],
+                        )
+                        logger.warning(
+                            "Kernel %s (%s) was marked superseded by %s, which "
+                            "exists in no live location. Clearing the flag: "
+                            "the file is present at %s.",
+                            fname, h[:16], newer_hash[:16], p,
+                        )
+
                 cur.execute("""
                     INSERT OR REPLACE INTO locations VALUES
                         (?, ?, ?, ?, current_timestamp)

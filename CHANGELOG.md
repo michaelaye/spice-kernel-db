@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A kernel marked superseded now recovers when its file is present** (#29).
+  `superseded_by` had exactly one writer and it only ever SET the column, so
+  the state was unrecoverable. Whenever anything wrote non-kernel content to a
+  tracked path -- a pre-0.17.0 interrupted download, a Dropbox conflict copy,
+  an editor -- the real kernel's hash was marked superseded by that junk.
+  Restoring the file marked the junk superseded in turn, leaving *both* rows
+  flagged, and `find_by_filename()` excludes superseded rows. So `resolve`
+  reported "not found" for a byte-perfect file on disk,
+  `_should_skip_download()` saw no `db_hash`, and every `update` re-downloaded
+  the same kernel forever. Observed on a real install where `pck00011.tpc` and
+  `earthstns_fx_201023.bsp` re-downloaded on every run.
+
+  `register_file()` now clears the flag when the superseding content exists in
+  **no live location**. The condition is narrow on purpose: a genuine upstream
+  update whose newer file is on disk keeps its supersession, so `resolve` can
+  never start handing back a real older release. Content that supersedes
+  nothing findable was never a version, only damage.
+
+  This makes **`scan` the repair path** for an already-damaged database: one
+  pass over the kernel tree heals every poisoned row.
+
 ## [0.22.2] - 2026-10-26
 
 ### Fixed
