@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-10-26
+
 ### Fixed
 
 - **A kernel marked superseded now recovers when its file is present** (#29).
@@ -1131,6 +1133,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.22.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.21.0...v0.22.0
