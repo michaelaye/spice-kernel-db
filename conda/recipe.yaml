@@ -1,5 +1,11 @@
 context:
   name: spice-kernel-db
+  # PyPI's legacy source path uses the sdist's own project name, which
+  # hatchling writes with underscores. The hyphenated form 404s:
+  #   .../source/s/spice-kernel-db/spice_kernel_db-0.22.3.tar.gz -> 404
+  #   .../source/s/spice_kernel_db/spice_kernel_db-0.22.3.tar.gz -> 200
+  # The old meta.yaml carried the hyphenated form, so it was broken too.
+  pypi_name: spice_kernel_db
   version: "0.22.3"
 
 package:
@@ -7,7 +13,7 @@ package:
   version: ${{ version }}
 
 source:
-  url: https://pypi.org/packages/source/s/${{ name }}/spice_kernel_db-${{ version }}.tar.gz
+  url: https://pypi.org/packages/source/${{ pypi_name[0] }}/${{ pypi_name }}/${{ pypi_name }}-${{ version }}.tar.gz
   sha256: 48ed589ffae61e2f25692a2e08ecb25ea632a934c5dac94682fd4f329ece9d45
 
 build:
