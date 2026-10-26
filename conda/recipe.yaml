@@ -8,7 +8,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/s/${{ name }}/spice_kernel_db-${{ version }}.tar.gz
-  sha256: de6c6ea8b7ab2ce4f7830d70d810b2eb73071a52ad34f0553fe58e97b1432286
+  sha256: 48ed589ffae61e2f25692a2e08ecb25ea632a934c5dac94682fd4f329ece9d45
 
 build:
   noarch: python
