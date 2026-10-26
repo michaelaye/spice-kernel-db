@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-10-26
+
+### Fixed
+
+- **The 0.22.1 sdist contained the 0.21.0 wheel and sdist.** A `git add -A` in
+  the 0.22.1 bump swept in a scratch build directory named `dist_0210/`;
+  `.gitignore` covered `dist/` but not a differently-named one, so 272 KB of a
+  previous release's artefacts entered the repository, the `v0.22.1` tag and
+  the sdist built from it. The files are gone and the ignore rule is now
+  `dist*/`. 0.22.1 was never published to PyPI.
+
+No code changes. Everything 0.22.1 described is in this release.
+
 ## [0.22.1] - 2026-10-26
 
 ### Changed
@@ -1095,6 +1108,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.22.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.20.1...v0.21.0
