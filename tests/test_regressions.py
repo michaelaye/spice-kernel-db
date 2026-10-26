@@ -1621,3 +1621,78 @@ class TestH6StalenessDatetimeComparison:
         captured = capsys.readouterr().out
         assert "Remote update available" not in captured
         db.close()
+
+
+class TestUnsupersedePresentHashes:
+    """Issue 29: a hash whose file is on disk must not stay superseded forever.
+
+    `superseded_by` used to have exactly one writer, which only ever SET it.
+    When anything put non-kernel content at a tracked path -- a pre-0.17.0
+    interrupted download, a Dropbox conflict copy -- the real kernel was marked
+    superseded by that junk. Restoring the file marked the junk superseded in
+    turn, so BOTH rows ended up flagged, and find_by_filename() excludes
+    superseded rows. resolve() then reported "not found" for a byte-perfect
+    file and every `update` re-downloaded it, with no shipped repair path.
+
+    The damaged state is built with SQL rather than by driving register_file,
+    because the fix heals it on the first call: the point is that an existing
+    database carrying this damage recovers, which is what a user's `scan` does.
+    """
+
+    def _damaged(self, db, path, content, junk_hash):
+        path.write_text(content)
+        good = sha256_file(path)
+        db.con.execute(
+            "INSERT INTO kernels (sha256, filename, kernel_type, size_bytes, "
+            "superseded_by) VALUES (?, ?, ?, ?, ?)",
+            [good, path.name, "pck", path.stat().st_size, junk_hash],
+        )
+        db.con.execute(
+            "INSERT INTO locations VALUES (?, ?, ?, ?, current_timestamp)",
+            [good, str(path), "JUICE", None],
+        )
+        return good
+
+    def test_a_scan_heals_a_poisoned_row(self, db, tmp_path):
+        p = tmp_path / "pck00011.tpc"
+        junk = "f" * 64                      # a hash with no row and no location
+        good = self._damaged(db, p, "REAL PCK CONTENT", junk)
+
+        # the damage must be real, or this test proves nothing
+        assert db.resolve_kernel("pck00011.tpc")[0] is None
+
+        db.register_file(p, mission="JUICE")      # what `scan` does
+
+        row = db.con.execute(
+            "SELECT superseded_by FROM kernels WHERE sha256 = ?", [good]
+        ).fetchone()
+        assert row[0] is None, "flag not cleared for content present on disk"
+        assert db.resolve_kernel("pck00011.tpc")[0] == str(p)
+
+    def test_a_real_upstream_update_keeps_its_supersession(self, db, tmp_path):
+        """The condition is narrow on purpose: clear only when the superseding
+        content is findable nowhere. A genuine newer version on disk must keep
+        winning, or resolve() could start handing back a real older release."""
+        old = tmp_path / "naif0012.tls"
+        old.write_text("OLD LSK")
+        old_hash = sha256_file(old)
+        db.register_file(old, mission="JUICE")
+
+        old.write_text("NEW LSK")                 # upstream updated in place
+        db.register_file(old, mission="JUICE")
+        new_hash = sha256_file(old)
+        assert new_hash != old_hash
+
+        # the older content reappears elsewhere and gets registered
+        elsewhere = tmp_path / "copy" / "naif0012.tls"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text("OLD LSK")
+        db.register_file(elsewhere, mission="JUICE")
+
+        row = db.con.execute(
+            "SELECT superseded_by FROM kernels WHERE sha256 = ?", [old_hash]
+        ).fetchone()
+        assert row[0] == new_hash, (
+            "supersession cleared even though the newer content is on disk"
+        )
+        assert db.resolve_kernel("naif0012.tls")[0] == str(old)
