@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-10-26
+
+### Changed
+
+- Packaging and citation metadata only; no code changes.
+
+- `pyproject.toml`'s `authors` field said just `Michael`, which is what PyPI
+  would have shown as the author. It now names K.-Michael Aye.
+
+- New `CITATION.cff`, which drives GitHub's "Cite this repository" button, and
+  new `.zenodo.json`, which overrides the creators Zenodo otherwise infers from
+  the repository's contributor statistics. Both carry ORCID
+  0000-0002-4088-1928 in the form each format requires: CFF takes the full
+  `https://orcid.org/` URL, Zenodo's API takes the bare identifier.
+
 ## [0.22.0] - 2026-10-26
 
 ### Changed
@@ -1080,6 +1095,7 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[0.22.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.20.0...v0.20.1

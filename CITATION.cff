@@ -15,7 +15,7 @@ authors:
 repository-code: https://github.com/michaelaye/spice-kernel-db
 url: https://michaelaye.github.io/spice-kernel-db
 license: MIT
-version: 0.22.0
+version: 0.22.1
 date-released: "2026-10-26"
 keywords:
   - SPICE
