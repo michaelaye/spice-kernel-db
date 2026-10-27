@@ -5,5 +5,11 @@ test module, so the exception type lives here and both import it.
 """
 
 
-class NetworkUseInOfflineTest(RuntimeError):
-    """A test not marked ``network`` tried to open a connection."""
+class NetworkUseInOfflineTest(BaseException):
+    """A test not marked ``network`` tried to open a connection.
+
+    A ``BaseException``, not an ``Exception``, on purpose: the leak this
+    guard exists to catch was invisible because a broad ``except Exception``
+    in the size lookup swallowed it (#33). No handler in the package can
+    hide this one.
+    """

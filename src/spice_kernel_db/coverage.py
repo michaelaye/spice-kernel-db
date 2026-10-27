@@ -10,6 +10,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
+def _spice_errors() -> tuple[type[Exception], ...]:
+    """SpiceyPy's base exception, or nothing when it is not installed.
+
+    Resolved at call time, so this module keeps importing without spiceypy
+    and an ``except`` clause can still name the real type when it is there.
+    """
+    try:
+        from spiceypy.utils.exceptions import SpiceyError
+    except ImportError:
+        return ()
+    return (SpiceyError,)
+
 # Mapping of common body names (lowercase) to list of (NAIF ID, description).
 # Multiple entries per name handle ambiguity (e.g. "earth" → body center vs barycenter).
 NAIF_BODIES: dict[str, list[tuple[int, str]]] = {
@@ -106,6 +119,7 @@ def spk_coverage(
     ``spkcov`` reads directly from the file — no kernel pool load needed.
     """
     import spiceypy as spice
+    from spiceypy.utils.exceptions import SpiceyError
 
     cover = spice.stypes.SPICEDOUBLE_CELL(2000)
     spice.spkcov(str(spk_path), body_id, cover)
@@ -120,7 +134,7 @@ def spk_coverage(
         try:
             spice.furnsh(str(lsk_path))
             furnished_lsk = True
-        except Exception:
+        except SpiceyError:
             pass
 
     intervals = []
@@ -136,7 +150,7 @@ def spk_coverage(
                 utc_end = spice.timout(
                     et_end, "YYYY-MON-DD HR:MN", 20,
                 )
-            except Exception:
+            except SpiceyError:
                 pass
         intervals.append(CoverageInterval(
             et_start=et_start, et_end=et_end,
@@ -146,7 +160,7 @@ def spk_coverage(
     if furnished_lsk:
         try:
             spice.unload(str(lsk_path))
-        except Exception:
+        except SpiceyError:
             pass
 
     return intervals
@@ -188,7 +202,7 @@ def check_coverage(
                 body_found=len(intervals) > 0,
                 intervals=intervals,
             ))
-        except Exception as e:
+        except (ImportError, *_spice_errors()) as e:
             results.append(KernelCoverageResult(
                 filename=fname, kernel_type=ktype,
                 error=str(e),

@@ -117,7 +117,11 @@ def remote_sizes():
 
     @contextmanager
     def _patch(sizes: dict[str, int | None]):
+        # db.py binds the name at import, so patching the remote module
+        # alone never reached get_metakernel (#33).
         with patch("spice_kernel_db.remote.query_remote_sizes",
+                   return_value=sizes), \
+             patch("spice_kernel_db.db.query_remote_sizes",
                    return_value=sizes) as m:
             yield m
 

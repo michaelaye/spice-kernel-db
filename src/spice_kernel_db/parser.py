@@ -286,7 +286,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
         with open(tmp, "rb") as f:
             os.fsync(f.fileno())
         os.replace(tmp, path)
-    except Exception:
+    except Exception:  # broad on purpose: cleanup only, re-raised below
         if tmp.exists():
             try:
                 tmp.unlink()

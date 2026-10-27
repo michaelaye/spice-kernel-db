@@ -228,6 +228,16 @@ class TestGetMetakernel:
         \\begintext
     """)
 
+    @pytest.fixture(autouse=True)
+    def _sizes_unknown(self, remote_sizes):
+        """get_metakernel asks the server for kernel sizes; answer "unknown".
+
+        Until #33 these tests reached the real network here and the offline
+        guard's exception was swallowed by the size lookup.
+        """
+        with remote_sizes({}):
+            yield
+
     def _mock_urlopen(self, req_or_url, *args, **kwargs):
         """Mock urlopen that returns metakernel text or HEAD sizes."""
         mock_resp = MagicMock()
@@ -530,6 +540,16 @@ class TestGetMetakernel:
 
 class TestMetakernelListingInfo:
     REMOTE_MK_TEXT = TestGetMetakernel.REMOTE_MK_TEXT
+
+    @pytest.fixture(autouse=True)
+    def _sizes_unknown(self, remote_sizes):
+        """get_metakernel asks the server for kernel sizes; answer "unknown".
+
+        Until #33 these tests reached the real network here and the offline
+        guard's exception was swallowed by the size lookup.
+        """
+        with remote_sizes({}):
+            yield
 
     def _mock_urlopen(self, req_or_url, *args, **kwargs):
         return TestGetMetakernel._mock_urlopen(self, req_or_url)
@@ -1552,6 +1572,19 @@ class TestVerifyAgainstServer:
     """
 
     MK_URL = "https://example.com/JUICE/kernels/mk/juice.tm"
+
+    @pytest.fixture(autouse=True)
+    def _server_is_quiet(self, remote_sizes):
+        """Sizes unknown, and the server lists no newer metakernel.
+
+        Until #33 these tests reached the real network through both the
+        size lookup and check's staleness probe; broad handlers swallowed
+        the offline guard's exception.
+        """
+        with remote_sizes({}), \
+             patch("spice_kernel_db.db.list_remote_metakernels",
+                   return_value=[]):
+            yield
 
     def _setup(self, tmp_path, local_sizes):
         kdir = tmp_path / "kernels" / "lsk"
