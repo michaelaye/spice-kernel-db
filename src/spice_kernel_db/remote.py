@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import http.client
 import re
 import socket
 import threading
@@ -238,7 +239,7 @@ def probe_url(url: str, timeout: float = PROBE_TIMEOUT) -> Probe:
                 ProbeResult.UNREACHABLE, f"no response within {timeout:.0f} s"
             )
         return Probe(ProbeResult.UNREACHABLE, str(reason))
-    except Exception as exc:  # pragma: no cover - defensive
+    except (OSError, http.client.HTTPException) as exc:  # socket-level, or a malformed response
         return Probe(ProbeResult.UNREACHABLE, str(exc))
 
 
@@ -444,7 +445,7 @@ def _head_size(url: str) -> tuple[str, int | None]:
         )
         cl = resp.headers.get("Content-Length")
         return url, int(cl) if cl else None
-    except Exception:
+    except (requests.RequestException, ValueError):  # ValueError: junk Content-Length
         return url, None
 
 
@@ -637,7 +638,7 @@ def download_kernels_parallel(
             except (IOError, OSError) as e:
                 # Issue 10: Disk/IO problems — ERROR severity
                 return filename, None, None, f"[ERROR] {e}"
-            except Exception as e:
+            except http.client.HTTPException as e:  # e.g. IncompleteRead mid-stream
                 return filename, None, None, f"[WARNING] {e}"
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:

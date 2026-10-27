@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import sys
 from pathlib import Path
 from typing import Annotated, Optional
@@ -311,7 +312,7 @@ def _servers_hosting(name: str) -> list[str]:
     def _has_mission(url: str) -> bool:
         try:
             return _match_ci(name, list_remote_missions(url)) is not None
-        except Exception:
+        except (OSError, http.client.HTTPException):  # server down, or not a listing
             return False
 
     with ThreadPoolExecutor(max_workers=len(urls)) as pool:

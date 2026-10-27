@@ -14,6 +14,7 @@ Key design decisions:
 
 from __future__ import annotations
 
+import http.client
 import logging
 import os
 import shutil
@@ -112,7 +113,7 @@ def _atomic_symlink(target: str | Path, link_path: Path) -> None:
     try:
         os.symlink(os.fspath(target), tmp)
         os.replace(tmp, link_path)
-    except Exception:
+    except Exception:  # broad on purpose: cleanup only, re-raised below
         if tmp.is_symlink() or tmp.exists():
             try:
                 tmp.unlink()
@@ -300,7 +301,7 @@ class KernelDB:
             try:
                 self.con = duckdb.connect(self.db_path, read_only=self.read_only)
                 return
-            except Exception as e:
+            except duckdb.IOException as e:  # the lock, or an unopenable path
                 last_exc = e
                 _time.sleep(delay)
                 delay *= 2
@@ -404,7 +405,7 @@ class KernelDB:
                 GROUP BY LOWER(name)
                 HAVING COUNT(*) > 1
             """).fetchall()
-        except Exception:
+        except duckdb.CatalogException:  # no missions table: nothing to check
             return
         if dup_groups:
             for _, variants in dup_groups:
@@ -683,7 +684,7 @@ class KernelDB:
                         (?, ?, ?, ?, current_timestamp)
                 """, [h, str(p), m, source_url])
                 cur.execute("COMMIT")
-            except Exception:
+            except Exception:  # broad on purpose: roll back, then re-raise
                 cur.execute("ROLLBACK")
                 raise
         return h
@@ -877,9 +878,6 @@ class KernelDB:
                     # Issue 8: Catch non-fatal OS errors (file not found, etc.)
                     error_count += 1
                     logger.warning("Could not register %s: %s", p, e)
-                except Exception:
-                    # Issue 8: Re-raise unexpected exceptions
-                    raise
 
         # Index metakernels into the registry
         for mk_path, m in mk_files:
@@ -894,8 +892,6 @@ class KernelDB:
             except OSError as e:
                 error_count += 1
                 logger.warning("Could not index metakernel %s: %s", mk_path, e)
-            except Exception:
-                raise
 
         print(f"Scanned {root}: {count} kernel files registered.")
         if mk_files:
@@ -1154,7 +1150,7 @@ class KernelDB:
                         [mk_path, i, raw, Path(raw).name],
                     )
                 cur.execute("COMMIT")
-            except Exception:
+            except Exception:  # broad on purpose: roll back, then re-raise
                 cur.execute("ROLLBACK")
                 raise
 
@@ -1323,7 +1319,7 @@ class KernelDB:
                                 tmp.write(chunk)
                         tmp.flush()
                         remote_hash = sha256_file(tmp.name)
-                except Exception as exc:
+                except (OSError, http.client.HTTPException) as exc:
                     entries.append({"filename": fname, "status": "NO_REMOTE",
                                     "detail": f"could not fetch for hashing: {exc}"})
                     unchecked += 1
@@ -1361,6 +1357,8 @@ class KernelDB:
                 "filename": "-", "status": "NO_REMOTE",
                 "detail": "spiceypy not installed; skipped readability check",
             }]
+        from spiceypy.utils.exceptions import SpiceyError
+
         out = []
         for fname, local in locals_.items():
             if not local or not Path(local).is_file():
@@ -1368,14 +1366,11 @@ class KernelDB:
             try:
                 spiceypy.kclear()
                 spiceypy.furnsh(str(local))
-            except Exception as exc:
+            except SpiceyError as exc:
                 out.append({"filename": fname, "status": "UNREADABLE",
                             "detail": str(exc).splitlines()[0][:120]})
             finally:
-                try:
-                    spiceypy.kclear()
-                except Exception:
-                    pass
+                spiceypy.kclear()
         return out
 
     def check_metakernel(
@@ -1489,7 +1484,8 @@ class KernelDB:
 
         try:
             entries = list_remote_metakernels(mk_dir_url)
-        except Exception:
+        except (OSError, http.client.HTTPException) as exc:  # best-effort hint
+            logger.debug("Could not list %s for newer versions: %s", mk_dir_url, exc)
             return
 
         # H6: parse to datetime and compare numerically — the old
@@ -2513,7 +2509,7 @@ class KernelDB:
                         f"director{'y' if len(scan_dirs) == 1 else 'ies'} "
                         f"for updated kernels.[/dim]"
                     )
-            except Exception as e:
+            except (OSError, duckdb.Error) as e:
                 logger.warning("Post-update rescan failed: %s", e)
 
         return result

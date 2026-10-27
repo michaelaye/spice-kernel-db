@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Broad `except Exception` handlers no longer hide defects** (#33). 21
+  handlers caught everything and reported something plausible; one had
+  already turned a `TypeError` in `verify_against_server()` into "could not
+  fetch". Each now names what the call site raises: `duckdb.IOException` for
+  the connect retry, `duckdb.CatalogException` for the startup
+  case-duplicate check, `OSError` / `http.client.HTTPException` on network
+  paths, `requests.RequestException` for the size HEAD, `SpiceyError` around
+  spiceypy. Two dead `except Exception: raise` lines are gone. The four that
+  stay broad (two atomic-write cleanups, two transaction rollbacks) all
+  re-raise and say so in a comment.
+
+  Narrowing exposed what the issue predicted: 25 unit tests had been
+  reaching the real network through the size lookup and `check`'s
+  staleness probe, and the offline guard's exception was being swallowed.
+  Those tests now mock both, the `remote_sizes` fixture patches the binding
+  `db.py` actually uses, and the guard exception is a `BaseException` so no
+  handler can hide it again.
 - **The test suite can no longer overwrite the user's `config.toml`** (#28).
   `test_config_set` kept the real `save_config` away only by patching it by
   name; when the Typer port moved the import site the patch missed and
