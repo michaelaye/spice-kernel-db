@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The test suite can no longer overwrite the user's `config.toml`** (#28).
+  `test_config_set` kept the real `save_config` away only by patching it by
+  name; when the Typer port moved the import site the patch missed and
+  `~/.config/spice-kernel-db/config.toml` was replaced with a test's tmp
+  paths, breaking every later `skd` call. An autouse fixture now points
+  `HOME`, `CONFIG_DIR` and `CONFIG_FILE` at an empty directory for every
+  test, and a session guard fails the run if the real config changed anyway.
+
 ## [0.22.3] - 2026-10-26
 
 ### Fixed
