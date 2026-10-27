@@ -275,3 +275,56 @@ def fixture_registry(monkeypatch):
     reg.load_registry.cache_clear()
     monkeypatch.setattr(reg, "load_registry", lambda: reg.load_registry_from(FIXTURE_REGISTRY))
     yield reg
+
+
+# --- user-file isolation (#28) ------------------------------------------------
+#
+# On 2026-10-24 the suite overwrote ~/.config/spice-kernel-db/config.toml with
+# a test's tmp paths. ``test_config_set`` kept the real ``save_config`` away
+# only by patching it *by name*; the Typer port moved the import site, the
+# patch missed, and the real file was written. Patch targets drift; HOME does
+# not. So every test runs with HOME pointed at an empty directory, and the
+# session fails if the developer's real config changed anyway.
+
+import os
+
+
+def _snapshot(path: Path) -> tuple:
+    """Content hash plus mtime, or (None,) when the file does not exist."""
+    if not path.is_file():
+        return (None,)
+    return (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _real_config_untouched():
+    """Fail the session if any test wrote the developer's real config file.
+
+    Captured before the first test, when HOME is still the real one.
+    """
+    real = Path(os.environ.get("HOME", str(Path.home())))
+    config_file = real / ".config" / "spice-kernel-db" / "config.toml"
+    before = _snapshot(config_file)
+    yield
+    after = _snapshot(config_file)
+    assert after == before, (
+        f"the test suite modified {config_file} (#28). Some test reached the "
+        "real user config: check for a patch target that no longer matches "
+        "the import site."
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path_factory):
+    """Point HOME, CONFIG_DIR and CONFIG_FILE at an empty directory (#28).
+
+    ``CONFIG_DIR`` / ``CONFIG_FILE`` are expanded at import time, so setting
+    HOME alone would not move them; ``DEFAULT_DB_PATH`` and ``LEGACY_DB_PATH``
+    are expanded on use, so HOME covers those.
+    """
+    from spice_kernel_db import config
+
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(config, "CONFIG_DIR", home / ".config" / "spice-kernel-db")
+    monkeypatch.setattr(config, "CONFIG_FILE", config.CONFIG_DIR / "config.toml")
