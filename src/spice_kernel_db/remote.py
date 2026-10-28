@@ -12,10 +12,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
-import requests
-from requests.adapters import HTTPAdapter, Retry
 from rich.progress import (
     BarColumn,
     DownloadColumn,
@@ -27,6 +26,9 @@ from rich.progress import (
 )
 
 from spice_kernel_db.parser import ParsedMetakernel
+
+if TYPE_CHECKING:
+    import requests
 
 # Network timeouts, measured against spiftp.esac.esa.int on
 # 2026-09-18 with 30 fresh connections at 8-way concurrency:
@@ -417,6 +419,11 @@ def _size_session() -> requests.Session:
     (rather than one shared session) also keeps us clear of the thread-safety
     caveats around sharing a ``requests.Session``.
     """
+    # Imported here, not at module level: ``requests`` costs ~60 ms to
+    # import and only size queries need it (#26).
+    import requests
+    from requests.adapters import HTTPAdapter, Retry
+
     session = getattr(_thread_local, "size_session", None)
     if session is None:
         adapter = HTTPAdapter(
@@ -435,6 +442,8 @@ def _size_session() -> requests.Session:
 
 def _head_size(url: str) -> tuple[str, int | None]:
     """Return (url, content_length_or_None) via HTTP HEAD."""
+    import requests
+
     try:
         # allow_redirects is explicit: requests defaults it to False for HEAD,
         # while the urlopen() this replaced followed redirects.
