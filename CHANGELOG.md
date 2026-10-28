@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Poisoned supersession rows are reported** (#31). #29 made the state
+  repairable but nothing said it existed: a user saw the same kernels
+  re-download on every `update` with no hint why. `KernelDB.poisoned_superseded()`
+  lists kernels present on disk yet flagged as superseded by content that
+  exists in no location. `check` names them and exits 1 when any are found;
+  `stats` shows the count, highlighted when non-zero. Both point at
+  `scan <kernel_dir>` as the repair.
+
 ### Fixed
 
 - **Broad `except Exception` handlers no longer hide defects** (#33). 21

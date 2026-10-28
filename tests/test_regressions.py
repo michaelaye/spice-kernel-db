@@ -1696,3 +1696,119 @@ class TestUnsupersedePresentHashes:
             "supersession cleared even though the newer content is on disk"
         )
         assert db.resolve_kernel("naif0012.tls")[0] == str(old)
+
+
+class TestPoisonedRowsAreReported:
+    """Issue 31: the #29 damage must be visible, not only repairable."""
+
+    def _poison(self, db, path, content):
+        path.write_text(content)
+        good = sha256_file(path)
+        db.con.execute(
+            "INSERT INTO kernels (sha256, filename, kernel_type, size_bytes, "
+            "superseded_by) VALUES (?, ?, ?, ?, ?)",
+            [good, path.name, "pck", path.stat().st_size, "f" * 64],
+        )
+        db.con.execute(
+            "INSERT INTO locations VALUES (?, ?, ?, ?, current_timestamp)",
+            [good, str(path), "JUICE", None],
+        )
+        return good
+
+    def test_poisoned_row_is_listed_until_scan_repairs_it(self, db, tmp_path):
+        p = tmp_path / "pck00011.tpc"
+        good = self._poison(db, p, "REAL PCK CONTENT")
+
+        rows = db.poisoned_superseded()
+        assert [r["filename"] for r in rows] == ["pck00011.tpc"]
+        assert rows[0]["sha256"] == good and rows[0]["abs_path"] == str(p)
+
+        db.register_file(p, mission="JUICE")      # what `scan` does
+        assert db.poisoned_superseded() == []
+
+    def test_a_real_upstream_update_is_not_reported(self, db, tmp_path):
+        old = tmp_path / "naif0012.tls"
+        old.write_text("OLD LSK")
+        db.register_file(old, mission="JUICE")
+        old.write_text("NEW LSK")
+        db.register_file(old, mission="JUICE")
+        elsewhere = tmp_path / "copy" / "naif0012.tls"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text("OLD LSK")
+        db.register_file(elsewhere, mission="JUICE")   # old content, superseded, present
+        assert db.poisoned_superseded() == []
+
+    def test_a_poisoned_row_whose_file_is_gone_is_not_reported(self, db, tmp_path):
+        """Nothing on disk, nothing for `scan` to repair, so nothing to report."""
+        p = tmp_path / "gone.tpc"
+        self._poison(db, p, "X")
+        p.unlink()
+        assert db.poisoned_superseded() == []
+
+    def test_stats_counts_poisoned_rows(self, db, tmp_path, capsys):
+        self._poison(db, tmp_path / "pck00011.tpc", "REAL PCK CONTENT")
+        stats = db.stats()
+        assert stats["n_poisoned"] == 1
+        assert "Poisoned rows:    1" in capsys.readouterr().out
+
+    def test_check_names_the_row_and_exits_1(self, tmp_path, capsys):
+        from unittest.mock import patch
+
+        from spice_kernel_db.cli import main
+
+        db = KernelDB(tmp_path / "t.duckdb")
+        p = tmp_path / "pck00011.tpc"
+        self._poison(db, p, "REAL PCK CONTENT")
+        mk = tmp_path / "juice.tm"
+        mk.write_text(
+            "\\begindata\n"
+            f"PATH_VALUES = ( '{tmp_path}' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/pck00011.tpc' )\n"
+            "\\begintext\n"
+        )
+        db.con.execute(
+            "INSERT INTO metakernel_registry "
+            "(mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, 'JUICE', NULL, 'juice.tm', now())",
+            [str(mk)],
+        )
+        db.close()
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit) as exc:
+                main(["--db", str(tmp_path / "t.duckdb"), "check", str(mk)])
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "Poisoned supersession rows: 1" in out
+        assert "pck00011.tpc" in out and str(p) in out
+        assert "scan <kernel_dir>" in out
+
+    def test_check_is_silent_and_exits_0_when_clean(self, tmp_path, capsys):
+        from unittest.mock import patch
+
+        from spice_kernel_db.cli import main
+
+        db = KernelDB(tmp_path / "t.duckdb")
+        p = tmp_path / "pck00011.tpc"
+        p.write_text("REAL PCK CONTENT")
+        db.register_file(p, mission="JUICE")
+        mk = tmp_path / "juice.tm"
+        mk.write_text(
+            "\\begindata\n"
+            f"PATH_VALUES = ( '{tmp_path}' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/pck00011.tpc' )\n"
+            "\\begintext\n"
+        )
+        db.con.execute(
+            "INSERT INTO metakernel_registry "
+            "(mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, 'JUICE', NULL, 'juice.tm', now())",
+            [str(mk)],
+        )
+        db.close()
+
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            main(["--db", str(tmp_path / "t.duckdb"), "check", str(mk)])
+        assert "Poisoned" not in capsys.readouterr().out

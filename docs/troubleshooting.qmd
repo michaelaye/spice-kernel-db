@@ -41,6 +41,8 @@ spice-kernel-db scan /path/to/kernels
 
 By default, the tool skips files that match both the expected size and SHA-256 hash. If files were corrupted or partially downloaded, they'll be re-downloaded. Use `--force` to bypass all skip checks.
 
+If the *same* kernels re-download on every `update` although they are byte-correct on disk, run `spice-kernel-db check <metakernel>` or `spice-kernel-db stats`. A non-zero **poisoned rows** count means those kernels are flagged as superseded by content that no longer exists anywhere (typically a pre-0.17.0 interrupted download or a Dropbox conflict copy that was later cleaned up), so resolution skips them. `spice-kernel-db scan <kernel_dir>` re-registers the files and clears the flag.
+
 Before 0.20.0 this could also happen to intact files. The skip check needs the remote size, and a HEAD request that failed was silently recorded as "size unknown" — which the check reads as "cannot confirm", so the file was fetched again. Such kernels show as `unknown` in the size column. Size queries now retry and reuse connections, so a transient failure no longer costs you a download.
 
 

@@ -436,6 +436,16 @@ With `dry_run=True` (the default), only prints what would happen.
 
 ### Statistics
 
+#### `poisoned_superseded`
+
+```python
+db.poisoned_superseded() -> list[dict]
+```
+
+Kernels flagged as superseded by content that exists in no live location, while their own file is present on disk. These resolve as "not found" and re-download on every `update`; `scan` over the kernel directory repairs them. A genuine upstream update whose newer file is on disk is not listed.
+
+Returns one dict per kernel with keys: `sha256`, `filename`, `superseded_by`, `abs_path`.
+
 #### `stats`
 
 ```python
@@ -444,7 +454,7 @@ db.stats() -> dict
 
 Print and return summary statistics.
 
-Returns a dict with keys: `n_kernels`, `n_locations`, `total_bytes`, `n_duplicates`, `missions`.
+Returns a dict with keys: `n_kernels`, `n_locations`, `total_bytes`, `n_duplicates`, `n_poisoned`, `missions`.
 
 ---
 
