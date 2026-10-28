@@ -70,7 +70,7 @@ def check(
         if mk is None:
             return
         try:
-            db.check_metakernel(mk, mission=mission, verbose=verbose)
+            result = db.check_metakernel(mk, mission=mission, verbose=verbose)
             if full:
                 report = db.verify_against_server(
                     mk, mission=mission, check_hash=hash_, check_spice=spice,
@@ -81,6 +81,8 @@ def check(
             elif hash_ or spice:
                 print("check: --hash and --spice require --full", file=sys.stderr)
                 sys.exit(2)
+            if result["poisoned"]:
+                sys.exit(1)
         except MetakernelNotTracked as exc:
             print(f"check: {exc}", file=sys.stderr)
             sys.exit(1)

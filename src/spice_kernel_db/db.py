@@ -1447,7 +1447,17 @@ class KernelDB:
         # Check for remote updates
         self._check_remote_staleness(mk_path, mission)
 
-        return {"found": found, "missing": missing, "warnings": all_warnings}
+        poisoned = self.poisoned_superseded()
+        if poisoned:
+            print(f"  Poisoned supersession rows: {len(poisoned)}")
+            for row in poisoned:
+                print(f"    {row['filename']}  ({row['abs_path']})")
+            print("    Present on disk, yet flagged as superseded by content that\n"
+                  "    exists nowhere: every `update` re-downloads them.\n"
+                  "    Repair: spice-kernel-db scan <kernel_dir>")
+
+        return {"found": found, "missing": missing, "warnings": all_warnings,
+                "poisoned": poisoned}
 
     def _check_remote_staleness(
         self,
@@ -3017,6 +3027,40 @@ class KernelDB:
     # Stats
     # ------------------------------------------------------------------
 
+    def poisoned_superseded(self) -> list[dict]:
+        """Kernels flagged superseded by content that exists in no live location.
+
+        The state #29 made repairable and #31 makes visible: the kernel's own
+        file is on disk, so ``resolve`` should find it, but ``superseded_by``
+        points at a hash with no file anywhere, so ``find_by_filename``
+        skips the row and every ``update`` downloads the kernel again.
+        ``scan`` over the kernel directory repairs every row listed here;
+        a genuine upstream update whose newer file is on disk is not listed.
+
+        Returns one dict per kernel: ``sha256``, ``filename``,
+        ``superseded_by`` and ``abs_path`` (a present location).
+        """
+        rows = self.con.execute("""
+            SELECT k.sha256, k.filename, k.superseded_by, l.abs_path
+            FROM kernels k JOIN locations l USING (sha256)
+            WHERE k.superseded_by IS NOT NULL
+            ORDER BY k.filename, l.abs_path
+        """).fetchall()
+        out: list[dict] = []
+        seen: set[str] = set()
+        for sha, fname, newer, abs_path in rows:
+            if sha in seen or not Path(abs_path).is_file():
+                continue
+            newer_paths = self.con.execute(
+                "SELECT abs_path FROM locations WHERE sha256 = ?", [newer]
+            ).fetchall()
+            if any(Path(r[0]).is_file() for r in newer_paths):
+                continue  # a real newer version: supersession is correct
+            seen.add(sha)
+            out.append({"sha256": sha, "filename": fname,
+                        "superseded_by": newer, "abs_path": abs_path})
+        return out
+
     def stats(self) -> dict:
         """Print and return summary statistics."""
         n_kernels = self.con.execute(
@@ -3043,12 +3087,19 @@ class KernelDB:
                 GROUP BY sha256 HAVING COUNT(*) > 1
             )
         """).fetchone()[0]
+        n_poisoned = len(self.poisoned_superseded())
+        poisoned_line = (
+            f"[yellow]Poisoned rows:    {n_poisoned}[/yellow]  "
+            f"(repair: scan <kernel_dir>)"
+            if n_poisoned else f"Poisoned rows:    {n_poisoned}"
+        )
 
         console.print(Panel(
             f"Unique kernels:   [bold]{n_kernels}[/bold]\n"
             f"Total locations:  {n_locs}\n"
             f"Unique content:   {total_size / 1e9:.2f} GB\n"
             f"Duplicated files: {dups}\n"
+            f"{poisoned_line}\n"
             f"Missions:         {', '.join(missions)}",
             title=f"SPICE Kernel Database: {self.db_path}",
         ))
@@ -3065,6 +3116,7 @@ class KernelDB:
             "n_locations": n_locs,
             "total_bytes": total_size,
             "n_duplicates": dups,
+            "n_poisoned": n_poisoned,
             "missions": missions,
         }
 

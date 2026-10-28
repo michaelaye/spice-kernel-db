@@ -53,7 +53,9 @@ Print database summary statistics.
 spice-kernel-db stats
 ```
 
-Shows unique kernels, total locations, total size, number of duplicates, registered missions, and a breakdown by kernel type.
+Shows unique kernels, total locations, total size, number of duplicates, poisoned rows, registered missions, and a breakdown by kernel type.
+
+A **poisoned row** is a kernel that is present on disk but flagged as superseded by content that exists nowhere. Such a kernel is re-downloaded on every `update`. The count is highlighted when non-zero; `scan <kernel_dir>` repairs it.
 
 
 ## `duplicates`
@@ -95,6 +97,8 @@ spice-kernel-db check juice_crema_5_1.tm -v
 Reports found/missing counts, lists missing files, and shows warnings for cross-mission fallbacks. By default, warnings are grouped into a compact summary (dedup resolutions, cross-mission lookups). Use `-v` to see full per-file details.
 
 If the metakernel was fetched from a remote server, `check` also queries the server to see if a newer version is available and prints a notice if so. This adds one HTTP request but does not download anything.
+
+`check` also reports **poisoned supersession rows** across the whole database: kernels present on disk but flagged as superseded by content that exists in no location, so `update` re-downloads them every time. Each is named with its path, and the exit status is 1 when any are found, so a scripted check notices. Repair with `spice-kernel-db scan <kernel_dir>`; re-registering the files clears the flag.
 
 
 ## `rewrite`
