@@ -1003,7 +1003,7 @@ class TestC5ConcurrencyHandling:
                 raise _duck.IOException("simulated lock contention")
             return real_connect(path, **kwargs)
 
-        with patch("spice_kernel_db.db.duckdb.connect", side_effect=flaky_connect):
+        with patch("duckdb.connect", side_effect=flaky_connect):
             db.reacquire(initial_delay=0.001)
         assert calls["n"] >= 3
         # And the connection is healthy now
@@ -1812,3 +1812,42 @@ class TestPoisonedRowsAreReported:
         with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
             main(["--db", str(tmp_path / "t.duckdb"), "check", str(mk)])
         assert "Poisoned" not in capsys.readouterr().out
+
+
+class TestStartupImports:
+    """#26: `skd --version` must not pay for requests, duckdb, or the
+    rich help/error machinery. Checked in a fresh interpreter, because the
+    test process itself has all of them loaded."""
+
+    HEAVY = ("requests", "duckdb", "importlib.metadata", "typer.rich_utils", "rich.markdown")
+
+    def _loaded_after(self, statement: str) -> set[str]:
+        import json
+        import subprocess
+        import sys
+
+        code = (
+            f"import sys; {statement}; import json; "
+            f"print(json.dumps(sorted(m for m in {self.HEAVY!r} if m in sys.modules)))"
+        )
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        return set(json.loads(out.stdout))
+
+    def test_cli_import_loads_nothing_heavy(self):
+        assert self._loaded_after("import spice_kernel_db.cli") == set()
+
+    def test_package_import_loads_nothing_heavy(self):
+        assert self._loaded_after("import spice_kernel_db") == set()
+
+    def test_version_still_resolves(self):
+        from importlib.metadata import version
+
+        import spice_kernel_db
+
+        assert spice_kernel_db.__version__ == version("spice-kernel-db")
+        with pytest.raises(AttributeError):
+            spice_kernel_db.no_such_name  # noqa: B018
+
+    def test_opening_a_db_still_works_without_module_level_duckdb(self, tmp_path):
+        with KernelDB(tmp_path / "t.duckdb") as db:
+            assert db.stats()["n_kernels"] == 0

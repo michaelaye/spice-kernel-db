@@ -7,12 +7,10 @@ registers them on ``app``. ``main()`` is the console-script entry point.
 from __future__ import annotations
 
 import sys
-from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
-from typer import rich_utils
 
 from spice_kernel_db.config import ensure_config
 from spice_kernel_db.db import KernelDB
@@ -24,9 +22,17 @@ from .prompts import _metakernel_table, _registry_rows, console
 from . import browse, inspect_cmds, transform, configure  # noqa: E402, F401, I001
 
 
+def _pkg_version() -> str:
+    # importlib.metadata is imported on demand: it costs ~20 ms and only
+    # ``--version`` and the no-args summary need it (#26).
+    from importlib.metadata import version
+
+    return version("spice-kernel-db")
+
+
 def _version(flag: bool) -> None:
     if flag:
-        print(f"spice-kernel-db {pkg_version('spice-kernel-db')}")
+        print(f"spice-kernel-db {_pkg_version()}")
         raise typer.Exit()
 
 
@@ -59,7 +65,7 @@ def _show_default_summary() -> None:
     from spice_kernel_db.config import load_config
 
     console.print(
-        f"[bold]spice-kernel-db[/bold] {pkg_version('spice-kernel-db')}\n"
+        f"[bold]spice-kernel-db[/bold] {_pkg_version()}\n"
     )
 
     config = load_config()
@@ -112,6 +118,8 @@ def main(argv: list[str] | None = None) -> None:
         print("Aborted.", file=sys.stderr)
         sys.exit(1)
     except typer.TyperException as exc:
+        from typer import rich_utils  # pulls in rich.markdown; error path only
+
         rich_utils.rich_format_error(exc)
         sys.exit(exc.exit_code)
     if isinstance(rc, int):  # Exit codes only; a command's return value is not one

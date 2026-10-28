@@ -21,7 +21,6 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-import duckdb
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress
@@ -262,6 +261,10 @@ class KernelDB:
     """
 
     def __init__(self, db_path: str | Path | None = None, read_only: bool = False):
+        # Imported here, not at module level: ``duckdb`` costs ~30 ms to
+        # import and ``skd --version`` never opens a database (#26).
+        import duckdb
+
         if db_path is None:
             from spice_kernel_db.config import default_db_path, load_config
             config = load_config()
@@ -294,6 +297,7 @@ class KernelDB:
         — short bursts of contention are common when two CLI processes
         overlap their network phases (C5).
         """
+        import duckdb
         import time as _time
         delay = initial_delay
         last_exc: Exception | None = None
@@ -398,6 +402,8 @@ class KernelDB:
         case. The user can then choose to merge them explicitly — we
         deliberately don't auto-merge because data ops should be
         intentional (H4)."""
+        import duckdb
+
         try:
             dup_groups = self.con.execute("""
                 SELECT LOWER(name) AS k, LIST(name) AS variants
@@ -2426,6 +2432,8 @@ class KernelDB:
         Returns:
             dict from ``get_metakernel``.
         """
+        import duckdb
+
         # Look up by mk_path first, then by filename
         row = self.con.execute("""
             SELECT mk_path, source_url, filename, mission

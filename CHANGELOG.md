@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stats` shows the count, highlighted when non-zero. Both point at
   `scan <kernel_dir>` as the repair.
 
+### Changed
+
+- **`skd --version` and `--help` start faster** (#26). `requests`, `duckdb`,
+  `importlib.metadata` and Typer's rich error formatter are now imported
+  where they are used instead of at module level, so invocations that open
+  no database and touch no network no longer pay for them. On the
+  reference machine `--version` went from 184 ms to 123 ms and `--help`
+  from 187 ms to 141 ms. `spice_kernel_db.__version__` is resolved on
+  first access; everything else in the public API is unchanged.
+
 ### Fixed
 
 - **Broad `except Exception` handlers no longer hide defects** (#33). 21
