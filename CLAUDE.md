@@ -74,7 +74,9 @@ Steps 1 and 2 go through `find_by_filename`, which joins on `sha256`, so identic
 - New user-visible error or recovery path → entry in `docs/troubleshooting.qmd`.
 - New feature → `CHANGELOG.md` entry under the unreleased section (or current dev version).
 
-A pull request that adds features without updating docs is incomplete. If you spot an existing gap while doing other work, fix it in the same PR rather than filing a TODO.
+A pull request that adds features without updating docs is incomplete. If you spot an existing gap while doing other work, fix it in the same change rather than filing a TODO.
+
+**Issue fixes go straight to `main`.** No feature branch or pull request is needed for work on a tracked issue; commit on `main` with `Closes #N` and push (Michael, 2026-10-28).
 
 ## Testing Patterns
 

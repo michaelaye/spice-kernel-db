@@ -297,6 +297,26 @@ class TestGetMetakernel:
         assert "in db" in captured.out
         assert "missing" in captured.out
 
+    def test_get_verbose_lists_resolved_urls(self, populated_db, tmp_path, capsys):
+        """#39: the verbose branch read an undefined name and raised NameError."""
+        mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+
+        with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
+             patch("builtins.input", return_value="n"):
+            populated_db.get_metakernel(
+                mk_url,
+                download_dir=tmp_path / "downloads",
+                mission="JUICE",
+                yes=False,
+                verbose=True,
+            )
+
+        out = capsys.readouterr().out
+        assert "Resolved URLs:" in out
+        # rich wraps the long line at 80 columns; compare without whitespace
+        assert ("lsk/naif0012.tls->https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/lsk/naif0012.tls"
+                in "".join(out.split()))
+
     def test_get_saves_tm_file(self, populated_db, tmp_path):
         """get_metakernel saves the .tm file to disk on confirmed download."""
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"

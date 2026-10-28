@@ -2215,7 +2215,7 @@ class KernelDB:
 
         if verbose:
             console.print("[dim]Resolved URLs:[/dim]")
-            for relpath, kurl in zip(relpaths, urls):
+            for relpath, kurl in zip(relpaths, kernel_urls):
                 console.print(f"  [dim]{relpath} -> {kurl}[/dim]")
 
         console.print(Panel(

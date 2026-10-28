@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`get -v` no longer crashes** (#39). The verbose "Resolved URLs" listing
+  in `get_metakernel()` read a name that did not exist, so every verbose
+  `get` ended in a `NameError` after the kernel table. Found by ruff's
+  undefined-name check; a test now exercises the branch.
 - **Broad `except Exception` handlers no longer hide defects** (#33). 21
   handlers caught everything and reported something plausible; one had
   already turned a `TypeError` in `verify_against_server()` into "could not
