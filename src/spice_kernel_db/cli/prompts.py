@@ -9,7 +9,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from spice_kernel_db.db import KernelDB, _format_size
+from spice_kernel_db.db import KernelDB, MetakernelNotTracked, _format_size
 from spice_kernel_db.remote import list_remote_metakernels
 
 console = Console()
@@ -126,7 +126,10 @@ def _require_metakernel(
 ) -> str | None:
     """Return *metakernel* if given, otherwise prompt the user to pick one."""
     if metakernel is not None:
-        return metakernel
+        resolved = db.resolve_metakernel_path(metakernel)
+        if resolved is None:
+            raise MetakernelNotTracked(metakernel)
+        return str(resolved)
     return _select_local_metakernel(db, mission)
 
 

@@ -313,6 +313,79 @@ class TestVerifyCLI:
             assert exc.value.code == 1
 
 
+class TestMetakernelFilenameResolution:
+    """Issue #41: list and verify should accept registry filenames and exit cleanly on untracked names."""
+
+    def _setup_db(self, tmp_path):
+        db = KernelDB(tmp_path / "test.duckdb")
+        p = tmp_path / "mk" / "juice_crema.tm"
+        p.parent.mkdir(parents=True)
+        p.write_text(
+            "KPL/MK\n"
+            "\\begindata\n"
+            "  PATH_VALUES  = ( '/tmp' )\n"
+            "  PATH_SYMBOLS = ( 'K' )\n"
+            "  KERNELS_TO_LOAD = ( '$K/test.tls' )\n"
+            "\\begintext\n"
+        )
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, ?, ?, ?, current_timestamp)",
+            [str(p), "JUICE", "https://example.com/juice_crema.tm", "juice_crema.tm"],
+        )
+        db.close()
+        return tmp_path / "test.duckdb"
+
+    def test_list_accepts_registered_filename(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        db_path = self._setup_db(tmp_path)
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            main(["--db", str(db_path), "list", "juice_crema.tm"])
+
+        out = capsys.readouterr().out
+        assert "juice_crema.tm" in out or "Kernels:" in out
+
+    def test_verify_accepts_registered_filename(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        db_path = self._setup_db(tmp_path)
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit) as exc:
+                main(["--db", str(db_path), "verify", "juice_crema.tm"])
+            # Exit 1 is expected because $K/test.tls does not exist on disk,
+            # but it should not crash with FileNotFoundError on juice_crema.tm
+            assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "FileNotFoundError" not in err
+
+    def test_list_untracked_metakernel_exits_1_with_hint(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        db_path = self._setup_db(tmp_path)
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit) as exc:
+                main(["--db", str(db_path), "list", "never_downloaded.tm"])
+            assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "list: 'never_downloaded.tm' is not tracked locally" in err
+        assert "spice-kernel-db get never_downloaded.tm" in err
+        assert "FileNotFoundError" not in err
+
+    def test_verify_untracked_metakernel_exits_1_with_hint(self, tmp_path, capsys):
+        from spice_kernel_db.cli import main
+
+        db_path = self._setup_db(tmp_path)
+        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+            with pytest.raises(SystemExit) as exc:
+                main(["--db", str(db_path), "verify", "never_downloaded.tm"])
+            assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "verify: 'never_downloaded.tm' is not tracked locally" in err
+        assert "spice-kernel-db get never_downloaded.tm" in err
+        assert "FileNotFoundError" not in err
+
+
 class TestPruneMetakernelsCLI:
     """End-to-end CLI smoke."""
 
@@ -1032,7 +1105,15 @@ class TestVerboseReachesGetAndUpdate:
     def test_cli_update_passes_verbose(self, tmp_path):
         from spice_kernel_db.cli import main
 
-        KernelDB(tmp_path / "t.duckdb").close()
+        db = KernelDB(tmp_path / "t.duckdb")
+        p = tmp_path / "x.tm"
+        p.write_text("KPL/MK\n")
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, ?, ?, ?, current_timestamp)",
+            [str(p), "X", "https://example.com/x.tm", "x.tm"],
+        )
+        db.close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
                      kernel_dir=str(tmp_path / "k"))
         seen = {}

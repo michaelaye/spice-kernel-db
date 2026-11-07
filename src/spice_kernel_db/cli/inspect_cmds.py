@@ -38,10 +38,14 @@ def list_(
         "--type", help="Filter by kernel type (ck, spk, fk, ik, pck, lsk, sclk, dsk)")] = None,
 ) -> None:
     with open_db(ctx, read_only=True) as db:
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
-        _list_kernels(mk, db=db, kernel_type=kernel_type)
+        try:
+            mk = _require_metakernel(metakernel, db, mission)
+            if mk is None:
+                return
+            _list_kernels(mk, db=db, kernel_type=kernel_type)
+        except MetakernelNotTracked as exc:
+            print(f"list: {exc}", file=sys.stderr)
+            sys.exit(1)
 
 
 @app.command(rich_help_panel=INSPECT, epilog="See also: list, mk, resolve",
@@ -66,10 +70,10 @@ def check(
 ) -> None:
     verbose = state(ctx).verbose
     with open_db(ctx, read_only=True) as db:
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
         try:
+            mk = _require_metakernel(metakernel, db, mission)
+            if mk is None:
+                return
             result = db.check_metakernel(mk, mission=mission, verbose=verbose)
             if full:
                 report = db.verify_against_server(
@@ -103,17 +107,21 @@ def verify(
         "--mission", help="Filter by mission (for registry lookup)")] = None,
 ) -> None:
     with open_db(ctx) as db:
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
-        result = db.verify_metakernel(mk, deep=deep)
-        if json_:
-            import json
-            print(json.dumps(result, indent=2, default=str))
-        else:
-            _render_verify_table(result)
-        # Non-zero on fatal (P0) issues by default; on any finding with --strict.
-        if result["fatal"] or (strict and result["fail"] > 0):
+        try:
+            mk = _require_metakernel(metakernel, db, mission)
+            if mk is None:
+                return
+            result = db.verify_metakernel(mk, deep=deep)
+            if json_:
+                import json
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                _render_verify_table(result)
+            # Non-zero on fatal (P0) issues by default; on any finding with --strict.
+            if result["fatal"] or (strict and result["fail"] > 0):
+                sys.exit(1)
+        except MetakernelNotTracked as exc:
+            print(f"verify: {exc}", file=sys.stderr)
             sys.exit(1)
 
 
@@ -134,11 +142,14 @@ def coverage(
             _spiceypy_required()
         if body_id is None:
             return
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
         try:
+            mk = _require_metakernel(metakernel, db, mission)
+            if mk is None:
+                return
             results = db.coverage_metakernel(mk, body_id, mission=mission)
+        except MetakernelNotTracked as exc:
+            print(f"coverage: {exc}", file=sys.stderr)
+            sys.exit(1)
         except ImportError:
             _spiceypy_required()
         _print_coverage_table(results, body_id, mk)
