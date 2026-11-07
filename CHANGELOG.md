@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`list` and `verify` resolve registry filenames and exit cleanly when untracked** (#41).
+  `_require_metakernel` previously returned arguments verbatim, causing `parse_metakernel`
+  to fail with `FileNotFoundError` on tracked registry names and raising raw tracebacks on
+  untracked names. It now resolves through `db.resolve_metakernel_path` and raises
+  `MetakernelNotTracked`, printing the `get` hint on stderr and exiting 1.
 - **`get -v` no longer crashes** (#39). The verbose "Resolved URLs" listing
   in `get_metakernel()` read a name that did not exist, so every verbose
   `get` ended in a `NameError` after the kernel table. Found by ruff's

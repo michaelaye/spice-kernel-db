@@ -10,7 +10,11 @@ from typing import Annotated, Optional
 import typer
 from rich.panel import Panel
 
-from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
+from spice_kernel_db.db import (
+    KernelDB,
+    MetakernelNotTracked,
+    MetakernelUnreachableError,
+)
 from spice_kernel_db.hashing import guess_mission
 from spice_kernel_db.remote import Probe, ProbeResult, probe_url
 
@@ -227,10 +231,10 @@ def update(
     if download_dir is None:
         download_dir = st.config.kernel_dir
     with open_db(ctx) as db:
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
         try:
+            mk = _require_metakernel(metakernel, db, mission)
+            if mk is None:
+                return
             db.update_metakernel(
                 mk,
                 mission=mission,
@@ -239,6 +243,9 @@ def update(
                 force=force,
                 verbose=st.verbose,
             )
+        except MetakernelNotTracked as exc:
+            print(f"update: {exc}", file=sys.stderr)
+            sys.exit(1)
         except MetakernelUnreachableError as e:
             console.print(Panel(
                 f"[red]The remote metakernel is no longer available.[/red]\n\n"

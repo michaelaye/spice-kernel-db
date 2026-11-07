@@ -1704,6 +1704,8 @@ class TestVerifyAgainstServer:
         try:
             with pytest.raises(MetakernelNotTracked):
                 db.verify_against_server("nope.tm")
+            with pytest.raises(MetakernelNotTracked):
+                db.verify_metakernel("nope.tm")
         finally:
             db.close()
 

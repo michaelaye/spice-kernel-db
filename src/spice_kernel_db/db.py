@@ -1672,6 +1672,10 @@ class KernelDB:
             ``status``, ``detail``.
         """
         from os.path import abspath, normpath
+        resolved = self.resolve_metakernel_path(mk_path)
+        if resolved is None:
+            raise MetakernelNotTracked(str(mk_path))
+        mk_path = resolved
         parsed = parse_metakernel(mk_path)
 
         entries: list[dict] = []
