@@ -704,12 +704,11 @@ class TestMetakernelListingInfo:
         captured = capsys.readouterr()
         assert "identical to" in captured.out
 
-    def test_info_metakernel_not_found(self, populated_db, capsys):
-        """info_metakernel returns None for unknown name."""
-        result = populated_db.info_metakernel("nonexistent.tm")
-        assert result is None
-        captured = capsys.readouterr()
-        assert "not found" in captured.out.lower()
+    def test_info_metakernel_not_found(self, populated_db):
+        """info_metakernel raises for an unknown name (#45); main() maps it to exit 1."""
+        from spice_kernel_db import MetakernelNotTracked
+        with pytest.raises(MetakernelNotTracked):
+            populated_db.info_metakernel("nonexistent.tm")
 
 
 class TestUpdateMetakernelRaisesLookupError:
@@ -717,7 +716,7 @@ class TestUpdateMetakernelRaisesLookupError:
 
     def test_not_found_raises(self, tmp_path):
         db = KernelDB(tmp_path / "test.duckdb")
-        with pytest.raises(LookupError, match="not found in registry"):
+        with pytest.raises(LookupError, match="is not tracked locally"):
             db.update_metakernel("nonexistent.tm")
         db.close()
 
@@ -1561,7 +1560,7 @@ class TestCheckUntrackedMetakernel:
                 "VALUES (?, ?, ?, ?, now())",
                 [str(mk), "JUICE", "http://x/tracked.tm", "tracked.tm"],
             )
-            assert db.resolve_metakernel_path("tracked.tm") == mk
+            assert db.resolve_metakernel("tracked.tm") == mk
             result = db.check_metakernel("tracked.tm")
             assert "missing" in result
         finally:

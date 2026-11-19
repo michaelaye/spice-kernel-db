@@ -13,10 +13,10 @@ from typing import Annotated, Optional
 import typer
 
 from spice_kernel_db.config import ensure_config
-from spice_kernel_db.db import KernelDB
+from spice_kernel_db.db import AmbiguousMetakernel, KernelDB, MetakernelNotTracked
 
 from ._app import State, app
-from .prompts import _metakernel_table, _registry_rows, console
+from .prompts import _metakernel_table, console
 
 # Register the commands, in the order the help panels should appear.
 from . import browse, inspect_cmds, transform, configure  # noqa: E402, F401, I001
@@ -86,7 +86,7 @@ def _show_default_summary() -> None:
         return
 
     with KernelDB(db_path, read_only=True) as db:
-        rows = _registry_rows(db)
+        rows = db.registry_rows()
 
     if rows:
         console.print(_metakernel_table(rows, index_style="dim"))
@@ -114,6 +114,13 @@ def main(argv: list[str] | None = None) -> None:
     """
     try:
         rc = app(args=argv, prog_name="spice-kernel-db", standalone_mode=False)
+    except AmbiguousMetakernel as exc:
+        # The one mapping for every command (#45): list the matches, exit 2.
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    except MetakernelNotTracked as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
     except typer.Abort:
         print("Aborted.", file=sys.stderr)
         sys.exit(1)

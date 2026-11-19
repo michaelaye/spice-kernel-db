@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 
@@ -109,3 +110,19 @@ def guess_mission(filepath: str) -> str:
         return "generic"
 
     return "unknown"
+
+
+# NAIF versioned metakernel snapshots: _v461_20251127_001.tm or _V324_20260206_002.TM
+VERSION_TAG_RE = re.compile(r"(_[vV]\d+_\d{8}_\d{3})\.[tT][mM]$")
+
+
+def strip_version_tag(filename: str) -> str:
+    """``juice_crema_5_2_v473_20260819_001.tm`` -> ``juice_crema_5_2.tm``.
+
+    A filename without a version tag is returned unchanged. The extension
+    keeps its original case.
+    """
+    match = VERSION_TAG_RE.search(filename)
+    if not match:
+        return filename
+    return filename[: match.start()] + filename[filename.rfind("."):]

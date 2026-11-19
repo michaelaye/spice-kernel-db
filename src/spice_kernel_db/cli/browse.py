@@ -22,6 +22,7 @@ from .prompts import (
     _pick_index,
     _require_metakernel,
     _resolve_mission_mk_dir,
+    _menu,
     console,
 )
 
@@ -119,7 +120,7 @@ def browse(
             _show(db, _maybe_archive(m["mk_dir_url"]), m["name"])
             return
 
-        console.print(_mission_table(missions, "Select a mission to browse"))
+        _menu().print(_mission_table(missions, "Select a mission to browse"))
         # quiet_eof: this menu has always returned silently on EOF.
         idx = _pick_index(f"\nSelect mission [1-{len(missions)}]: ", len(missions),
                           invalid=INVALID, quiet_eof=True)
@@ -256,6 +257,3 @@ def update(
                 border_style="red",
             ))
             sys.exit(2)
-        except LookupError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)

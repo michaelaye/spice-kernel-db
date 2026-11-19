@@ -2,10 +2,12 @@
 
 from spice_kernel_db.config import Config, ensure_config
 from spice_kernel_db.db import (
+    AmbiguousMetakernel,
     ConcurrentModificationError,
     KernelDB,
     MetakernelNotTracked,
     MetakernelUnreachableError,
+    RegistryRow,
 )
 from spice_kernel_db.parser import parse_metakernel, parse_metakernel_text
 from spice_kernel_db.remote import (
@@ -15,11 +17,13 @@ from spice_kernel_db.remote import (
 )
 
 __all__ = [
+    "AmbiguousMetakernel",
     "ConcurrentModificationError",
     "Config",
     "KernelDB",
     "MetakernelNotTracked",
     "MetakernelUnreachableError",
+    "RegistryRow",
     "ensure_config",
     "fetch_metakernel",
     "list_remote_metakernels",

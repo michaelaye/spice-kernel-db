@@ -12,7 +12,7 @@ from spice_kernel_db.db import KernelDB
 from spice_kernel_db.remote import SPICE_SERVERS, server_label_for
 
 from ._app import TRANSFORM, app, open_db, state
-from .prompts import _ask, _confirm
+from .prompts import _ask, _confirm, _require_metakernel
 
 @app.command(rich_help_panel=TRANSFORM, help="Scan a directory for kernel files")
 def scan(
@@ -41,7 +41,9 @@ def scan(
 @app.command(rich_help_panel=TRANSFORM, help="Rewrite a metakernel with a local symlink tree")
 def rewrite(
     ctx: typer.Context,
-    metakernel: Annotated[str, typer.Argument(help="Path to original .tm file")],
+    metakernel: Annotated[Optional[str], typer.Argument(
+        help="Original metakernel: path, registry filename or base name "
+             "(omit to pick from the tracked metakernels at a terminal)")] = None,
     output: Annotated[Optional[str], typer.Option(
         "-o", "--output", help="Output .tm path (default: <stem>_local.tm)")] = None,
     link_root: Annotated[Optional[str], typer.Option(
@@ -49,11 +51,14 @@ def rewrite(
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Preferred mission for kernel resolution")] = None,
 ) -> None:
-    if output is None:
-        mk = Path(metakernel)
-        output = str(mk.with_stem(mk.stem + "_local"))
     with open_db(ctx) as db:
-        db.rewrite_metakernel(metakernel, output, mission=mission, link_root=link_root)
+        mk = _require_metakernel(metakernel, db, mission)
+        if mk is None:
+            return
+        mk_path = db.resolve_metakernel(mk, mission=mission)
+        if output is None:
+            output = str(mk_path.with_stem(mk_path.stem + "_local"))
+        db.rewrite_metakernel(mk_path, output, mission=mission, link_root=link_root)
 
 
 @app.command(rich_help_panel=TRANSFORM, help="Deduplicate kernel files using symlinks")

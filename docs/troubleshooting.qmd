@@ -27,6 +27,25 @@ spice-kernel-db get             # download one interactively
 ```
 
 
+## "matches several tracked metakernels" (exit 2)
+
+The name you gave is a base name and more than one versioned snapshot of it is tracked:
+
+```
+juice_crema_5_1.tm matches several tracked metakernels:
+  juice_crema_5_1_v470_20260101_001.tm
+  juice_crema_5_1_v471_20260201_001.tm
+Pass one of them.
+```
+
+Pass the full registry filename, or remove the snapshot you no longer want with `spice-kernel-db mk --remove <filename>`. The same answer comes from every command, so a script can test for exit code 2.
+
+
+## "needs a terminal for its menu" (exit 2)
+
+A command that needed a metakernel was run without one from a script, a notebook or a pipe. At a terminal it would have shown a picker; without one it lists the tracked metakernels on stderr and exits 2 instead of waiting for input. Pass the metakernel as the argument (see [Naming a metakernel](cli.qmd#naming-a-metakernel)).
+
+
 ## "Not found" when resolving a kernel
 
 The kernel exists on disk but isn't in the database yet.

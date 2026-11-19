@@ -10,20 +10,22 @@ import typer
 from rich.panel import Panel
 from rich.table import Table
 
-from spice_kernel_db.db import KernelDB, MetakernelNotTracked, _format_size
+from spice_kernel_db.db import KernelDB, _format_size
 
 from ._app import INSPECT, app, open_db, state
 from .prompts import (
     _interactive_pick_deduplicated_kernel,
-    _interactive_pick_local_metakernel,
     _require_metakernel,
     _resolve_body_interactive,
+    _select_local_metakernel,
     console,
 )
 
 MetakernelArg = Annotated[
     Optional[str],
-    typer.Argument(help="Path to .tm file (omit to select from local registry)"),
+    typer.Argument(
+        help="Path to a .tm file, registry filename or versionless base name "
+             "(omit to pick from the tracked metakernels at a terminal)"),
 ]
 
 
@@ -41,7 +43,8 @@ def list_(
         mk = _require_metakernel(metakernel, db, mission)
         if mk is None:
             return
-        _list_kernels(mk, db=db, kernel_type=kernel_type)
+        _list_kernels(str(db.resolve_metakernel(mk, mission=mission)), db=db,
+                      kernel_type=kernel_type)
 
 
 @app.command(rich_help_panel=INSPECT, epilog="See also: list, mk, resolve",
@@ -69,22 +72,18 @@ def check(
         mk = _require_metakernel(metakernel, db, mission)
         if mk is None:
             return
-        try:
-            result = db.check_metakernel(mk, mission=mission, verbose=verbose)
-            if full:
-                report = db.verify_against_server(
-                    mk, mission=mission, check_hash=hash_, check_spice=spice,
-                )
-                _print_server_check(report, verbose=verbose)
-                if report["bad"]:
-                    sys.exit(1)
-            elif hash_ or spice:
-                print("check: --hash and --spice require --full", file=sys.stderr)
-                sys.exit(2)
-            if result["poisoned"]:
+        result = db.check_metakernel(mk, mission=mission, verbose=verbose)
+        if full:
+            report = db.verify_against_server(
+                mk, mission=mission, check_hash=hash_, check_spice=spice,
+            )
+            _print_server_check(report, verbose=verbose)
+            if report["bad"]:
                 sys.exit(1)
-        except MetakernelNotTracked as exc:
-            print(f"check: {exc}", file=sys.stderr)
+        elif hash_ or spice:
+            print("check: --hash and --spice require --full", file=sys.stderr)
+            sys.exit(2)
+        if result["poisoned"]:
             sys.exit(1)
 
 
@@ -162,7 +161,7 @@ _MK_EPILOG = "See also: check, list"
 def metakernels(
     ctx: typer.Context,
     name: Annotated[Optional[str], typer.Argument(
-        help="Show info for a specific metakernel (by filename)")] = None,
+        help="Show info for one metakernel (path, registry filename or base name)")] = None,
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Filter by mission name (prefix match)")] = None,
     remove: Annotated[bool, typer.Option(
@@ -175,10 +174,13 @@ def metakernels(
             if not name:
                 print("Usage: spice-kernel-db mk --remove <name>", file=sys.stderr)
                 sys.exit(1)
+            # Matched against the registry directly, not through the file
+            # resolver: removing a row whose file is gone is the point.
             if db.remove_metakernel(name):
                 print(f"Metakernel '{name}' removed from registry.")
             else:
                 print(f"Metakernel '{name}' not found.", file=sys.stderr)
+                sys.exit(1)
         elif name:
             db.info_metakernel(name)
         else:
@@ -195,14 +197,17 @@ def resolve(
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Preferred mission for resolution")] = None,
     resolve_mk: Annotated[Optional[str], typer.Option(
-        "--metakernel", help="Resolve all kernels in a .tm metakernel")] = None,
+        "--metakernel",
+        help="Resolve all kernels in a metakernel (path, registry filename "
+             "or base name)")] = None,
 ) -> None:
     with open_db(ctx, read_only=True) as db:
         if resolve_mk:
             # Batch mode — resolve all kernels in a metakernel
             from spice_kernel_db import parse_metakernel
+            mk = db.resolve_metakernel(resolve_mk, mission=mission)
             all_ok = True
-            for kernel in parse_metakernel(resolve_mk).kernel_filenames():
+            for kernel in parse_metakernel(mk).kernel_filenames():
                 path, warnings = db.resolve_kernel(kernel, preferred_mission=mission)
                 if path:
                     print(f"{kernel}\t{path}")
@@ -227,7 +232,7 @@ def resolve(
             for w in warnings:
                 print(f"  ⚠ {w}", file=sys.stderr)
         else:
-            picked = _interactive_pick_local_metakernel(db, mission)
+            picked = _select_local_metakernel(db, mission)
             if picked is None:
                 sys.exit(1)
             print(picked)

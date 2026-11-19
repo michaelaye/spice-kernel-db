@@ -24,3 +24,9 @@ docs/.gitignore
 
 # Design plans and working notes stay local: never in git, never in a release.
 Plans/
+
+# Design trials and review copies (standing rule: never committed)
+review/
+
+# ISA (Claude work record, like Plans/: never committed)
+ISA.md

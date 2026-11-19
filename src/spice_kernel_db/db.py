@@ -14,6 +14,8 @@ Key design decisions:
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import http.client
 import logging
 import os
@@ -34,6 +36,7 @@ from spice_kernel_db.hashing import (
     classify_kernel,
     guess_mission,
     sha256_file,
+    strip_version_tag,
 )
 from spice_kernel_db.parser import (
     ParsedMetakernel,
@@ -183,12 +186,40 @@ class MetakernelNotTracked(LookupError):
     and printed a traceback. The name simply had not been downloaded yet.
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, detail: str | None = None):
         self.name = name
         super().__init__(
-            f"'{name}' is not tracked locally; fetch it with "
-            f"`spice-kernel-db get {name}`"
+            detail
+            or f"'{name}' is not tracked locally; fetch it with "
+               f"`spice-kernel-db get {name}`"
         )
+
+
+class AmbiguousMetakernel(LookupError):
+    """Raised when a metakernel reference matches several registry rows (#45).
+
+    The resolver never picks the first match: the caller lists
+    ``candidates`` and asks for a more specific name.
+    """
+
+    def __init__(self, name: str, candidates: list[str]):
+        self.name = name
+        self.candidates = candidates
+        listed = ", ".join(candidates)
+        super().__init__(
+            f"'{name}' matches {len(candidates)} tracked metakernels: {listed}. "
+            f"Pass one of them."
+        )
+
+
+class RegistryRow(NamedTuple):
+    """One ``metakernel_registry`` row, as ``KernelDB.registry_rows`` returns it."""
+
+    mk_path: str
+    source_url: str | None
+    filename: str
+    mission: str
+    acquired_at: object
 
 
 class MetakernelUnreachableError(LookupError):
@@ -1160,26 +1191,83 @@ class KernelDB:
                 cur.execute("ROLLBACK")
                 raise
 
-    def resolve_metakernel_path(self, name: str | Path) -> Path | None:
-        """Return the on-disk path of a metakernel named *name*, or None.
+    def registry_rows(self, mission: str | None = None) -> list[RegistryRow]:
+        """Every tracked metakernel, ordered by mission and filename.
 
-        Accepts a path (used as-is when it exists) or a bare filename, which is
-        looked up in metakernel_registry the way `info` and `resolve` do.
-        Issue #11: check_metakernel() passed its argument straight to
-        parse_metakernel(), so a bare name that was never downloaded produced a
-        FileNotFoundError traceback from deep inside the parser.
+        *mission* is a case-insensitive prefix filter. The one registry
+        query behind ``resolve_metakernel`` and the CLI pickers (#45).
         """
-        candidate = Path(name)
+        where, params = "", []
+        if mission:
+            where = "WHERE LOWER(mission) LIKE LOWER(?) || '%'"
+            params = [mission]
+        rows = self.con.execute(
+            f"SELECT mk_path, source_url, filename, mission, acquired_at "
+            f"FROM metakernel_registry {where} ORDER BY mission, filename",
+            params,
+        ).fetchall()
+        return [RegistryRow(*r) for r in rows]
+
+    def _registry_row(
+        self, ref: str | Path, mission: str | None = None,
+    ) -> RegistryRow | None:
+        """The registry row *ref* names, or None when no row matches.
+
+        *ref* may be a registry filename, an ``mk_path``, a ``source_url``
+        or a version-stripped base name (``juice_crema_5_2.tm`` for
+        ``juice_crema_5_2_v473_20260819_001.tm``), case-insensitive, with
+        or without ``.tm``. The file need not exist, so a stale row can
+        still be shown, updated or removed. Raises ``AmbiguousMetakernel``
+        when several rows match; never picks the first.
+        """
+        low = str(ref).lower()
+        wanted = {low, low + ".tm"}
+        rows = self.registry_rows(mission)
+        matches = [
+            r for r in rows
+            if r.filename.lower() in wanted
+            or r.mk_path.lower() == low
+            or (r.source_url or "").lower() == low
+        ]
+        # A base name matches every tracked snapshot of it. The tag is
+        # stripped from the registry side only, so asking for a specific
+        # version that is not tracked never lands on another version.
+        matches = matches or [
+            r for r in rows if strip_version_tag(r.filename).lower() in wanted
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise AmbiguousMetakernel(str(ref), [r.filename for r in matches])
+        return matches[0]
+
+    def resolve_metakernel(
+        self, ref: str | Path, mission: str | None = None,
+    ) -> Path:
+        """The on-disk path of the metakernel *ref* names (#45).
+
+        A path that exists is returned as is; anything else goes through
+        ``_registry_row``. Every command that reads a metakernel resolves
+        through here, so a name that works for ``check`` works for ``list``
+        and ``verify`` too (#41). Raises ``MetakernelNotTracked`` when
+        nothing matches or the matched file is gone, ``AmbiguousMetakernel``
+        when several rows match.
+        """
+        candidate = Path(ref)
         if candidate.is_file():
             return candidate
-        row = self.con.execute(
-            "SELECT mk_path FROM metakernel_registry "
-            "WHERE filename = ? OR mk_path = ?",
-            [str(name), str(name)],
-        ).fetchone()
-        if row and Path(row[0]).is_file():
-            return Path(row[0])
-        return None
+        row = self._registry_row(ref, mission=mission)
+        if row is None:
+            raise MetakernelNotTracked(str(ref))
+        path = Path(row.mk_path)
+        if not path.is_file():
+            raise MetakernelNotTracked(
+                str(ref),
+                detail=f"'{ref}' is registered at {path} but the file is gone; "
+                       f"run `spice-kernel-db prune --metakernels` or "
+                       f"`spice-kernel-db get {ref}`",
+            )
+        return path
 
     def verify_against_server(
         self,
@@ -1214,9 +1302,7 @@ class KernelDB:
         from spice_kernel_db.hashing import sha256_file
         from spice_kernel_db.remote import query_remote_sizes, resolve_kernel_urls
 
-        resolved_mk = self.resolve_metakernel_path(mk_path)
-        if resolved_mk is None:
-            raise MetakernelNotTracked(str(mk_path))
+        resolved_mk = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(resolved_mk)
         if mission is None:
             mission = guess_mission(str(resolved_mk))
@@ -1398,10 +1484,7 @@ class KernelDB:
                 missing:  list of raw_entry
                 warnings: list of str
         """
-        resolved = self.resolve_metakernel_path(mk_path)
-        if resolved is None:
-            raise MetakernelNotTracked(str(mk_path))
-        mk_path = resolved
+        mk_path = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(mk_path)
         if mission is None:
             mission = guess_mission(str(mk_path))
@@ -1565,7 +1648,7 @@ class KernelDB:
         Returns:
             (output_path, warnings)
         """
-        mk_path = Path(mk_path)
+        mk_path = self.resolve_metakernel(mk_path, mission=mission)
         output = Path(output)
         parsed = parse_metakernel(mk_path)
         if mission is None:
@@ -1672,6 +1755,7 @@ class KernelDB:
             ``status``, ``detail``.
         """
         from os.path import abspath, normpath
+        mk_path = self.resolve_metakernel(mk_path)
         parsed = parse_metakernel(mk_path)
 
         entries: list[dict] = []
@@ -2434,19 +2518,13 @@ class KernelDB:
         """
         import duckdb
 
-        # Look up by mk_path first, then by filename
-        row = self.con.execute("""
-            SELECT mk_path, source_url, filename, mission
-            FROM metakernel_registry
-            WHERE mk_path = ? OR filename = ?
-        """, [str(mk_path_or_name), str(mk_path_or_name)]).fetchone()
+        row = self._registry_row(mk_path_or_name, mission=mission)
+        if row is None:
+            raise MetakernelNotTracked(str(mk_path_or_name))
 
-        if not row:
-            raise LookupError(
-                f"Metakernel not found in registry: {mk_path_or_name}"
-            )
-
-        mk_path, source_url, mk_filename, reg_mission = row
+        mk_path, source_url, mk_filename, reg_mission = (
+            row.mk_path, row.source_url, row.filename, row.mission,
+        )
         mission = mission or reg_mission
 
         if not source_url:
@@ -2701,22 +2779,16 @@ class KernelDB:
             matches.append({**row, "intervals": intervals})
         return matches
 
-    def info_metakernel(self, name: str) -> dict | None:
+    def info_metakernel(self, name: str) -> dict:
         """Show detailed info about a tracked metakernel.
 
-        Looks up by filename (or path) in metakernel_registry.
+        *name* is any form ``resolve_metakernel`` accepts.
         """
-        row = self.con.execute("""
-            SELECT mk_path, mission, source_url, filename, acquired_at
-            FROM metakernel_registry
-            WHERE filename = ? OR mk_path = ?
-        """, [name, name]).fetchone()
-
+        row = self._registry_row(name)
         if row is None:
-            print(f"Metakernel not found: {name}")
-            return None
+            raise MetakernelNotTracked(str(name))
 
-        mk_path, mission, source_url, filename, acquired_at = row
+        mk_path, source_url, filename, mission, acquired_at = row
 
         # Get kernel entries
         entries = self.con.execute("""
@@ -2799,21 +2871,16 @@ class KernelDB:
     def remove_metakernel(self, name: str) -> bool:
         """Remove a metakernel from the registry and its entries.
 
-        Looks up by filename or mk_path (case-insensitive prefix match on
-        filename). Does NOT delete the .tm file from disk.
+        *name* is any form ``resolve_metakernel`` accepts. Does NOT delete
+        the .tm file from disk.
 
         Returns True if found and removed, False if not found.
         """
-        row = self.con.execute("""
-            SELECT mk_path, filename FROM metakernel_registry
-            WHERE filename = ? OR mk_path = ?
-               OR LOWER(filename) LIKE LOWER(?) || '%'
-        """, [name, name, name]).fetchone()
-
-        if not row:
+        row = self._registry_row(name)
+        if row is None:
             return False
 
-        mk_path, filename = row
+        mk_path = row.mk_path
         self.con.execute(
             "DELETE FROM metakernel_entries WHERE mk_path = ?", [mk_path],
         )
@@ -3528,20 +3595,7 @@ class KernelDB:
         """
         from spice_kernel_db.coverage import check_coverage
 
-        mk = Path(mk_path)
-        if not mk.is_file():
-            # Try registry lookup by filename
-            row = self.con.execute(
-                "SELECT mk_path FROM metakernel_registry WHERE filename = ?",
-                [str(mk_path)],
-            ).fetchone()
-            if row:
-                mk = Path(row[0])
-            else:
-                raise FileNotFoundError(
-                    f"Metakernel not found: {mk_path}"
-                )
-
+        mk = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(mk)
         if mission is None:
             mission = guess_mission(str(mk))

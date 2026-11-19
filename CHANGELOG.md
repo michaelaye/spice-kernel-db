@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One resolver for every metakernel argument** (#45). `KernelDB.resolve_metakernel()`
+  turns a path, a registry filename, a versionless base name (with or without
+  `.tm`) or the source URL into the tracked file, case-insensitively, and every
+  command (`check`, `list`, `verify`, `coverage`, `update`, `rewrite`,
+  `metakernels`, `resolve --metakernel`) goes through it. A name that matches
+  nothing exits 1 with the `get` hint; a name that matches several tracked
+  metakernels raises the new `AmbiguousMetakernel`, and the CLI lists them and
+  exits 2. The first match is never picked silently. `rewrite` now accepts the
+  same forms and offers the picker when the argument is omitted.
+- **Pickers know whether they have a terminal** (#45). With no argument at a
+  terminal every picker behaves as before. In a script, a notebook or a pipe
+  (stdin not a terminal) the candidates are printed on stderr and the command
+  exits 2 instead of blocking on input; stdout stays clean for the caller.
+
 - **Poisoned supersession rows are reported** (#31). #29 made the state
   repairable but nothing said it existed: a user saw the same kernels
   re-download on every `update` with no hint why. `KernelDB.poisoned_superseded()`
@@ -19,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`KernelDB.info_metakernel()` and `update_metakernel()` raise `MetakernelNotTracked`**
+  for an unknown name instead of printing "not found" or raising a bare
+  `LookupError`; the CLI maps that to exit 1 in one place (#45).
+
+- **`mk --remove` no longer matches a bare prefix**; it takes the same forms as
+  every other command, so a prefix matching several rows is reported instead of
+  removing the first one (#45).
+
 - **`skd --version` and `--help` start faster** (#26). `requests`, `duckdb`,
   `importlib.metadata` and Typer's rich error formatter are now imported
   where they are used instead of at module level, so invocations that open
@@ -28,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first access; everything else in the public API is unchanged.
 
 ### Fixed
+
+- **`verify` and `list` crashed on a registry filename that `check` accepted**
+  (#41). Both handed the bare name to the parser and died with
+  `FileNotFoundError`; they now resolve it like `check` does.
 
 - **`get -v` no longer crashes** (#39). The verbose "Resolved URLs" listing
   in `get_metakernel()` read a name that did not exist, so every verbose

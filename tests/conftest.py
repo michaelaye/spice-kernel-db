@@ -291,6 +291,7 @@ def fixture_registry(monkeypatch):
 # session fails if the developer's real config changed anyway.
 
 import os
+import sys
 
 
 def _snapshot(path: Path) -> tuple:
@@ -332,3 +333,11 @@ def _isolated_home(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(config, "CONFIG_DIR", home / ".config" / "spice-kernel-db")
     monkeypatch.setattr(config, "CONFIG_FILE", config.CONFIG_DIR / "config.toml")
+
+
+@pytest.fixture
+def tty(monkeypatch):
+    """Make stdin look like a terminal, so a picker prompts instead of
+    exiting 2 (#45). Tests that drive a picker with a patched ``input``
+    ask for this; the default (no terminal under pytest) is the script case."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)

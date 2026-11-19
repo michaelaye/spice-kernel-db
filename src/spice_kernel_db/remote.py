@@ -25,6 +25,8 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
+from spice_kernel_db.hashing import VERSION_TAG_RE as _VERSION_TAG_RE  # the tests import it from here
+from spice_kernel_db.hashing import strip_version_tag
 from spice_kernel_db.parser import ParsedMetakernel
 
 if TYPE_CHECKING:
@@ -72,8 +74,6 @@ _DIR_ENTRY_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"
 )
 
-# Regex for NAIF versioned metakernel snapshots: _v461_20251127_001.tm or _V324_20260206_002.TM
-_VERSION_TAG_RE = re.compile(r"(_[vV]\d+_\d{8}_\d{3})\.[tT][mM]$")
 
 # Regex for Apache mod_autoindex .tm file entries.
 # Handles both plain-text (NASA) and table-based (ESA) formats.
@@ -124,13 +124,8 @@ def list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]:
 
         # Extract version tag if present
         tag_match = _VERSION_TAG_RE.search(filename)
-        if tag_match:
-            version_tag = tag_match.group(1).lstrip("_")  # "v461_20251127_001"
-            ext = filename[filename.rfind("."):]  # preserve original case (.tm or .TM)
-            base_name = filename[: tag_match.start()] + ext
-        else:
-            version_tag = None
-            base_name = filename
+        version_tag = tag_match.group(1).lstrip("_") if tag_match else None  # "v461_20251127_001"
+        base_name = strip_version_tag(filename)
 
         results.append(RemoteMetakernel(
             filename=filename,

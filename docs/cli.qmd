@@ -10,6 +10,28 @@ The root options come before the command: `spice-kernel-db [--db PATH] [-v] COMM
 inspect, transform and configure. `spice-kernel-db --install-completion` installs shell
 completion for the current shell; `--show-completion` prints it instead.
 
+## Naming a metakernel
+
+Every command that takes a metakernel (`check`, `list`, `verify`, `coverage`, `update`, `rewrite`, `metakernels`, `resolve --metakernel`) resolves the argument the same way. Any of these forms names the same tracked file:
+
+| Form | Example |
+|:---|:---|
+| path to the file | `~/kernels/JUICE/mk/juice_crema_5_2_v473_20260819_001.tm` |
+| registry filename | `juice_crema_5_2_v473_20260819_001.tm` |
+| versionless base name, with or without `.tm` | `juice_crema_5_2.tm`, `juice_crema_5_2` |
+| the URL it was fetched from | `https://.../mk/juice_crema_5_2_v473_20260819_001.tm` |
+
+Matching is case-insensitive; `--mission` narrows it to one mission. A base name matches every tracked snapshot of that metakernel, so it is unambiguous only while one is tracked. Asking for a specific version that is not tracked never lands on another version.
+
+| Situation | Behaviour | Exit |
+|:---|:---|:---|
+| the name matches nothing | prints `... is not tracked locally; fetch it with spice-kernel-db get <name>` | 1 |
+| the name matches several tracked metakernels | lists them and asks for one | 2 |
+| no argument, at a terminal | a numbered picker over the tracked metakernels | |
+| no argument, in a script or notebook (stdin not a terminal) | prints the candidates on stderr and stops | 2 |
+
+The same terminal rule applies to every other picker (`get` with no argument, `aliases` with no argument, an ambiguous body name in `coverage`): a script never blocks on a prompt. Python callers get the same resolution from `KernelDB.resolve_metakernel()`.
+
 ## `scan`
 
 Recursively scan a directory and register all kernel files.
@@ -79,7 +101,7 @@ spice-kernel-db check [metakernel] [--mission NAME] [-v]
 
 | Option | Description |
 |--------|-------------|
-| `metakernel` | Path to a `.tm` file or registry filename. **Omit to select interactively** from locally acquired metakernels. |
+| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
 | `--mission` | Mission name for preferred-mission resolution |
 | `-v, --verbose` | Show full per-file warnings instead of compact summary |
 
@@ -195,7 +217,7 @@ spice-kernel-db verify [metakernel] [--deep] [--strict] [--json] [--mission NAME
 
 | Option | Description |
 |--------|-------------|
-| `metakernel` | Path to `.tm` file. **Omit to select interactively from the registry.** |
+| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
 | `--deep` | Recompute SHA-256 of every entry's target (slow). Default: size-only checks. |
 | `--strict` | Exit non-zero on any non-OK finding. Default: only on fatal P0 issues. |
 | `--json` | Emit structured JSON instead of a rich table. |
@@ -373,7 +395,7 @@ spice-kernel-db update [metakernel] [--mission NAME] [--download-dir DIR] [-y] [
 
 | Option | Description |
 |--------|-------------|
-| `metakernel` | Metakernel filename or path. **Omit to select interactively.** |
+| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
 | `--mission` | Override mission name |
 | `--download-dir` | Override default kernel storage directory |
 | `-y, --yes` | Skip confirmation prompt |
@@ -488,7 +510,7 @@ spice-kernel-db coverage <body> [metakernel] [--mission NAME]
 | Option | Description |
 |--------|-------------|
 | `body` | NAIF body ID (e.g. `399`) or body name (e.g. `Earth`) |
-| `metakernel` | Path to a `.tm` file or registry filename. Omit to select interactively. |
+| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). Omit to pick from the tracked metakernels at a terminal. |
 | `--mission` | Mission name for preferred-mission resolution |
 
 ```bash

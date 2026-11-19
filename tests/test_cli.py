@@ -12,6 +12,7 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+import spice_kernel_db
 from spice_kernel_db import KernelDB, parse_metakernel
 from spice_kernel_db.config import Config, load_config, save_config, show_config
 from spice_kernel_db.hashing import (
@@ -172,7 +173,7 @@ class TestResolveBodyInteractiveReturnsNone:
         result = _resolve_body_interactive("ZZZZNOTABODY999")
         assert result is None
 
-    def test_invalid_selection_returns_none(self):
+    def test_invalid_selection_returns_none(self, tty):
         from spice_kernel_db.cli.prompts import _resolve_body_interactive
         # "earth" is ambiguous (center vs barycenter) — give invalid input
         with patch("builtins.input", return_value="999"):
@@ -776,7 +777,7 @@ class TestAliasPicker:
     """`aliases` with no argument offers an interactive picker over the
     deduplicated kernels."""
 
-    def test_picker_lists_dedup_and_returns_choice(self, tmp_path, monkeypatch):
+    def test_picker_lists_dedup_and_returns_choice(self, tmp_path, monkeypatch, tty):
         from spice_kernel_db.cli.prompts import _interactive_pick_deduplicated_kernel
         db = KernelDB(tmp_path / "p.duckdb")
         try:
@@ -808,7 +809,7 @@ class TestAliasPicker:
         finally:
             db.close()
 
-    def test_picker_cancel_returns_none(self, tmp_path, monkeypatch):
+    def test_picker_cancel_returns_none(self, tmp_path, monkeypatch, tty):
         from spice_kernel_db.cli.prompts import _interactive_pick_deduplicated_kernel
         db = KernelDB(tmp_path / "p3.duckdb")
         try:
@@ -1076,3 +1077,149 @@ class TestMissionHelpTextIsConsistent:
                 main([verb, "--help"])
             out = capsys.readouterr().out
             assert expected in out, f"{verb} --help does not say {expected!r}"
+
+
+class TestOneResolver:
+    """#45: every command resolves a metakernel reference the same way, so a
+    registry filename that `check` accepts works for `list` and `verify` too
+    (#41), and a missing argument behaves the same everywhere."""
+
+    SOURCE = "https://example.com/mk/juice_crema_5_2_v473_20260819_001.tm"
+    FORMS = ["absolute path", "registry filename", "base name",
+             "base name without .tm", "source url"]
+    COMMANDS = [("list",), ("check",), ("verify",), ("metakernels",),
+                ("resolve", "--metakernel")]
+
+    @pytest.fixture
+    def tracked(self, tmp_path):
+        """A DB with one tracked JUICE metakernel plus two snapshots of a
+        second one, and a ``run`` helper that returns the exit code."""
+        from types import SimpleNamespace
+
+        from spice_kernel_db.cli import main
+
+        db_path = tmp_path / "t.duckdb"
+        db = KernelDB(db_path)
+        kernel = tmp_path / "pck00011.tpc"
+        kernel.write_text("REAL PCK CONTENT")
+        db.register_file(kernel, mission="JUICE")
+
+        def write_mk(name: str, source_url: str | None = None) -> Path:
+            mk = tmp_path / name
+            mk.write_text(
+                "\\begindata\n"
+                f"PATH_VALUES = ( '{tmp_path}' )\n"
+                "PATH_SYMBOLS = ( 'K' )\n"
+                "KERNELS_TO_LOAD = ( '$K/pck00011.tpc' )\n"
+                "\\begintext\n"
+            )
+            db.con.execute(
+                "INSERT INTO metakernel_registry "
+                "(mk_path, mission, source_url, filename, acquired_at) "
+                "VALUES (?, 'JUICE', ?, ?, now())",
+                [str(mk), source_url, name],
+            )
+            return mk
+
+        mk = write_mk("juice_crema_5_2_v473_20260819_001.tm", self.SOURCE)
+        write_mk("juice_crema_5_1_v470_20260101_001.tm")
+        write_mk("juice_crema_5_1_v471_20260201_001.tm")
+        db.close()
+
+        def run(*argv: str) -> int:
+            # check consults the remote mk/ listing when a source URL is
+            # known; this test is about resolution, not staleness.
+            with patch("spice_kernel_db.cli.ensure_config", return_value=Config()), \
+                 patch.object(KernelDB, "_check_remote_staleness", lambda *a, **k: None):
+                try:
+                    main(["--db", str(db_path), *argv])
+                except SystemExit as exc:
+                    return exc.code or 0
+            return 0
+
+        return SimpleNamespace(path=mk, db_path=db_path, tmp=tmp_path, run=run)
+
+    def ref(self, tracked, form: str) -> str:
+        return {
+            "absolute path": str(tracked.path),
+            "registry filename": "juice_crema_5_2_v473_20260819_001.tm",
+            "base name": "juice_crema_5_2.tm",
+            "base name without .tm": "juice_crema_5_2",
+            "source url": self.SOURCE,
+        }[form]
+
+    # C1
+    @pytest.mark.parametrize("form", FORMS)
+    def test_every_form_resolves_to_the_same_path(self, tracked, form):
+        db = KernelDB(tracked.db_path)
+        try:
+            assert db.resolve_metakernel(self.ref(tracked, form)) == tracked.path
+            assert db.resolve_metakernel("JUICE_CREMA_5_2.TM") == tracked.path
+            with pytest.raises(spice_kernel_db.MetakernelNotTracked):
+                db.resolve_metakernel("juice_crema_5_2.tm", mission="bepi")
+        finally:
+            db.close()
+
+    # C2
+    def test_unknown_and_ambiguous(self, tracked):
+        db = KernelDB(tracked.db_path)
+        try:
+            with pytest.raises(spice_kernel_db.MetakernelNotTracked) as exc:
+                db.resolve_metakernel("nope.tm")
+            assert "spice-kernel-db get nope.tm" in str(exc.value)
+            # A specific version that is not tracked never lands on another one.
+            with pytest.raises(spice_kernel_db.MetakernelNotTracked):
+                db.resolve_metakernel("juice_crema_5_2_v999_20270101_001.tm")
+            with pytest.raises(spice_kernel_db.AmbiguousMetakernel) as exc:
+                db.resolve_metakernel("juice_crema_5_1.tm")
+            assert sorted(exc.value.candidates) == [
+                "juice_crema_5_1_v470_20260101_001.tm",
+                "juice_crema_5_1_v471_20260201_001.tm",
+            ]
+        finally:
+            db.close()
+
+    # C3
+    @pytest.mark.parametrize("command", COMMANDS, ids=" ".join)
+    @pytest.mark.parametrize("form", FORMS)
+    def test_commands_accept_every_form(self, tracked, capsys, command, form):
+        assert tracked.run(*command, self.ref(tracked, form)) == 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err and "not tracked" not in err
+
+    def test_rewrite_accepts_registry_filename(self, tracked, capsys):
+        out = tracked.tmp / "local.tm"
+        assert tracked.run("rewrite", "juice_crema_5_2.tm", "-o", str(out)) == 0
+        assert out.is_file()
+        assert "Traceback" not in capsys.readouterr().err
+
+    def test_remove_accepts_base_name(self, tracked):
+        assert tracked.run("metakernels", "--remove", "juice_crema_5_2.tm") == 0
+        assert tracked.run("metakernels", "juice_crema_5_2.tm") == 1
+
+    # C4
+    @pytest.mark.parametrize("command", COMMANDS, ids=" ".join)
+    def test_commands_share_exit_codes(self, tracked, capsys, command):
+        assert tracked.run(*command, "nope.tm") == 1
+        err = capsys.readouterr().err
+        assert "spice-kernel-db get nope.tm" in err and "Traceback" not in err
+
+        assert tracked.run(*command, "juice_crema_5_1.tm") == 2
+        err = capsys.readouterr().err
+        assert "v470" in err and "v471" in err and "Traceback" not in err
+
+    # C5
+    @pytest.mark.parametrize("command", [("list",), ("check",), ("verify",), ("rewrite",)],
+                             ids=" ".join)
+    def test_missing_argument_without_tty_exits_2(self, tracked, capsys, command):
+        assert tracked.run(*command) == 2
+        captured = capsys.readouterr()
+        assert "juice_crema_5_2" in captured.err and "needs a terminal" in captured.err
+        assert "juice_crema_5_2" not in captured.out
+
+    # C6
+    def test_missing_argument_at_tty_shows_picker(self, tracked, capsys, tty, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "1")
+        assert tracked.run("list") == 0
+        out = capsys.readouterr().out
+        assert "Local metakernels" in out and "pck00011.tpc" in out

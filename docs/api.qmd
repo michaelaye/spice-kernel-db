@@ -110,6 +110,25 @@ If the file's content already exists in the database under a different filename,
 
 ### Lookup
 
+#### `resolve_metakernel`
+
+```python
+db.resolve_metakernel(ref: str | Path, mission: str | None = None) -> Path
+```
+
+The on-disk path of the metakernel *ref* names. *ref* may be a path that exists, a registry filename, a registry `mk_path`, the `source_url` it was fetched from, or a version-stripped base name (`juice_crema_5_2.tm` for `juice_crema_5_2_v473_20260819_001.tm`), case-insensitive, with or without `.tm`; *mission* narrows the registry to one mission (prefix match). Every CLI command resolves its metakernel argument through this method, so a name works the same everywhere.
+
+Raises `MetakernelNotTracked` when nothing matches or the matched file is gone, and `AmbiguousMetakernel` when several registry rows match; it never picks the first of several.
+
+#### `registry_rows`
+
+```python
+db.registry_rows(mission: str | None = None) -> list[RegistryRow]
+```
+
+Every tracked metakernel as a `RegistryRow` (`mk_path`, `source_url`, `filename`, `mission`, `acquired_at`), ordered by mission and filename; *mission* is a case-insensitive prefix filter. The one registry query behind the resolver and the CLI pickers.
+
+
 #### `find_by_filename`
 
 ```python
@@ -652,8 +671,21 @@ Return registry-defined candidate metakernel URLs for *mission* with placeholder
 ## Exceptions
 
 ```python
-from spice_kernel_db import ConcurrentModificationError, MetakernelUnreachableError
+from spice_kernel_db import (
+    AmbiguousMetakernel,
+    ConcurrentModificationError,
+    MetakernelNotTracked,
+    MetakernelUnreachableError,
+)
 ```
+
+### `AmbiguousMetakernel`
+
+Raised by `KernelDB.resolve_metakernel()` (and so by every method that takes a metakernel reference) when the reference matches several registry rows, for example a base name while two versioned snapshots are tracked. Subclass of `LookupError`. Attributes: `name`, `candidates` (the matching registry filenames). The CLI lists the candidates and exits 2.
+
+### `MetakernelNotTracked`
+
+Raised when a metakernel reference matches nothing in the registry and is not a path on disk, or when the matched registry row points at a file that is gone. Subclass of `LookupError`. Attribute: `name`. The message carries the `spice-kernel-db get <name>` hint; the CLI prints it and exits 1.
 
 ### `ConcurrentModificationError`
 

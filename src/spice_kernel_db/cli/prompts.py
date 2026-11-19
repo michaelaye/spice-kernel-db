@@ -4,32 +4,40 @@ from __future__ import annotations
 
 import sys
 import urllib.error
-from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from spice_kernel_db.db import KernelDB, _format_size
+from spice_kernel_db.db import KernelDB, RegistryRow, _format_size
 from spice_kernel_db.remote import list_remote_metakernels
 
 console = Console()
 err_console = Console(stderr=True)
 
 
-def _require_interactive(what: str) -> None:
-    """Exit cleanly when *what* needs a terminal and stdin is not one.
+def _interactive() -> bool:
+    """True when stdin is a terminal, so a menu can be shown (#14, #45)."""
+    return sys.stdin.isatty()
+
+
+def _menu() -> Console:
+    """Where a menu's table goes: stdout at a terminal, stderr otherwise, so
+    a script that gets exit 2 keeps a clean stdout (#45)."""
+    return console if _interactive() else err_console
+
+
+def _require_interactive(what: str, hint: str | None = None) -> None:
+    """Exit 2 when *what* needs a terminal and stdin is not one.
 
     Issue #14: the interactive menus called input() unconditionally, so
     `ssh host skd mission add`, a CI step or any redirected stdin produced a
-    raw EOFError traceback instead of an explanation.
+    raw EOFError traceback instead of an explanation. *hint* says what to
+    pass instead; the default is the mission-add form.
     """
-    if not sys.stdin.isatty():
-        print(
-            f"{what} needs a terminal for its menu.\n"
-            f"  Pass the values instead, e.g. "
-            f"spice-kernel-db mission add <NAME> --server-url <URL>",
-            file=sys.stderr,
-        )
+    if not _interactive():
+        hint = hint or ("Pass the values instead, e.g. "
+                        "spice-kernel-db mission add <NAME> --server-url <URL>")
+        print(f"{what} needs a terminal for its menu.\n  {hint}", file=sys.stderr)
         sys.exit(2)
 
 
@@ -66,7 +74,15 @@ def _pick_index(
     Returns None when the user cancels (Ctrl-C, or EOF when *quiet_eof*;
     otherwise ``_ask`` exits 2 on EOF) and on a bad entry, printing
     *invalid* to stderr in that case when one is given.
+
+    Every picker in the CLI comes through here, so this is where a script
+    or notebook (stdin not a terminal) gets its answer: the candidates were
+    just listed, and the command exits 2 instead of waiting for input (#45).
     """
+    _require_interactive(
+        f"Picking one of the {n} candidates listed above",
+        hint="Pass it as the argument instead.",
+    )
     try:
         raw = (input(prompt) if quiet_eof else _ask(prompt)).strip()
     except (EOFError, KeyboardInterrupt):
@@ -83,30 +99,16 @@ def _pick_index(
     return None
 
 
-def _registry_rows(db: KernelDB, mission: str | None = None) -> list[tuple]:
-    """``(mk_path, filename, mission, acquired_at)`` for every tracked
-    metakernel, optionally limited to a case-insensitive mission prefix."""
-    where, params = "", []
-    if mission:
-        where, params = "WHERE LOWER(r.mission) LIKE LOWER(?) || '%'", [mission]
-    return db.con.execute(f"""
-        SELECT r.mk_path, r.filename, r.mission, r.acquired_at
-        FROM metakernel_registry r
-        {where}
-        ORDER BY r.mission, r.filename
-    """, params).fetchall()
-
-
-def _metakernel_table(rows: list[tuple], *, index_style: str = "bold") -> Table:
-    """The numbered "Local metakernels" table over ``_registry_rows`` output."""
+def _metakernel_table(rows: list[RegistryRow], *, index_style: str = "bold") -> Table:
+    """The numbered "Local metakernels" table over ``KernelDB.registry_rows``."""
     table = Table(title="Local metakernels")
     table.add_column("#", justify="right", style=index_style)
     table.add_column("Filename")
     table.add_column("Mission")
     table.add_column("Acquired")
-    for i, (_, filename, mission, acquired) in enumerate(rows, 1):
-        acq_str = str(acquired)[:16] if acquired else ""
-        table.add_row(str(i), filename, mission, acq_str)
+    for i, row in enumerate(rows, 1):
+        acq_str = str(row.acquired_at)[:16] if row.acquired_at else ""
+        table.add_row(str(i), row.filename, row.mission, acq_str)
     return table
 
 
@@ -124,7 +126,12 @@ def _mission_table(missions: list[dict], title: str) -> Table:
 def _require_metakernel(
     metakernel: str | None, db: KernelDB, mission: str | None,
 ) -> str | None:
-    """Return *metakernel* if given, otherwise prompt the user to pick one."""
+    """*metakernel* as given, or the user's pick when it was omitted.
+
+    Resolution happens once, in the ``KernelDB`` method that reads the
+    file; ``main()`` turns its two errors into exit codes (#45). Returns
+    None when the user cancelled the picker.
+    """
     if metakernel is not None:
         return metakernel
     return _select_local_metakernel(db, mission)
@@ -149,10 +156,10 @@ def _resolve_body_interactive(name_or_id: str) -> int | None:
     if len(candidates) == 1:
         return candidates[0][0]
 
-    console.print(f"\n'{name_or_id}' matches multiple NAIF bodies:\n")
+    _menu().print(f"\n'{name_or_id}' matches multiple NAIF bodies:\n")
     for i, (bid, desc) in enumerate(candidates, 1):
-        console.print(f"  [{i}] {desc}  (NAIF ID {bid})")
-    console.print()
+        _menu().print(f"  [{i}] {desc}  (NAIF ID {bid})")
+    _menu().print()
     idx = _pick_index(f"Select [1-{len(candidates)}]: ", len(candidates),
                       invalid="Invalid selection.")
     if idx is None:
@@ -167,9 +174,10 @@ def _select_local_metakernel(
 
     Returns the mk_path of the selected metakernel, or None on failure.
     Prints a hint about ``browse`` and ``get`` when no metakernels are found
-    or when the user wants to fetch more.
+    or when the user wants to fetch more. Without a terminal the table goes
+    to stderr and ``_pick_index`` exits 2, so a script's stdout stays clean.
     """
-    rows = _registry_rows(db, mission)
+    rows = db.registry_rows(mission)
 
     if not rows:
         mission_hint = f" for mission '{mission}'" if mission else ""
@@ -181,9 +189,8 @@ def _select_local_metakernel(
         )
         return None
 
-    console.print(_metakernel_table(rows))
-
-    console.print(
+    _menu().print(_metakernel_table(rows))
+    _menu().print(
         "\n[dim]To fetch more metakernels: "
         "spice-kernel-db browse [MISSION][/dim]\n"
     )
@@ -191,7 +198,7 @@ def _select_local_metakernel(
     idx = _pick_index(f"Select metakernel [1-{len(rows)}]: ", len(rows), invalid=INVALID)
     if idx is None:
         return None
-    return rows[idx][0]  # mk_path
+    return rows[idx].mk_path
 
 
 def _resolve_mission_mk_dir(
@@ -221,7 +228,7 @@ def _resolve_mission_mk_dir(
         return None, None
 
     # Multiple missions — let user pick interactively
-    console.print(_mission_table(missions, "Select a mission"))
+    _menu().print(_mission_table(missions, "Select a mission"))
 
     idx = _pick_index(f"\nSelect mission [1-{len(missions)}]: ", len(missions),
                       invalid=INVALID)
@@ -272,50 +279,12 @@ def _interactive_pick_deduplicated_kernel(db: KernelDB) -> str | None:
     for i, (fn, kt, sz, n) in enumerate(rows, 1):
         size_str = _format_size(sz) if sz else ""
         table.add_row(str(i), fn, f"+{n - 1}", kt or "", size_str)
-    console.print(table)
+    _menu().print(table)
 
     idx = _pick_index(f"\nSelect kernel [1-{len(rows)}]: ", len(rows))
     if idx is None:
         return None
     return rows[idx][0]
-
-
-def _interactive_pick_local_metakernel(
-    db: KernelDB, mission_filter: str | None,
-) -> str | None:
-    """Show a picker over locally tracked metakernels and return the chosen path.
-
-    Reads ``metakernel_registry`` (optionally filtered by mission with
-    case-insensitive prefix matching) and prompts the user to pick one.
-    Returns the ``mk_path`` of the selection, or ``None`` if there are
-    no entries, the file no longer exists on disk, or the user cancels.
-    """
-    rows = _registry_rows(db, mission_filter)
-
-    if not rows:
-        msg = "No tracked metakernels"
-        if mission_filter:
-            msg += f" for mission matching '{mission_filter}'"
-        msg += ". Use 'spice-kernel-db get' to acquire one."
-        err_console.print(f"[yellow]{msg}[/yellow]")
-        return None
-
-    table = Table(title="Tracked metakernels")
-    table.add_column("#", justify="right", style="bold")
-    table.add_column("Mission")
-    table.add_column("Metakernel")
-    for i, (_, filename, mis, _acquired) in enumerate(rows, 1):
-        table.add_row(str(i), mis, filename)
-    console.print(table)
-
-    idx = _pick_index(f"\nSelect metakernel [1-{len(rows)}]: ", len(rows), invalid=INVALID)
-    if idx is None:
-        return None
-    mk_path = rows[idx][0]
-    if not Path(mk_path).is_file():
-        err_console.print(f"[red]File missing on disk: {mk_path}[/red]")
-        return None
-    return mk_path
 
 
 def _interactive_select_metakernel(
@@ -332,7 +301,7 @@ def _interactive_select_metakernel(
     if not mk_dir_url:
         return None
 
-    console.print(f"Fetching metakernels from [bold]{mk_dir_url}[/bold] ...")
+    _menu().print(f"Fetching metakernels from [bold]{mk_dir_url}[/bold] ...")
     try:
         entries = list_remote_metakernels(mk_dir_url)
     except urllib.error.HTTPError as e:
@@ -377,7 +346,7 @@ def _interactive_select_metakernel(
         table.add_row(str(i), base_name, n_ver, latest.date, local_col)
         alias = base_name if base_name != latest.filename else None
         choices.append((latest.url, alias))
-    console.print(table)
+    _menu().print(table)
 
     idx = _pick_index(f"\nSelect metakernel [1-{len(choices)}]: ", len(choices),
                       invalid=INVALID)
