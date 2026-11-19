@@ -5,6 +5,7 @@ Split out of the former tests/test_kernel_db.py.
 
 from __future__ import annotations
 import hashlib
+import json
 import logging
 import shutil
 import textwrap
@@ -1130,7 +1131,7 @@ class TestOneResolver:
             # check consults the remote mk/ listing when a source URL is
             # known; this test is about resolution, not staleness.
             with patch("spice_kernel_db.cli.ensure_config", return_value=Config()), \
-                 patch.object(KernelDB, "_check_remote_staleness", lambda *a, **k: None):
+                 patch.object(KernelDB, "newer_remote_version", lambda *a, **k: None):
                 try:
                     main(["--db", str(db_path), *argv])
                 except SystemExit as exc:
@@ -1223,3 +1224,138 @@ class TestOneResolver:
         assert tracked.run("list") == 0
         out = capsys.readouterr().out
         assert "Local metakernels" in out and "pck00011.tpc" in out
+
+
+class TestCheckVerdicts:
+    """#46: check reports three verdicts with their own exit bits, verify is
+    a hidden alias, doctor carries the database-wide report."""
+
+    MK_URL = "https://example.com/JUICE/kernels/mk/juice.tm"
+
+    @pytest.fixture
+    def tree(self, tmp_path, remote_sizes):
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+
+        from spice_kernel_db.cli import main
+
+        kdir = tmp_path / "kernels" / "lsk"
+        kdir.mkdir(parents=True)
+        sizes = {"a.tls": 10, "b.tls": 20}
+        for name, size in sizes.items():
+            (kdir / name).write_bytes(b"x" * size)
+        mk = tmp_path / "juice.tm"
+        mk.write_text(
+            "\\begindata\n"
+            f"PATH_VALUES = ( '{tmp_path / 'kernels'}' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/lsk/a.tls' '$K/lsk/b.tls' )\n"
+            "\\begintext\n"
+        )
+        db_path = tmp_path / "t.duckdb"
+        db = KernelDB(db_path)
+        db.add_mission("JUICE", "https://example.com/", "https://example.com/mk/", True)
+        db.scan_directory(str(tmp_path / "kernels"), mission="JUICE")
+        db.con.execute(
+            "INSERT INTO metakernel_registry "
+            "(mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, 'JUICE', ?, 'juice.tm', now())",
+            [str(mk), self.MK_URL],
+        )
+        db.close()
+
+        remote_mk = (
+            "\\begindata\nPATH_VALUES = ( '..' )\nPATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/lsk/a.tls' '$K/lsk/b.tls' )\n\\begintext\n"
+        )
+
+        def url(name: str) -> str:
+            return f"https://example.com/JUICE/kernels/lsk/{name}"
+
+        def run(*argv: str, server_sizes: dict | None = None) -> int:
+            """Exit code of ``skd --db ... argv``; the server answers only
+            when *server_sizes* is given, otherwise any contact is an error."""
+            with ExitStack() as stack:
+                stack.enter_context(patch("spice_kernel_db.cli.ensure_config", return_value=Config()))
+                stack.enter_context(patch("spice_kernel_db.remote.fetch_metakernel", return_value=remote_mk))
+                if server_sizes is not None:
+                    stack.enter_context(remote_sizes({url(n): s for n, s in server_sizes.items()}))
+                    stack.enter_context(patch("spice_kernel_db.db.list_remote_metakernels", return_value=[]))
+                else:
+                    # any contact is a failure: the offline guard in conftest raises,
+                    # and so do these in case a name is bound at import
+                    for target in ("spice_kernel_db.remote.query_remote_sizes",
+                                   "spice_kernel_db.db.query_remote_sizes",
+                                   "spice_kernel_db.db.list_remote_metakernels"):
+                        stack.enter_context(patch(
+                            target, side_effect=AssertionError("check touched the server without --remote")))
+                try:
+                    main(["--db", str(db_path), *argv])
+                except SystemExit as exc:
+                    return exc.code or 0
+            return 0
+
+        return SimpleNamespace(mk=str(mk), kdir=kdir, sizes=sizes, run=run)
+
+    # C9
+    def test_exit_bits(self, tree, capsys):
+        assert tree.run("check", tree.mk) == 0
+        assert tree.run("check", tree.mk, "--remote", server_sizes=tree.sizes) == 0
+
+        # a size that disagrees with the database: present, does not resolve
+        (tree.kdir / "a.tls").write_bytes(b"x" * 11)
+        assert tree.run("check", tree.mk) == 2
+        assert "SIZE_MISMATCH" in capsys.readouterr().out
+        (tree.kdir / "a.tls").write_bytes(b"x" * 10)
+
+        # the server disagrees: bit 4 alone
+        assert tree.run("check", tree.mk, "--remote",
+                        server_sizes={"a.tls": 99, "b.tls": 20}) == 4
+
+        # b gone from disk: missing (1), and with the server disagreeing on a: 5
+        (tree.kdir / "b.tls").unlink()
+        assert tree.run("check", tree.mk) == 1
+        assert tree.run("check", tree.mk, "--remote",
+                        server_sizes={"a.tls": 99, "b.tls": 20}) == 5
+
+    # C10
+    def test_three_lines_always(self, tree, capsys):
+        (tree.kdir / "b.tls").unlink()
+        tree.run("check", tree.mk)
+        out = capsys.readouterr().out
+        assert "✗ present" in out and "1 missing" in out
+        assert "✓ resolves" in out
+        assert "– matches remote  not checked" in out
+
+    # C11
+    def test_remote_is_opt_in(self, tree, capsys):
+        assert tree.run("check", tree.mk, "--hash") == 0      # no server contact
+        assert tree.run("check", tree.mk, "--spice") == 2
+        assert "needs --remote" in capsys.readouterr().err
+        assert tree.run("check", tree.mk, "--full") == 2       # the old flag is gone
+
+    # C12
+    def test_verify_alias(self, tree, capsys):
+        assert tree.run("verify", tree.mk, "--deep") == 0
+        captured = capsys.readouterr()
+        assert "'verify' is now 'check'" in captured.err
+        assert "✓ present" in captured.out
+        tree.run("--help")
+        assert "verify" not in capsys.readouterr().out
+
+    # C13
+    def test_doctor(self, tree, capsys):
+        assert tree.run("doctor") == 0
+        out = capsys.readouterr().out
+        assert "Poisoned supersession rows: 0" in out and "Kernels: 2" in out
+        (tree.kdir / "b.tls").unlink()
+        assert tree.run("doctor") == 0                          # a missing file is not corruption
+        out = capsys.readouterr().out
+        assert "whose file is gone: 1" in out and "b.tls" in out
+
+    def test_json(self, tree, capsys):
+        (tree.kdir / "b.tls").unlink()
+        assert tree.run("check", tree.mk, "--json") == 1
+        doc = json.loads(capsys.readouterr().out)
+        assert doc["exit_code"] == 1 and doc["present"]["missing"] == ["$K/lsk/b.tls"]
+        assert [v["ok"] for v in doc["verdicts"]] == [False, True, None]

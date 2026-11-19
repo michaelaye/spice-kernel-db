@@ -1,7 +1,8 @@
-"""Read-only commands: list, check, verify, coverage, metakernels, resolve, aliases, stats, duplicates."""
+"""Read-only commands: list, check (verify is its hidden alias), doctor, coverage, metakernels, resolve, aliases, stats, duplicates."""
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Annotated, NoReturn, Optional
@@ -47,73 +48,153 @@ def list_(
                       kernel_type=kernel_type)
 
 
-@app.command(rich_help_panel=INSPECT, epilog="See also: list, mk, resolve",
-             help="Check which kernels in a metakernel are available locally")
-def check(
-    ctx: typer.Context,
-    metakernel: MetakernelArg = None,
-    full: Annotated[bool, typer.Option(
-        "--full",
-        help="Also compare each local kernel against the server (size). "
-             "Without this, check only asks whether a file of each name exists")] = False,
-    hash_: Annotated[bool, typer.Option(
-        "--hash",
-        help="With --full, also compare sha256 for kernels whose size matched. "
-             "Downloads each one, so it is slow")] = False,
-    spice: Annotated[bool, typer.Option(
-        "--spice",
-        help="With --full, furnsh each local kernel and report what SPICE "
-             "cannot read (requires spiceypy)")] = False,
-    mission: Annotated[Optional[str], typer.Option(
-        "--mission", help="Filter by mission name")] = None,
-) -> None:
+def _print_present(present: dict, *, verbose: bool) -> None:
+    """Render ``check_metakernel``'s result: counts, missing names, warnings."""
+    found, missing, warnings = present["found"], present["missing"], present["warnings"]
+    print(f"\nMetakernel: {present['mk_path']}")
+    print(f"  Mission:        {present['mission']}")
+    print(f"  Found locally:  {len(found)}/{len(found) + len(missing)}")
+    print(f"  Missing:        {len(missing)}")
+    if missing:
+        print("  Missing files:")
+        for m in missing:
+            print(f"    {m}")
+    if not warnings:
+        return
+    if verbose:
+        print("  Warnings:")
+        for w in warnings:
+            print(f"    ⚠ {w}")
+        return
+    n_hash = sum(1 for w in warnings if "matched by content hash" in w or "matched by hash" in w)
+    n_cross = sum(1 for w in warnings if "using copy from" in w)
+    n_other = len(warnings) - n_hash - n_cross
+    parts = []
+    if n_hash:
+        parts.append(f"    Resolved via dedup:     {n_hash} kernels (same content, different filename)")
+    if n_cross:
+        parts.append(f"    Cross-mission:          {n_cross} kernels")
+    if n_other:
+        parts.append(f"    Other warnings:         {n_other}")
+    if parts:
+        print("  Warnings:")
+        for p in parts:
+            print(p)
+        print("    (use -v for full details)")
+
+
+def _run_check(ctx: typer.Context, metakernel: str | None, *, remote: bool,
+               hash_: bool, spice: bool, json_: bool, mission: str | None) -> None:
+    """The one implementation behind ``check`` and its ``verify`` alias (#46)."""
     verbose = state(ctx).verbose
+    if spice and not remote:
+        print("check: --spice needs --remote", file=sys.stderr)
+        sys.exit(2)
     with open_db(ctx, read_only=True) as db:
         mk = _require_metakernel(metakernel, db, mission)
         if mk is None:
             return
-        result = db.check_metakernel(mk, mission=mission, verbose=verbose)
-        if full:
-            report = db.verify_against_server(
-                mk, mission=mission, check_hash=hash_, check_spice=spice,
-            )
-            _print_server_check(report, verbose=verbose)
-            if report["bad"]:
-                sys.exit(1)
-        elif hash_ or spice:
-            print("check: --hash and --spice require --full", file=sys.stderr)
-            sys.exit(2)
-        if result["poisoned"]:
-            sys.exit(1)
+        report = db.check_report(mk, mission=mission, hash_=hash_, remote=remote, spice=spice)
+    if json_:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        _print_present(report["present"], verbose=verbose)
+        if report["resolves"]["fail"]:
+            _render_verify_table(report["resolves"])
+        if report["remote"] is not None:
+            _print_server_check(report["remote"], verbose=verbose)
+        if report["newer"]:
+            print(f"\n  {report['newer']}")
+        print()
+        for v in report["verdicts"]:
+            mark = "✓" if v["ok"] else ("✗" if v["ok"] is False else "–")
+            print(f"  {mark} {v['line']}")
+    if report["exit_code"]:
+        sys.exit(report["exit_code"])
 
 
-@app.command(rich_help_panel=INSPECT, epilog="See also: check",
-             help="Deep cross-check a metakernel against the database")
+@app.command(rich_help_panel=INSPECT,
+             help="Check a metakernel: kernels present, entries resolve, "
+                  "and with --remote, matches the server",
+             epilog="Exit code: 1 a kernel is missing, 2 the metakernel does not resolve, "
+                    "4 differs from the server (--remote); summed, so 5 is missing plus "
+                    "differs. See also: doctor, list, rewrite")
+def check(
+    ctx: typer.Context,
+    metakernel: MetakernelArg = None,
+    remote: Annotated[bool, typer.Option(
+        "--remote",
+        help="Also compare each kernel's size with the server (one HEAD per kernel). "
+             "The only network check; exit bit 4")] = False,
+    hash_: Annotated[bool, typer.Option(
+        "--hash",
+        help="Compare sha256 against the database, and with --remote against the "
+             "server (downloads each kernel, so slow)")] = False,
+    spice: Annotated[bool, typer.Option(
+        "--spice",
+        help="With --remote, furnsh each local kernel and report what SPICE "
+             "cannot read (requires spiceypy)")] = False,
+    json_: Annotated[bool, typer.Option(
+        "--json", help="Emit the three verdicts and their evidence as JSON")] = False,
+    mission: Annotated[Optional[str], typer.Option(
+        "--mission", help="Preferred mission for kernel resolution")] = None,
+) -> None:
+    _run_check(ctx, metakernel, remote=remote, hash_=hash_, spice=spice,
+               json_=json_, mission=mission)
+
+
+@app.command(hidden=True, help="Renamed: use check (--deep is --hash)")
 def verify(
     ctx: typer.Context,
     metakernel: MetakernelArg = None,
-    deep: Annotated[bool, typer.Option(
-        "--deep", help="Recompute sha256 of every kernel (slow; default: size-only)")] = False,
-    strict: Annotated[bool, typer.Option(
-        "--strict", help="Non-zero exit on any non-OK finding (default: only on FATAL)")] = False,
-    json_: Annotated[bool, typer.Option(
-        "--json", help="Emit machine-readable JSON instead of a table")] = False,
-    mission: Annotated[Optional[str], typer.Option(
-        "--mission", help="Filter by mission (for registry lookup)")] = None,
+    deep: Annotated[bool, typer.Option("--deep")] = False,
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+    json_: Annotated[bool, typer.Option("--json")] = False,
+    mission: Annotated[Optional[str], typer.Option("--mission")] = None,
 ) -> None:
-    with open_db(ctx) as db:
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
-        result = db.verify_metakernel(mk, deep=deep)
-        if json_:
-            import json
-            print(json.dumps(result, indent=2, default=str))
-        else:
-            _render_verify_table(result)
-        # Non-zero on fatal (P0) issues by default; on any finding with --strict.
-        if result["fatal"] or (strict and result["fail"] > 0):
-            sys.exit(1)
+    print("note: 'verify' is now 'check' (--deep is --hash); exit 2 means the "
+          "metakernel does not resolve", file=sys.stderr)
+    if strict:
+        print("note: --strict has no equivalent and is ignored", file=sys.stderr)
+    _run_check(ctx, metakernel, remote=False, hash_=deep, spice=False,
+               json_=json_, mission=mission)
+
+
+@app.command(rich_help_panel=INSPECT,
+             help="Database health: poisoned rows, files gone from disk",
+             epilog="Exits 1 only on poisoned supersession rows; a file gone from disk is "
+                    "listed with the command that cleans it up. See also: check, prune, stats")
+def doctor(
+    ctx: typer.Context,
+    json_: Annotated[bool, typer.Option("--json", help="Emit the report as JSON")] = False,
+) -> None:
+    with open_db(ctx, read_only=True) as db:
+        report = db.doctor()
+    if json_:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(f"  Kernels: {report['n_kernels']}   Locations: {report['n_locations']}   "
+              f"Tracked metakernels: {report['n_metakernels']}")
+        poisoned = report["poisoned"]
+        print(f"  Poisoned supersession rows: {len(poisoned)}")
+        for row in poisoned:
+            print(f"    {row['filename']}  ({row['abs_path']})")
+        if poisoned:
+            print("    Present on disk, yet flagged as superseded by content that\n"
+                  "    exists nowhere: every `update` re-downloads them.\n"
+                  "    Repair: spice-kernel-db scan <kernel_dir>")
+        gone = report["missing_locations"]
+        print(f"  Kernel locations whose file is gone: {len(gone)}"
+              + ("  (spice-kernel-db prune --execute)" if gone else ""))
+        for path in gone:
+            print(f"    {path}")
+        gone_mk = report["missing_metakernels"]
+        print(f"  Tracked metakernels whose file is gone: {len(gone_mk)}"
+              + ("  (spice-kernel-db mk --remove <name>)" if gone_mk else ""))
+        for name in gone_mk:
+            print(f"    {name}")
+    if report["poisoned"]:
+        sys.exit(1)
 
 
 @app.command(rich_help_panel=INSPECT, help="Check SPK body coverage in a metakernel")
@@ -324,10 +405,10 @@ def _location_kind(path: str) -> str:
 
 
 def _render_verify_table(result: dict) -> None:
-    """Render a verify_metakernel result as a rich table + summary panel."""
+    """Render a verify_metakernel result as a rich table; the verdict line
+    that follows carries the summary (#46)."""
     mk = result["mk_path"]
     deep = result["deep"]
-    total = result["ok"] + result["fail"]
 
     style_for = {
         "OK":              "green",
@@ -342,7 +423,7 @@ def _render_verify_table(result: dict) -> None:
         "UNREGISTERED":    "yellow",
     }
 
-    table = Table(title=f"verify {mk} ({'deep' if deep else 'quick'})")
+    table = Table(title=f"check {mk}: entries against the database ({'hash' if deep else 'size'})")
     table.add_column("Entry", overflow="fold")
     table.add_column("Status")
     table.add_column("Detail", overflow="fold")
@@ -352,21 +433,6 @@ def _render_verify_table(result: dict) -> None:
         table.add_row(e["raw"], f"[{color}]{status}[/{color}]", e["detail"])
     console.print(table)
 
-    if result["fatal"]:
-        title_style = "red"
-        verdict = "FAIL (fatal issues)"
-    elif result["fail"]:
-        title_style = "yellow"
-        verdict = "WARN (non-fatal issues)"
-    else:
-        title_style = "green"
-        verdict = "OK"
-    console.print(Panel(
-        f"OK: [green]{result['ok']}[/green] / "
-        f"Issues: [red]{result['fail']}[/red] / "
-        f"Total: [bold]{total}[/bold]",
-        title=f"[{title_style}]{verdict}[/{title_style}]",
-    ))
 
 
 _KERNEL_TYPES = ("ck", "spk", "fk", "ik", "pck", "lsk", "sclk", "dsk")
@@ -486,15 +552,15 @@ def _print_coverage_table(results, body_id: int, metakernel: str) -> None:
 def _print_server_check(report: dict, *, verbose: bool = False) -> None:
     """Render verify_against_server()'s result.
 
-    Problems are always listed: the point of --full is that a silent
-    "Found locally: 102/102" hid ten wrong files (#15).
+    Problems are always listed: the point of --remote is that a silent
+    "Found locally: 102/102" hid ten wrong files (#15). The counts are on
+    the verdict line (#46).
     """
     bad = [e for e in report["entries"] if e["status"] not in ("ok", "NO_REMOTE")]
     unchecked = [e for e in report["entries"] if e["status"] == "NO_REMOTE"]
+    if not bad and not unchecked:
+        return
     print("\n  Against the server:")
-    print(f"    Verified:     {report['ok']}")
-    print(f"    Problems:     {report['bad']}")
-    print(f"    Unchecked:    {report['unchecked']}")
     for e in bad:
         print(f"      {e['status']:<14} {e['filename']}  ({e['detail']})")
     if unchecked and verbose:

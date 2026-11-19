@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`check` answers three questions, each with its own exit bit** (#46).
+  *present* (every listed kernel on disk, bit 1), *resolves* (every entry
+  resolves through `PATH_VALUES` to the file the database knows, bit 2) and
+  *matches remote* (sizes, with `--hash` also SHA-256, against the server,
+  bit 4, only with `--remote`). The exit code is the sum, so a script can
+  tell a missing kernel from a corrupt one, and the output never collapses
+  into one tick. `--json` emits the verdicts and their evidence.
+- **`doctor`** reports database health with no metakernel argument: poisoned
+  supersession rows, kernel locations whose file is gone, tracked metakernels
+  whose file is gone, and the table counts. It exits 1 only on poisoned rows
+  (#46).
 - **One resolver for every metakernel argument** (#45). `KernelDB.resolve_metakernel()`
   turns a path, a registry filename, a versionless base name (with or without
   `.tm`) or the source URL into the tracked file, case-insensitively, and every
@@ -32,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scan <kernel_dir>` as the repair.
 
 ### Changed
+
+- **`verify` folded into `check`** (#46). `verify` stays as a hidden alias
+  (`--deep` is `--hash`, `--strict` is ignored with a note) and its `--json`
+  document now has the three-verdict shape. `check --full` is gone; the
+  server comparison is `check --remote`, and `--hash` no longer needs it. The
+  poisoned-row report moved from `check` to `doctor`, so `check` exits 1 for
+  a missing kernel and nothing else. `KernelDB.check_metakernel()` prints
+  nothing and no longer contacts the server; the newer-version notice is part
+  of `--remote`, and `KernelDB.check_report()` returns the three verdicts as
+  data.
 
 - **`KernelDB.info_metakernel()` and `update_metakernel()` raise `MetakernelNotTracked`**
   for an unknown name instead of printing "not found" or raising a bare

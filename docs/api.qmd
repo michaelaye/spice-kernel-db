@@ -455,6 +455,30 @@ With `dry_run=True` (the default), only prints what would happen.
 
 ### Statistics
 
+#### `check_report`
+
+```python
+db.check_report(mk_path, *, mission=None, hash_=False, remote=False, spice=False) -> dict
+```
+
+Everything the `check` command reports, as data: `mk_path`, the raw results under `present` (`check_metakernel`), `resolves` (`verify_metakernel`, SHA-256 with `hash_`) and `remote` (`verify_against_server`, only with `remote`, the one network path, together with `newer`, the newer-version notice or `None`), the three `verdicts` as `{bit, ok, line}` rows and `exit_code`, the sum of the failed verdicts' bits. `check_metakernel` itself prints nothing and touches no network.
+
+#### `stale_locations`
+
+```python
+db.stale_locations() -> list[tuple[str, str]]
+```
+
+`(sha256, abs_path)` of every location whose file is gone from disk; the one walk behind `prune` and `doctor`.
+
+#### `doctor`
+
+```python
+db.doctor() -> dict
+```
+
+Database health with no metakernel argument: `n_kernels`, `n_locations`, `n_metakernels`, `poisoned` (the `poisoned_superseded()` rows), `missing_locations` (location paths whose file is gone) and `missing_metakernels` (registry filenames whose file is gone). The CLI's `doctor` prints it and exits 1 only when `poisoned` is non-empty.
+
 #### `poisoned_superseded`
 
 ```python

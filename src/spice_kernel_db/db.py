@@ -222,6 +222,55 @@ class RegistryRow(NamedTuple):
     acquired_at: object
 
 
+def _check_verdicts(present: dict, resolves: dict, server: dict | None) -> list[dict]:
+    """The three verdicts of ``check`` as ``{bit, ok, line}`` rows (#46).
+
+    ``ok`` is True, False or None (not checked). A kernel missing from disk
+    is verdict 1. Verdict 2 covers what the PATH_VALUES walk finds beyond
+    that: traversal, size or hash against the database, an ambiguous name,
+    and entries pointing at paths that do not exist when every kernel is
+    present somewhere else, which is the case ``rewrite`` fixes.
+    """
+    n_missing = len(present["missing"])
+    n_total = len(present["found"]) + n_missing
+    line = f"present         {n_total - n_missing}/{n_total} kernels on disk"
+    if n_missing:
+        line += f", {n_missing} missing (spice-kernel-db get)"
+    rows = [{"bit": 1, "ok": n_missing == 0, "line": line}]
+
+    absent = {"NOT_FOUND", "DANGLING"}
+    entries = resolves["entries"]
+    hard = [e for e in entries if e["status"] not in {"OK", "UNREGISTERED"} | absent]
+    misplaced = [e for e in entries if e["status"] in absent]
+    unregistered = sum(1 for e in entries if e["status"] == "UNREGISTERED")
+    if hard:
+        ok, line = False, f"resolves        {len(hard)} entries do not resolve soundly (see table)"
+    elif misplaced and not n_missing:
+        ok, line = False, (f"resolves        {len(misplaced)} entries point at paths that do "
+                           f"not exist (spice-kernel-db rewrite)")
+    elif unregistered:
+        ok, line = True, (f"resolves        every entry resolves; {unregistered} not in the "
+                          f"database (spice-kernel-db scan)")
+    else:
+        ok, line = True, "resolves        every entry resolves and matches the database"
+    rows.append({"bit": 2, "ok": ok, "line": line})
+
+    if server is None:
+        rows.append({"bit": 4, "ok": None, "line": "matches remote  not checked (pass --remote)"})
+    elif server["bad"]:
+        rows.append({"bit": 4, "ok": False,
+                     "line": f"matches remote  {server['bad']} differ from the server"})
+    elif not server["ok"]:
+        detail = server["entries"][0]["detail"] if server["entries"] else "nothing to compare"
+        rows.append({"bit": 4, "ok": None, "line": f"matches remote  could not compare: {detail}"})
+    else:
+        line = f"matches remote  {server['ok']} match the server"
+        if server["unchecked"]:
+            line += f", {server['unchecked']} unchecked"
+        rows.append({"bit": 4, "ok": True, "line": line})
+    return rows
+
+
 class MetakernelUnreachableError(LookupError):
     """Raised when the remote metakernel returns a permanent HTTP error
     (403/404/410), typically because NAIF rotated the file into
@@ -1469,20 +1518,22 @@ class KernelDB:
         self,
         mk_path: str | Path,
         mission: str | None = None,
-        verbose: bool = False,
     ) -> dict:
         """Check which kernels from a metakernel are already available.
 
         Args:
             mk_path: Path to the .tm file.
             mission: Mission name for preferred-mission resolution.
-            verbose: If True, print full per-file warnings instead of summary.
 
         Returns:
             dict with keys:
+                mk_path:  the resolved path, as str
+                mission:  the mission used for resolution
                 found:    list of (raw_entry, local_path)
                 missing:  list of raw_entry
                 warnings: list of str
+        Prints nothing and touches no network; the CLI renders it and
+        ``check_report`` adds the other verdicts (#46).
         """
         mk_path = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(mk_path)
@@ -1502,61 +1553,57 @@ class KernelDB:
             else:
                 missing.append(raw)
 
-        print(f"\nMetakernel: {mk_path}")
-        print(f"  Mission:        {mission}")
-        print(f"  Found locally:  {len(found)}/{len(parsed.kernels)}")
-        print(f"  Missing:        {len(missing)}")
-        if missing:
-            print("  Missing files:")
-            for m in missing:
-                print(f"    {m}")
-        if all_warnings:
-            if verbose:
-                print("  Warnings:")
-                for w in all_warnings:
-                    print(f"    ⚠ {w}")
-            else:
-                # Categorise and summarise
-                n_hash = sum(1 for w in all_warnings if "matched by content hash" in w or "matched by hash" in w)
-                n_cross = sum(1 for w in all_warnings if "using copy from" in w)
-                n_other = len(all_warnings) - n_hash - n_cross
-                parts = []
-                if n_hash:
-                    parts.append(f"    Resolved via dedup:     {n_hash} kernels (same content, different filename)")
-                if n_cross:
-                    parts.append(f"    Cross-mission:          {n_cross} kernels")
-                if n_other:
-                    parts.append(f"    Other warnings:         {n_other}")
-                if parts:
-                    print("  Warnings:")
-                    for p in parts:
-                        print(p)
-                    print("    (use -v for full details)")
+        return {"mk_path": str(mk_path), "mission": mission, "found": found,
+                "missing": missing, "warnings": all_warnings}
 
-        # Check for remote updates
-        self._check_remote_staleness(mk_path, mission)
+    def check_report(
+        self,
+        mk_path: str | Path,
+        *,
+        mission: str | None = None,
+        hash_: bool = False,
+        remote: bool = False,
+        spice: bool = False,
+    ) -> dict:
+        """Everything ``check`` reports, as data (#46).
 
-        poisoned = self.poisoned_superseded()
-        if poisoned:
-            print(f"  Poisoned supersession rows: {len(poisoned)}")
-            for row in poisoned:
-                print(f"    {row['filename']}  ({row['abs_path']})")
-            print("    Present on disk, yet flagged as superseded by content that\n"
-                  "    exists nowhere: every `update` re-downloads them.\n"
-                  "    Repair: spice-kernel-db scan <kernel_dir>")
+        Runs ``check_metakernel`` (present), ``verify_metakernel``
+        (resolves; sha256 with *hash_*) and, only with *remote*,
+        ``verify_against_server`` and ``newer_remote_version``, the two
+        network calls. Returns ``mk_path``, the three raw results under
+        ``present``, ``resolves`` and ``remote``, the ``newer`` notice,
+        ``verdicts`` (``_check_verdicts`` rows) and ``exit_code``, the sum
+        of the failed verdicts' bits.
+        """
+        present = self.check_metakernel(mk_path, mission=mission)
+        resolves = self.verify_metakernel(mk_path, deep=hash_)
+        server = newer = None
+        if remote:
+            server = self.verify_against_server(
+                mk_path, mission=mission, check_hash=hash_, check_spice=spice,
+            )
+            newer = self.newer_remote_version(present["mk_path"], present["mission"])
+        verdicts = _check_verdicts(present, resolves, server)
+        return {
+            "mk_path": present["mk_path"],
+            "present": present,
+            "resolves": resolves,
+            "remote": server,
+            "newer": newer,
+            "verdicts": verdicts,
+            "exit_code": sum(v["bit"] for v in verdicts if v["ok"] is False),
+        }
 
-        return {"found": found, "missing": missing, "warnings": all_warnings,
-                "poisoned": poisoned}
-
-    def _check_remote_staleness(
+    def newer_remote_version(
         self,
         mk_path: str | Path,
         mission: str | None,
-    ) -> None:
-        """Print a notice if the remote metakernel is newer than the local copy.
+    ) -> str | None:
+        """A notice when the server lists a newer copy of the metakernel, else None.
 
-        This is a read-only check — it never downloads. Network errors are
-        silently swallowed so ``check`` keeps working offline.
+        One directory listing, nothing downloaded. Network errors are
+        swallowed, so the caller gets None offline. Only ``check --remote``
+        asks (#46).
         """
         mk_path_str = str(mk_path)
         # Look up source_url and acquired_at from registry
@@ -1611,14 +1658,13 @@ class KernelDB:
                 except ValueError:
                     break
                 if remote_dt > acq_dt:
-                    print(
-                        f"\n  Remote update available: server modified {entry.date}"
-                        f" (acquired {acq_dt:%Y-%m-%d %H:%M})"
-                    )
-                    print(
-                        f"  Run 'spice-kernel-db update {mk_filename}' to fetch the latest version."
+                    return (
+                        f"Remote update available: server modified {entry.date}"
+                        f" (acquired {acq_dt:%Y-%m-%d %H:%M}). "
+                        f"Run 'spice-kernel-db update {mk_filename}' to fetch it."
                     )
                 break
+        return None
 
     def rewrite_metakernel(
         self,
@@ -3136,6 +3182,34 @@ class KernelDB:
                         "superseded_by": newer, "abs_path": abs_path})
         return out
 
+    def stale_locations(self) -> list[tuple[str, str]]:
+        """``(sha256, abs_path)`` of every location whose file is gone from
+        disk. The one walk behind ``prune`` and ``doctor``."""
+        rows = self.con.execute(
+            "SELECT sha256, abs_path FROM locations ORDER BY abs_path"
+        ).fetchall()
+        return [(sha, path) for sha, path in rows if not Path(path).exists()]
+
+    def doctor(self) -> dict:
+        """Database health, nothing per metakernel (#46).
+
+        ``poisoned`` is ``poisoned_superseded()``: the one state that is
+        corruption, since every ``update`` re-downloads those kernels.
+        ``missing_locations`` and ``missing_metakernels`` list rows whose
+        file is gone from disk; ``prune`` and ``mk --remove`` clean them up.
+        """
+        registry = self.registry_rows()
+        return {
+            "n_kernels": self.con.execute("SELECT COUNT(*) FROM kernels").fetchone()[0],
+            "n_locations": self.con.execute("SELECT COUNT(*) FROM locations").fetchone()[0],
+            "n_metakernels": len(registry),
+            "poisoned": self.poisoned_superseded(),
+            "missing_locations": [path for _sha, path in self.stale_locations()],
+            "missing_metakernels": [
+                r.filename for r in registry if not Path(r.mk_path).is_file()
+            ],
+        }
+
     def stats(self) -> dict:
         """Print and return summary statistics."""
         n_kernels = self.con.execute(
@@ -3291,15 +3365,7 @@ class KernelDB:
         Returns:
             List of pruned abs_path strings.
         """
-        rows = self.con.execute(
-            "SELECT sha256, abs_path FROM locations"
-        ).fetchall()
-
-        stale: list[tuple[str, str]] = []
-        for sha256, abs_path in rows:
-            if not Path(abs_path).exists():
-                stale.append((sha256, abs_path))
-
+        stale = self.stale_locations()
         if not stale:
             print("No stale locations found.")
             return []

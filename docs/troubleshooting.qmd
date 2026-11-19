@@ -207,9 +207,9 @@ spice-kernel-db get juice_crema_5_1_…_v462_20260223_001.tm --mission JUICE
 …will transparently download the archived metakernel and its referenced kernels (which ESA keeps live in `kernels/{spk,fk,…}/` even after a `.tm` is rotated out). This is the recommended way to reproduce analyses against a specific older metakernel version.
 
 
-## `verify` reports unexpected statuses
+## `check` says the metakernel does not resolve (exit 2)
 
-After a `get` or `rewrite`, run `spice-kernel-db verify <mk>` to cross-check the rewritten metakernel against the DB. Common findings:
+After a `get` or `rewrite`, `spice-kernel-db check <mk>` walks every entry through `PATH_VALUES` and compares it with the database (the *resolves* verdict; `verify` is its old name). Common findings:
 
 | Status | What it means | What to do |
 |--------|---------------|------------|

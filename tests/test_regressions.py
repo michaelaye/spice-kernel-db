@@ -1584,9 +1584,8 @@ class TestH6StalenessDatetimeComparison:
             "spice_kernel_db.db.list_remote_metakernels",
             return_value=[later],
         ):
-            db._check_remote_staleness(mk_path, "JUICE")
-        captured = capsys.readouterr().out
-        assert "Remote update available" in captured
+            notice = db.newer_remote_version(mk_path, "JUICE")
+        assert notice and "Remote update available" in notice
         db.close()
 
     def test_same_minute_acquire_is_NOT_flagged_stale(
@@ -1617,9 +1616,7 @@ class TestH6StalenessDatetimeComparison:
             "spice_kernel_db.db.list_remote_metakernels",
             return_value=[same_minute],
         ):
-            db._check_remote_staleness(mk_path, "JUICE")
-        captured = capsys.readouterr().out
-        assert "Remote update available" not in captured
+            assert db.newer_remote_version(mk_path, "JUICE") is None
         db.close()
 
 
@@ -1777,7 +1774,7 @@ class TestPoisonedRowsAreReported:
 
         with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
             with pytest.raises(SystemExit) as exc:
-                main(["--db", str(tmp_path / "t.duckdb"), "check", str(mk)])
+                main(["--db", str(tmp_path / "t.duckdb"), "doctor"])
         assert exc.value.code == 1
         out = capsys.readouterr().out
         assert "Poisoned supersession rows: 1" in out
@@ -1811,7 +1808,9 @@ class TestPoisonedRowsAreReported:
 
         with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
             main(["--db", str(tmp_path / "t.duckdb"), "check", str(mk)])
-        assert "Poisoned" not in capsys.readouterr().out
+            assert "Poisoned" not in capsys.readouterr().out
+            main(["--db", str(tmp_path / "t.duckdb"), "doctor"])
+        assert "Poisoned supersession rows: 0" in capsys.readouterr().out
 
 
 class TestStartupImports:

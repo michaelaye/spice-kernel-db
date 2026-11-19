@@ -1719,8 +1719,8 @@ class TestVerifyAgainstServer:
              patch("spice_kernel_db.remote.query_remote_sizes",
                    return_value={self._url("pck00011.tpc"): 131226}):
             with pytest.raises(SystemExit) as exc:
-                main(["check", str(mk), "--full"])
-        assert exc.value.code == 1
+                main(["check", str(mk), "--remote"])
+        assert exc.value.code == 4
         out = capsys.readouterr().out
         assert "SIZE_MISMATCH" in out and "pck00011.tpc" in out
 
@@ -1738,7 +1738,7 @@ class TestVerifyAgainstServer:
         assert "Found locally:  1/1" in out
         assert "SIZE_MISMATCH" not in out
 
-    def test_hash_and_spice_require_full(self, tmp_path, capsys):
+    def test_spice_requires_remote(self, tmp_path, capsys):
         from spice_kernel_db.cli import main
 
         db, mk = self._setup(tmp_path, {"naif0012.tls": 10})
@@ -1747,6 +1747,6 @@ class TestVerifyAgainstServer:
                      kernel_dir=str(tmp_path / "kernels"))
         with patch("spice_kernel_db.config.load_config", return_value=cfg):
             with pytest.raises(SystemExit) as exc:
-                main(["check", str(mk), "--hash"])
+                main(["check", str(mk), "--spice"])
         assert exc.value.code == 2
-        assert "require --full" in capsys.readouterr().err
+        assert "needs --remote" in capsys.readouterr().err
