@@ -1,6 +1,12 @@
 """Content-addressed SPICE kernel database for deduplication and metakernel rewriting."""
 
-from spice_kernel_db.config import Config, ensure_config
+from spice_kernel_db.config import (
+    Config,
+    add_kernel_root,
+    ensure_config,
+    kernel_roots,
+    remove_kernel_root,
+)
 from spice_kernel_db.db import (
     AmbiguousMetakernel,
     ConcurrentModificationError,
@@ -24,11 +30,14 @@ __all__ = [
     "MetakernelNotTracked",
     "MetakernelUnreachableError",
     "RegistryRow",
+    "add_kernel_root",
     "ensure_config",
+    "kernel_roots",
     "fetch_metakernel",
     "list_remote_metakernels",
     "parse_metakernel",
     "parse_metakernel_text",
+    "remove_kernel_root",
     "resolve_kernel_urls",
 ]
 

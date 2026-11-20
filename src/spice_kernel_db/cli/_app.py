@@ -93,7 +93,9 @@ def open_db(ctx: typer.Context, *, read_only: bool = False) -> Iterator[KernelDB
     Read-only commands can share the DB with a running writer, so each
     command says which kind of connection it needs.
     """
-    db = KernelDB(state(ctx).db, read_only=read_only)
+    st = state(ctx)
+    db = KernelDB(st.db, read_only=read_only,
+                  kernel_roots=st.config.kernel_dirs if st.db_override is None else None)
     try:
         yield db
     finally:

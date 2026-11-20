@@ -30,7 +30,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 - **`kernels`** — unique file content: `(sha256 PK, filename, kernel_type, size_bytes)`
 - **`locations`** — where files live on disk: `(sha256 + abs_path PK, mission, source_url, scanned_at)` → references `kernels`
 - **`metakernel_entries`** — kernel entries within a `.tm` file: `(mk_path + entry_index PK, raw_entry, filename)`
-- **`metakernel_registry`** — tracked metakernel files: `(mk_path PK, mission, source_url, filename, acquired_at)`
+- **`metakernel_registry`** — tracked metakernel files: `(mk_path PK, mission, source_url, filename, acquired_at, official)`; `official` is FALSE for a metakernel assembled locally (`import --unofficial`), and a tracked metakernel's mission is read from this row, never guessed from its path
 - **`missions`** — configured missions: `(name PK, server_url, mk_dir_url, dedup, added_at)`
 - **`kernel_coverage`** — cached SPK body coverage intervals: `(sha256 + body_id PK, et_start, et_end, source)`
 
@@ -40,9 +40,9 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 |--------|------|
 | `db.py` | `KernelDB` class — all DB operations, scanning, resolution, metakernel rewriting, get, browse |
 | `parser.py` | `ParsedMetakernel` dataclass; parse/write `.tm` files; symbol resolution |
-| `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission()` (path heuristic) |
+| `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission(filepath, roots=None)` (path heuristic; the first directory below a configured kernel root wins) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
-| `config.py` | `Config` dataclass, TOML persistence at `~/.config/spice-kernel-db/config.toml` |
+| `config.py` | `Config` (`kernel_dirs` list of kernel roots, first is the download target; `kernel_dir` is a property over the first), TOML persistence at `~/.config/spice-kernel-db/config.toml`, `kernel_roots()` / `add_kernel_root()` / `remove_kernel_root()` |
 | `cli/` | Typer CLI, one module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py` (ls, show, which, coverage, stats, check, doctor, plus the hidden aliases list, metakernels/mk, resolve, aliases, duplicates, verify), `transform.py` (scan, import, rewrite, rm, clean, dedup, and the hidden prune), `configure.py` (mission, config, reset); `prompts.py` holds the shared interactive pickers, `_app.py` the `app` object and per-invocation state, `__init__.py` the root options and `main()` |
 
 ### Key Design Decisions

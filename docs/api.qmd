@@ -14,12 +14,18 @@ The main class. Wraps a DuckDB database and provides all scanning, lookup, and r
 ### Constructor
 
 ```python
-KernelDB(db_path: str | Path | None = None, read_only: bool = False)
+KernelDB(
+    db_path: str | Path | None = None,
+    read_only: bool = False,
+    kernel_roots: list[str | Path] | None = None,
+)
 ```
 
 Opens (or creates) the database at the given path. When `db_path` is `None` (the default), the path is loaded from `~/.config/spice-kernel-db/config.toml`; without a config file it is `~/.local/share/spice-kernel-db/kernels.duckdb`. The schema is initialized automatically (unless `read_only=True`).
 
 Before 0.21.0, a database found only at the pre-0.19 default `~/.spice_kernels.duckdb` was opened when no config file existed, with a `FutureWarning`. Since 0.21.0 it is not: if one is there and the new default is not, `spice-kernel-db` raises `LegacyDatabaseFound` naming the move command, rather than quietly starting an empty database beside it.
+
+`kernel_roots` is the list of kernel roots used to guess a mission from a path. When it is `None` (the default) the roots are read from the configuration the first time they are needed. The resolved list is available as the `db.kernel_roots` property. Pass it to keep a script independent of the user's configuration.
 
 Set `read_only=True` for commands that only query the database. Several read-only connections can be open at once, but DuckDB's file lock means none can open while another process has the database open for writing (for example during `get`); that raises `duckdb.IOException`.
 
@@ -84,9 +90,20 @@ Recursively scan a directory tree and register all kernel files. Returns `(count
 
 If `archive_dir` is provided, files are moved into `{archive_dir}/{mission}/{type}/{filename}` and symlinks are left at the original locations.
 
-If `mission` is not provided, it's auto-detected from the path structure (looks for `.../<MISSION>/kernels/...`).
+If `mission` is not provided, it is detected from the path with [`guess_mission`](#guess_mission) and the database's kernel roots: under a root, the first directory below the root; elsewhere, the path structure (`.../<MISSION>/kernels/...`). `register_file` guesses the same way when it is given no mission.
 
 `extensions` defaults to all known SPICE kernel extensions (`.tls`, `.tpc`, `.bsp`, `.bc`, `.tf`, `.ti`, `.tsc`, `.bds`, `.tm`).
+
+#### `scan_roots`
+
+```python
+db.scan_roots(
+    verbose: bool = False,
+    archive_dir: str | Path | None = None,
+) -> tuple[int, set[str]]
+```
+
+Run `scan_directory` over every kernel root in `db.kernel_roots`, in order, as `skd scan` does with no directory. Returns the total count and the union of the missions found. A root that is not an existing directory is skipped with the message `Kernel root <path> does not exist; skipped.`
 
 #### `register_file`
 
@@ -126,7 +143,7 @@ Raises `MetakernelNotTracked` when nothing matches or the matched file is gone, 
 db.registry_rows(mission: str | None = None) -> list[RegistryRow]
 ```
 
-Every tracked metakernel as a `RegistryRow` (`mk_path`, `source_url`, `filename`, `mission`, `acquired_at`), ordered by mission and filename; *mission* is a case-insensitive prefix filter. The one registry query behind the resolver and the CLI pickers.
+Every tracked metakernel as a `RegistryRow` (`mk_path`, `source_url`, `filename`, `mission`, `acquired_at`, `official`), ordered by mission and filename; *mission* is a case-insensitive prefix filter. The one registry query behind the resolver and the CLI pickers. `official` is `False` for a metakernel imported with `official=False` and `True` otherwise. The column is added when a database from before this release is first opened for writing. Opened read-only (`ls`, `show`, `doctor`, `check`) before that, every row reads as official.
 
 
 #### `find_by_filename`
@@ -266,7 +283,7 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 7. Downloads missing kernels, preserving subdirectory structure, and registers them
 8. Creates symlinks for kernels already in the database so the metakernel works immediately
 
-`download_dir` defaults to the configured `kernel_dir` from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
+`download_dir` defaults to the first kernel root (`Config.kernel_dir`) from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
 
 `verbose=True` additionally lists each kernel's resolved URL beneath the status table. The table itself is always shown — it precedes the download prompt, so it is what you decide on.
 
@@ -318,10 +335,12 @@ Returns one dict per metakernel walked, with keys `filename`, `mission`, `count`
 #### `import_metakernel`
 
 ```python
-db.import_metakernel(mk_path: str | Path, mission: str | None = None) -> dict
+db.import_metakernel(mk_path: str | Path, mission: str | None = None, official: bool = True) -> dict
 ```
 
-Track a metakernel that is already on disk, without a download, as `skd import` does. Indexes its entries, registers every kernel it resolves to that exists on disk, and adds the registry row with no source URL. `mission` defaults to the mission guessed from the path.
+Track a metakernel that is already on disk, without a download, as `skd import` does. Indexes its entries, registers every kernel it resolves to that exists on disk, and adds the registry row with no source URL. `mission` defaults to the mission guessed from the path, with the configured kernel roots taken into account (see [`guess_mission`](#guess_mission)).
+
+`official=False` marks a metakernel assembled locally, such as a subsetter's output or the one planetarypy builds in `archived_kernels.py`, as `skd import --unofficial` does. The flag is stored in the registry, `ls` appends `unofficial` to the name, and `show` prints `Official: no`. Importing a path again replaces its row, so the flag follows the latest call.
 
 Returns a dict with keys `mk_path`, `filename`, `mission`, `n_entries`, `n_registered` and `missing`, the entries whose file is not on disk. Raises `FileNotFoundError` when `mk_path` is not a file.
 
@@ -335,9 +354,9 @@ db.verify_metakernel(
 ) -> dict
 ```
 
-Deeply cross-check a metakernel against the database. Each entry in `KERNELS_TO_LOAD` is substituted through `PATH_VALUES`/`PATH_SYMBOLS` to an absolute path and validated against the `kernels` row whose filename matches (case-insensitive).
+Deeply cross-check a metakernel against the database. Each entry in `KERNELS_TO_LOAD` is substituted through `PATH_VALUES`/`PATH_SYMBOLS` to an absolute path and validated against the `kernels` row of the registered location at that path, or of the file a symlink there leads to. Only a path the database has not registered falls back to the `kernels` rows whose filename matches (case-insensitive).
 
-Checks: traversal escape from `PATH_VALUES` root, dangling symlinks, missing files, size mismatch, SHA-256 mismatch (only in `deep` mode), `AMBIGUOUS` resolution (multiple non-superseded `kernels` rows share the filename — see [`superseded_by` semantics](design.qmd)), unregistered files, and non-absolute `PATH_VALUES`.
+Checks: traversal escape from `PATH_VALUES` root, dangling symlinks, missing files, size mismatch, SHA-256 mismatch (only in `deep` mode), `AMBIGUOUS` resolution (the path is not registered and multiple non-superseded `kernels` rows share the filename; a registered path is never ambiguous, so a same-named kernel with other content in another mission or kernel root is not flagged — see [`superseded_by` semantics](design.qmd)), unregistered files, and non-absolute `PATH_VALUES`.
 
 Returns a dict with keys `entries`, `ok`, `fail`, `fatal`, `mk_path`, `deep`. Each entry is a dict with `raw`, `resolved`, `status`, `detail`. `fatal` is `True` if any entry is in a P0 state (e.g. `TRAVERSAL`, `HASH_MISMATCH`, `AMBIGUOUS`).
 
@@ -399,7 +418,7 @@ List all tracked metakernels, optionally filtered by mission. Each entry include
 
 Alias rows (symlink metakernels created by `get`) inherit their target's entry count and content fingerprint, so the listing reads consistently — both rows show the same kernel count and one of them is annotated `↳ identical to <target>`.
 
-Prints a summary table (unless `show=False`) and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, plus `identical_to` (set when another row has the same content fingerprint).
+Prints a summary table (unless `show=False`) and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, `official`, plus `identical_to` (set when another row has the same content fingerprint).
 
 #### `metakernels_covering`
 
@@ -426,7 +445,7 @@ db.info_metakernel(name: str, kernel_type: str | None = None) -> dict
 
 Show detailed info about a tracked metakernel, as `skd show` does. `name` is any form `resolve_metakernel` accepts. Displays per-kernel status (`in db` / `missing`) with kernel type and size. `kernel_type` limits the printed kernel table to one type; the counts stay whole.
 
-Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `kernels`, `n_kernels`, `n_in_db`, `n_missing`. Raises `MetakernelNotTracked` if nothing matches.
+Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `official`, `kernels`, `n_kernels`, `n_in_db`, `n_missing`. Raises `MetakernelNotTracked` if nothing matches.
 
 #### `browse_remote_metakernels`
 
@@ -510,7 +529,7 @@ db.stale_locations() -> list[tuple[str, str]]
 db.doctor() -> dict
 ```
 
-Database health with no metakernel argument: `n_kernels`, `n_locations`, `n_metakernels`, `poisoned` (the `poisoned_superseded()` rows), `missing_locations` (location paths whose file is gone) and `missing_metakernels` (registry filenames whose file is gone). The CLI's `doctor` prints it and exits 1 only when `poisoned` is non-empty.
+Database health with no metakernel argument: `n_kernels`, `n_locations`, `n_metakernels`, `poisoned` (the `poisoned_superseded()` rows), `missing_locations` (location paths whose file is gone), `conflicting_locations` (paths with more than one `locations` row, that is one file registered under more than one hash) and `missing_metakernels` (registry filenames whose file is gone). The CLI's `doctor` prints it and exits 1 only when `poisoned` is non-empty. A `scan_directory` of the directory holding a conflicting path keeps the row that matches the file on disk and supersedes the others; `register_file` supersedes every stale row at the path, not only one.
 
 #### `poisoned_superseded`
 
@@ -584,25 +603,75 @@ Properties and methods:
 ## Configuration
 
 ```python
-from spice_kernel_db import Config, ensure_config
+from spice_kernel_db import (
+    Config, ensure_config, kernel_roots, add_kernel_root, remove_kernel_root,
+)
 ```
 
 ### `ensure_config`
 
 ```python
-ensure_config() -> Config
+ensure_config(seed_root: str | Path | None = None) -> Config
 ```
 
 Load configuration from `~/.config/spice-kernel-db/config.toml`. If no config file exists, runs an interactive first-time setup prompting for the database path and kernel storage directory.
 
+With `seed_root` and no config file yet, it prompts for nothing: it writes a configuration with the default database path and `seed_root` as the first kernel root, and creates both directories. An existing configuration is never changed by `seed_root`. A library such as planetarypy calls it this way on first run to point skd at its own store.
+
 ### `Config`
 
-Dataclass with attributes:
+```python
+Config(db_path=DEFAULT_DB_PATH, kernel_dir=None, kernel_dirs=None)
+```
+
+Configuration object with these attributes:
 
 | Attribute | Type | Default | Description |
-|-----------|------|---------|-------------|
+|:---|:---|:---|:---|
 | `db_path` | `str` | `~/.local/share/spice-kernel-db/kernels.duckdb` | Path to the DuckDB database |
-| `kernel_dir` | `str` | `~/.local/share/spice-kernel-db/kernels` | Default directory for downloaded kernels |
+| `kernel_dirs` | `list[str]` | `["~/.local/share/spice-kernel-db/kernels"]` | The kernel roots, in order. The first is where `get` downloads. Never empty. |
+| `kernel_dir` | `str` | first of `kernel_dirs` | A property over the first root: reading it returns that root, and assigning to it replaces it. Code written for a single root keeps working. |
+
+Pass either `kernel_dirs` or, for a single root, `kernel_dir`; when both are given, `kernel_dirs` wins. With neither, the list holds the default store.
+
+The `[storage]` section of the file holds `kernel_dirs`, and `save_config` writes only that key. A file written before the list existed has only `kernel_dir`; it loads as a one-root list and is rewritten as `kernel_dirs` on the next save.
+
+### Kernel roots
+
+```python
+kernel_roots(config: Config | None = None) -> list[Path]
+add_kernel_root(directory: str | Path, config: Config | None = None) -> Config
+remove_kernel_root(directory: str | Path, config: Config | None = None) -> Config
+```
+
+`kernel_roots` returns the configured roots as expanded, resolved paths. Without a config file it returns the one default root. Pass `config` to avoid reading the file a second time. `add_kernel_root` and `remove_kernel_root` take the same `config` argument and edit that object instead of loading the file.
+
+`add_kernel_root` appends `directory` to the roots and saves. It creates the directory when missing and does not add a root twice. The first root, the download target, never moves. It runs no prompt, and without a config file it writes one with the default database path. It returns the updated `Config`.
+
+`remove_kernel_root` removes `directory` from the roots and saves. It raises `ValueError` when the directory is not a root or is the last one. Files on disk and database rows are untouched; `clean` drops rows whose file is gone. It returns the updated `Config`.
+
+```python
+from spice_kernel_db import add_kernel_root, kernel_roots
+
+add_kernel_root("~/planetarypy_data/spice_kernels")
+kernel_roots()
+# [PosixPath('/Users/me/.local/share/spice-kernel-db/kernels'),
+#  PosixPath('/Users/me/planetarypy_data/spice_kernels')]
+```
+
+The CLI equivalents are `skd config add-root` and `skd config remove-root`; see [Several kernel roots](cli.qmd#several-kernel-roots).
+
+### `guess_mission`
+
+```python
+from spice_kernel_db.hashing import guess_mission
+
+guess_mission(filepath: str, roots: list[Path] | None = None) -> str
+```
+
+Best-effort mission name for a kernel file, canonicalized like every stored mission name. Under one of `roots` (as returned by `kernel_roots()`) the mission is the first directory below the root, because skd's own store is laid out as `<root>/<MISSION>/<type>/<file>`. A file under a root but not in a mission directory, for example directly in the root or in a type directory such as `mk`, is classified from its filename only. Outside every root the path heuristic applies: the directory before `kernels/`, then the parent of a kernel-type directory, then filename patterns.
+
+`register_file`, `scan_directory` and `import_metakernel` pass `db.kernel_roots`. `check_metakernel`, `rewrite_metakernel`, `coverage_metakernel` and the server comparison do not guess for a tracked metakernel: when `mission` is not given they read it from the registry row, and only an untracked file is guessed from its path.
 
 ---
 

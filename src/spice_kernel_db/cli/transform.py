@@ -15,28 +15,29 @@ from ._app import MAINTAIN, app, open_db, rename_note, state
 from .prompts import _confirm, _require_metakernel
 
 
-@app.command(rich_help_panel=MAINTAIN, epilog="See also: import, mission add",
-             help="Index every kernel file under a directory")
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: import, config add-root, mission add",
+             help="Index every kernel file under a directory "
+                  "(no directory: every configured kernel root)")
 def scan(
     ctx: typer.Context,
-    directory: Annotated[str, typer.Argument(help="Root directory to scan recursively")],
+    directory: Annotated[Optional[str], typer.Argument(
+        help="Directory to scan recursively (default: each kernel root in config)")] = None,
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Override auto-detected mission name")] = None,
     archive: Annotated[bool, typer.Option(
         "--archive",
-        help="Move files to the configured kernel directory and leave symlinks")] = False,
+        help="Move files to the first kernel root and leave symlinks")] = False,
 ) -> None:
     st = state(ctx)
+    archive_dir = st.config.kernel_dir if archive else None
     with open_db(ctx) as db:
-        count, missions_found = db.scan_directory(
-            directory,
-            mission=mission,
-            verbose=st.verbose,
-            archive_dir=st.config.kernel_dir if archive else None,
-        )
-        _note_new_missions(
-            db, missions_found, Path(directory).expanduser().resolve(),
-        )
+        if directory:
+            _, missions_found = db.scan_directory(
+                directory, mission=mission, verbose=st.verbose, archive_dir=archive_dir)
+            _note_new_missions(db, missions_found, [Path(directory).expanduser().resolve()])
+        else:
+            _, missions_found = db.scan_roots(verbose=st.verbose, archive_dir=archive_dir)
+            _note_new_missions(db, missions_found, db.kernel_roots)
         db.stats()
 
 
@@ -47,9 +48,13 @@ def import_(
     metakernel: Annotated[str, typer.Argument(help="Path to the .tm file")],
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Override auto-detected mission name")] = None,
+    unofficial: Annotated[bool, typer.Option(
+        "--unofficial",
+        help="Mark it as assembled locally (a subsetter's output), not an "
+             "archive metakernel; ls and show say so")] = False,
 ) -> None:
     with open_db(ctx) as db:
-        info = db.import_metakernel(metakernel, mission=mission)
+        info = db.import_metakernel(metakernel, mission=mission, official=not unofficial)
     print(f"Tracked {info['filename']} ({info['mission']}): "
           f"{info['n_registered']}/{info['n_entries']} kernels on disk and registered.")
     if info["missing"]:
@@ -190,7 +195,7 @@ def _read_spice_server_marker(directory: Path) -> dict[str, str] | None:
 
 
 def _note_new_missions(
-    db: KernelDB, missions_found: set[str], scan_root: Path,
+    db: KernelDB, missions_found: set[str], scan_roots: list[Path],
 ) -> None:
     """Configure missions found during scan that are not in the DB yet.
 
@@ -206,10 +211,9 @@ def _note_new_missions(
             continue
 
         marker = None
-        for candidate in [scan_root / name, scan_root / name / "kernels"]:
-            marker = _read_spice_server_marker(candidate)
-            if marker:
-                break
+        for scan_root in scan_roots:
+            for candidate in [scan_root / name, scan_root / name / "kernels"]:
+                marker = marker or _read_spice_server_marker(candidate)
 
         if marker:
             db.add_mission(name, marker["server_url"], marker["mk_dir_url"])

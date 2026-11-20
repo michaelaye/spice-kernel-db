@@ -31,6 +31,7 @@ from rich.table import Table
 
 console = Console()
 
+from spice_kernel_db.config import kernel_roots
 from spice_kernel_db.hashing import (
     KERNEL_EXTENSIONS,
     canonicalize_mission,
@@ -221,6 +222,7 @@ class RegistryRow(NamedTuple):
     filename: str
     mission: str
     acquired_at: object
+    official: bool = True  # False for a metakernel assembled locally (#48)
 
 
 def _check_verdicts(present: dict, resolves: dict, server: dict | None) -> list[dict]:
@@ -341,7 +343,12 @@ class KernelDB:
     can reference the same hash — that's how duplicates are detected.
     """
 
-    def __init__(self, db_path: str | Path | None = None, read_only: bool = False):
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        read_only: bool = False,
+        kernel_roots: list[str | Path] | None = None,
+    ):
         # Imported here, not at module level: ``duckdb`` costs ~30 ms to
         # import and ``skd --version`` never opens a database (#26).
         import duckdb
@@ -352,11 +359,21 @@ class KernelDB:
             db_path = config.db_path if config else default_db_path()
         self.db_path = str(Path(db_path).expanduser())
         self.read_only = read_only
+        # The kernel roots (#48): given, or read from the config on first use.
+        self._kernel_roots: list[Path] | None = (
+            [Path(r).expanduser().resolve() for r in kernel_roots]
+            if kernel_roots is not None else None
+        )
         if not read_only:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(self.db_path, read_only=read_only)
         if not read_only:
             self._init_schema()
+        # A database from before #48 opened read-only cannot be migrated;
+        # its registry rows read as official until the first write opens it.
+        self._registry_has_official = (
+            not read_only or "official" in self._columns("metakernel_registry")
+        )
 
     def release(self):
         """Close the DB connection to release the lock.
@@ -394,6 +411,24 @@ class KernelDB:
         self.con = duckdb.connect(self.db_path, read_only=self.read_only)
         # Unreachable on success; keep last_exc for static analyzers
         _ = last_exc
+
+    def _columns(self, table: str) -> set[str]:
+        return {r[1] for r in self.con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def _official(self, prefix: str = "") -> str:
+        """The ``official`` column to select, or TRUE on a read-only pre-#48 database."""
+        return f"{prefix}official" if self._registry_has_official else "TRUE AS official"
+
+    @property
+    def kernel_roots(self) -> list[Path]:
+        """The configured kernel roots, resolved once per instance (#48)."""
+        if self._kernel_roots is None:
+            self._kernel_roots = kernel_roots()
+        return self._kernel_roots
+
+    def _guess_mission(self, path: str | Path) -> str:
+        """``guess_mission`` with this database's roots, for every file path."""
+        return guess_mission(str(path), self.kernel_roots)
 
     def _init_schema(self):
         self.con.execute("""
@@ -451,9 +486,14 @@ class KernelDB:
                 mission      VARCHAR,
                 source_url   VARCHAR,
                 filename     VARCHAR,
-                acquired_at  TIMESTAMP DEFAULT current_timestamp
+                acquired_at  TIMESTAMP DEFAULT current_timestamp,
+                official     BOOLEAN DEFAULT TRUE
             )
         """)
+        # Migration for DBs created before official existed (#48)
+        if "official" not in self._columns("metakernel_registry"):
+            self.con.execute(
+                "ALTER TABLE metakernel_registry ADD COLUMN official BOOLEAN DEFAULT TRUE")
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS missions (
                 name         VARCHAR PRIMARY KEY,
@@ -633,7 +673,7 @@ class KernelDB:
         ktype = classify_kernel(fname)
         size = p.stat().st_size
         # H4: canonicalise mission name at the storage boundary
-        m = canonicalize_mission(mission) if mission else guess_mission(str(p))
+        m = canonicalize_mission(mission) if mission else self._guess_mission(p)
 
         # Archive: move to central location, leave symlink
         if archive_dir is not None:
@@ -654,12 +694,16 @@ class KernelDB:
         # That's the genuine supersession case (C3 fix). Two different
         # paths sharing a filename is NOT supersession — both are real
         # kernels.
-        same_path_old = self.con.execute(
-            "SELECT sha256 FROM locations WHERE abs_path = ?", [str(p)]
-        ).fetchone()
-        superseded_old_hash: str | None = None
-        if same_path_old and same_path_old[0] != h:
-            superseded_old_hash = same_path_old[0]
+        # Every row at this path with another hash is stale: a path holds one
+        # file. More than one such row has existed (#48: a 0-byte registration
+        # from an interrupted download beside the real one), and taking only
+        # the first left the other in place through every later scan.
+        stale_hashes = [
+            s for (s,) in self.con.execute(
+                "SELECT sha256 FROM locations WHERE abs_path = ?", [str(p)]
+            ).fetchall() if s != h
+        ]
+        superseded_old_hash: str | None = stale_hashes[0] if stale_hashes else None
 
         # Insert or update the kernel record.
         # If the hash already exists with a different filename, we keep
@@ -708,18 +752,18 @@ class KernelDB:
                         fname, existing[0],
                     )
 
-                # If this same path previously held a different hash, the old
-                # locations row is now stale (the file on disk has only one
-                # hash). Delete it, and mark the old kernels row superseded.
-                if superseded_old_hash:
+                # If this same path previously held other hashes, those
+                # locations rows are stale (the file on disk has one hash).
+                # Delete them, and mark the old kernels rows superseded.
+                for old in stale_hashes:
                     cur.execute(
                         "DELETE FROM locations WHERE sha256 = ? AND abs_path = ?",
-                        [superseded_old_hash, str(p)],
+                        [old, str(p)],
                     )
                     cur.execute(
                         "UPDATE kernels SET superseded_by = ? "
                         "WHERE sha256 = ? AND superseded_by IS NULL",
-                        [h, superseded_old_hash],
+                        [h, old],
                     )
 
                 # Issue 29: un-supersede content that is demonstrably present.
@@ -948,7 +992,7 @@ class KernelDB:
         for p in sorted(root.rglob("*")):
             if p.is_file() and p.suffix.lower() in extensions:
                 try:
-                    m = mission or guess_mission(str(p))
+                    m = mission or self._guess_mission(p)
                     self.register_file(
                         p, mission=m, archive_dir=archive_dir,
                     )
@@ -983,9 +1027,66 @@ class KernelDB:
             print(f"  Errors: {error_count} files could not be registered.")
         return count, missions_found
 
+    def scan_roots(
+        self, verbose: bool = False, archive_dir: str | Path | None = None,
+    ) -> tuple[int, set[str]]:
+        """``scan_directory`` over every configured kernel root (#48).
+
+        Returns the total count and the union of missions found.
+        """
+        count, missions = 0, set()
+        for root in self.kernel_roots:
+            if not root.is_dir():
+                print(f"Kernel root {root} does not exist; skipped.")
+                continue
+            n, found = self.scan_directory(root, verbose=verbose, archive_dir=archive_dir)
+            count += n
+            missions |= found
+        return count, missions
+
     # ------------------------------------------------------------------
     # Lookup (mission-aware)
     # ------------------------------------------------------------------
+
+    def _kernels_at(self, paths: list[Path]) -> dict[str, tuple[str, int]]:
+        """``{abs_path: (sha256, size_bytes)}`` for every registered location
+        among *paths*, each also looked up by its realpath (#48).
+
+        A registered path pins the file, whatever other missions or roots
+        call a file by the same name; the filename is only a fallback for
+        an unregistered path.
+        """
+        keys: list[str] = []
+        for p in paths:
+            keys.append(str(p))
+            if p.is_symlink():
+                keys.append(os.path.realpath(p))
+        if not keys:
+            return {}
+        rows = self.con.execute(
+            "SELECT l.abs_path, k.sha256, k.size_bytes FROM locations l "
+            "JOIN kernels k ON k.sha256 = l.sha256 "
+            f"WHERE l.abs_path IN ({', '.join('?' * len(keys))})",
+            keys,
+        ).fetchall()
+        found: dict[str, tuple[str, int]] = {}
+        for abs_path, sha, size in rows:
+            # Where a path still carries several rows (see register_file), the
+            # row whose size is the file's is the one for the file that is there.
+            if abs_path in found:
+                try:
+                    on_disk = os.stat(abs_path).st_size
+                except OSError:
+                    continue
+                if found[abs_path][1] == on_disk or size != on_disk:
+                    continue
+            found[abs_path] = (sha, size)
+        return found
+
+    def _kernel_at(self, path: Path) -> tuple[str, int] | None:
+        found = self._kernels_at([path])
+        return found.get(str(path)) or (
+            found.get(os.path.realpath(path)) if path.is_symlink() else None)
 
     def find_by_filename(self, filename: str) -> list[dict]:
         """Find all locations for a kernel by filename.
@@ -1213,18 +1314,31 @@ class KernelDB:
 
     def _track_metakernel(
         self, mk_path: Path, mission: str, source_url: str | None = None,
+        official: bool | None = None,
     ) -> None:
         """Index *mk_path*'s entries and write (or replace) its registry row.
 
         The one registration sequence behind ``scan``, ``get`` and
-        ``import``; ``source_url`` is None for a file that was never
-        downloaded.
+        ``import``. ``source_url`` is None for a file that was never
+        downloaded. The registry row is the authority for ``mission`` and
+        ``official`` (#43, #48): with ``official=None`` (a scan, which only
+        guessed) an existing row keeps both; ``get`` and ``import`` state
+        them.
         """
         self.index_metakernel(mk_path)
+        if official is None:
+            existing = self.con.execute(
+                "SELECT mission, official FROM metakernel_registry WHERE mk_path = ?",
+                [str(mk_path)],
+            ).fetchone()
+            if existing:
+                mission, official = existing[0] or mission, existing[1]
         self.con.execute("""
             INSERT OR REPLACE INTO metakernel_registry
-            VALUES (?, ?, ?, ?, current_timestamp)
-        """, [str(mk_path), mission, source_url, mk_path.name])
+            (mk_path, mission, source_url, filename, acquired_at, official)
+            VALUES (?, ?, ?, ?, current_timestamp, ?)
+        """, [str(mk_path), mission, source_url, mk_path.name,
+              True if official is None else official])
 
     def index_metakernel(self, mk_path: str | Path):
         """Parse and register a metakernel's entries in the DB.
@@ -1263,11 +1377,21 @@ class KernelDB:
             where = "WHERE LOWER(mission) LIKE LOWER(?) || '%'"
             params = [mission]
         rows = self.con.execute(
-            f"SELECT mk_path, source_url, filename, mission, acquired_at "
+            f"SELECT mk_path, source_url, filename, mission, acquired_at, {self._official()} "
             f"FROM metakernel_registry {where} ORDER BY mission, filename",
             params,
         ).fetchall()
         return [RegistryRow(*r) for r in rows]
+
+    def _mission_of(self, mk_path: Path, mission: str | None) -> str:
+        """*mission* as given, else the registry's mission for *mk_path*, else
+        a guess from the path with the configured roots (#43, #48)."""
+        if mission is not None:
+            return mission
+        row = self.con.execute(
+            "SELECT mission FROM metakernel_registry WHERE mk_path = ?", [str(mk_path)],
+        ).fetchone()
+        return row[0] if row and row[0] else self._guess_mission(mk_path)
 
     def registry_row(
         self, ref: str | Path, mission: str | None = None,
@@ -1365,8 +1489,7 @@ class KernelDB:
 
         resolved_mk = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(resolved_mk)
-        if mission is None:
-            mission = guess_mission(str(resolved_mk))
+        mission = self._mission_of(resolved_mk, mission)
 
         row = self.con.execute(
             "SELECT source_url FROM metakernel_registry WHERE mk_path = ?",
@@ -1549,8 +1672,7 @@ class KernelDB:
         """
         mk_path = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(mk_path)
-        if mission is None:
-            mission = guess_mission(str(mk_path))
+        mission = self._mission_of(mk_path, mission)
 
         found = []
         missing = []
@@ -1709,8 +1831,7 @@ class KernelDB:
         mk_path = self.resolve_metakernel(mk_path, mission=mission)
         output = Path(output)
         parsed = parse_metakernel(mk_path)
-        if mission is None:
-            mission = guess_mission(str(mk_path))
+        mission = self._mission_of(mk_path, mission)
 
         if link_root is None:
             # Default: kernels/ directory next to the output mk
@@ -1896,14 +2017,20 @@ class KernelDB:
                 fatal = True
                 continue
 
-            # Look up what the DB believes about this filename
-            # (C8: case-insensitive for cross-FS portability)
-            kernels_rows = self.con.execute(
-                "SELECT sha256, size_bytes FROM kernels "
-                "WHERE LOWER(filename) = LOWER(?) "
-                "AND superseded_by IS NULL",
-                [expected_name],
-            ).fetchall()
+            # A registered path pins the file (#48: two stores, three
+            # different naif0012.tls); only an unregistered path falls back
+            # to the filename, where several active rows are an ambiguity.
+            located = self._kernel_at(resolved)
+            if located is not None:
+                kernels_rows = [located]
+            else:
+                # (C8: case-insensitive for cross-FS portability)
+                kernels_rows = self.con.execute(
+                    "SELECT sha256, size_bytes FROM kernels "
+                    "WHERE LOWER(filename) = LOWER(?) "
+                    "AND superseded_by IS NULL",
+                    [expected_name],
+                ).fetchall()
 
             if len(kernels_rows) == 0:
                 entry["status"] = "UNREGISTERED"
@@ -2152,6 +2279,7 @@ class KernelDB:
             return
         self.con.execute("""
             INSERT OR REPLACE INTO metakernel_registry
+            (mk_path, mission, source_url, filename, acquired_at)
             VALUES (?, ?, ?, ?, current_timestamp)
         """, [str(alias_path), mission, source_url, alias_filename])
         console.print(
@@ -2245,7 +2373,7 @@ class KernelDB:
         if not dry_run:
             mk_dest.parent.mkdir(parents=True, exist_ok=True)
             write_metakernel(parsed, mk_dest, path_values=abs_path_values)
-            self._track_metakernel(mk_dest, mission, final_url)
+            self._track_metakernel(mk_dest, mission, final_url, official=True)
 
             # 1b-alias. Expose the metakernel under a second name via symlink.
             if alias_filename and alias_filename != mk_filename:
@@ -2480,14 +2608,19 @@ class KernelDB:
                 )
             fname = filenames[i]
             remote_size = sizes.get(kurl)
-            # Look up expected hash from DB (case-insensitive — C8)
-            db_row = self.con.execute(
-                "SELECT sha256 FROM kernels "
-                "WHERE LOWER(filename) = LOWER(?) "
-                "AND superseded_by IS NULL",
-                [fname],
-            ).fetchone()
-            db_hash = db_row[0] if db_row else None
+            # Expected hash: the registered row at this path, else the
+            # filename's active row (case-insensitive, C8)
+            at_dest = self._kernel_at(dest) if dest.exists() else None
+            if at_dest is not None:
+                db_hash = at_dest[0]
+            else:
+                db_row = self.con.execute(
+                    "SELECT sha256 FROM kernels "
+                    "WHERE LOWER(filename) = LOWER(?) "
+                    "AND superseded_by IS NULL",
+                    [fname],
+                ).fetchone()
+                db_hash = db_row[0] if db_row else None
             if _should_skip_download(dest, remote_size, db_hash, force):
                 already_on_disk.append(dest)
                 task_info[dest] = kurl
@@ -2755,9 +2888,13 @@ class KernelDB:
         return report
 
     def import_metakernel(
-        self, mk_path: str | Path, mission: str | None = None,
+        self, mk_path: str | Path, mission: str | None = None, official: bool = True,
     ) -> dict:
         """Track a metakernel that is already on disk, without a download (#47).
+
+        *official* False marks a metakernel assembled locally (a subsetter's
+        output) rather than one published by an archive; ``ls`` and
+        ``show`` say so (#48).
 
         Indexes its entries, registers every kernel it resolves to that
         exists on disk, and adds the registry row with no source URL (as
@@ -2771,7 +2908,7 @@ class KernelDB:
         p = Path(mk_path).expanduser().resolve()
         if not p.is_file():
             raise FileNotFoundError(f"No such metakernel: {mk_path}")
-        mission = canonicalize_mission(mission or guess_mission(str(p)))
+        mission = canonicalize_mission(mission or self._guess_mission(p))
         m = self.get_mission(mission)
         if m:
             mission = m["name"]
@@ -2785,7 +2922,7 @@ class KernelDB:
                 n_registered += 1
             else:
                 missing.append(raw)
-        self._track_metakernel(p, mission)
+        self._track_metakernel(p, mission, official=official)
         return {
             "mk_path": str(p),
             "filename": p.name,
@@ -2807,29 +2944,23 @@ class KernelDB:
         The *mission* filter is case-insensitive with prefix matching.
         With ``show=False`` nothing is printed; the rows are only returned.
         """
+        where, params = "", []
         if mission:
-            rows = self.con.execute("""
-                SELECT r.filename, r.mission, r.source_url, r.acquired_at,
-                       r.mk_path, COUNT(e.entry_index) AS n_kernels
-                FROM metakernel_registry r
-                LEFT JOIN metakernel_entries e ON e.mk_path = r.mk_path
-                WHERE LOWER(r.mission) LIKE LOWER(?) || '%'
-                GROUP BY r.mk_path, r.filename, r.mission, r.source_url, r.acquired_at
-                ORDER BY r.mission, r.filename
-            """, [mission]).fetchall()
-        else:
-            rows = self.con.execute("""
-                SELECT r.filename, r.mission, r.source_url, r.acquired_at,
-                       r.mk_path, COUNT(e.entry_index) AS n_kernels
-                FROM metakernel_registry r
-                LEFT JOIN metakernel_entries e ON e.mk_path = r.mk_path
-                GROUP BY r.mk_path, r.filename, r.mission, r.source_url, r.acquired_at
-                ORDER BY r.mission, r.filename
-            """).fetchall()
+            where = "WHERE LOWER(r.mission) LIKE LOWER(?) || '%'"
+            params = [mission]
+        rows = self.con.execute(f"""
+            SELECT r.filename, r.mission, r.source_url, r.acquired_at,
+                   r.mk_path, COUNT(e.entry_index) AS n_kernels, {self._official("r.")}
+            FROM metakernel_registry r
+            LEFT JOIN metakernel_entries e ON e.mk_path = r.mk_path
+            {where}
+            GROUP BY r.mk_path, r.filename, r.mission, r.source_url, r.acquired_at{", r.official" if self._registry_has_official else ""}
+            ORDER BY r.mission, r.filename
+        """, params).fetchall()
 
         results = []
         for r in rows:
-            filename, mis, source_url, acquired_at, mk_path, n_kernels = r
+            filename, mis, source_url, acquired_at, mk_path, n_kernels, official = r
             results.append({
                 "filename": filename,
                 "mission": mis,
@@ -2837,6 +2968,7 @@ class KernelDB:
                 "acquired_at": acquired_at,
                 "mk_path": mk_path,
                 "n_kernels": n_kernels,
+                "official": bool(official),
             })
 
         if not results:
@@ -2908,6 +3040,8 @@ class KernelDB:
             else:
                 source_short = source
             name_cell = r["filename"]
+            if not r["official"]:
+                name_cell += "  [yellow]unofficial[/yellow]"
             if r["identical_to"]:
                 name_cell += f"\n[dim]↳ identical to {r['identical_to']}[/dim]"
             table.add_row(
@@ -2979,8 +3113,9 @@ class KernelDB:
             if not Path(name).is_file():
                 raise MetakernelNotTracked(str(name))
             mk_path, source_url, filename, acquired_at = str(name), None, Path(name).name, None
+            official = True
         else:
-            mk_path, source_url, filename, mission, acquired_at = row
+            mk_path, source_url, filename, mission, acquired_at, official = row
 
         entries = self.con.execute("""
             SELECT entry_index, raw_entry, filename
@@ -3037,6 +3172,8 @@ class KernelDB:
             if source_url:
                 print(f"  Source:       {source_url}")
             print(f"  Acquired:     {acquired_at}")
+            if not official:
+                print("  Official:     no (assembled locally, not an archive metakernel)")
         print(f"  Local path:   {mk_path}")
 
         shown = kernel_info
@@ -3063,6 +3200,7 @@ class KernelDB:
             "mission": mission,
             "source_url": source_url,
             "acquired_at": acquired_at,
+            "official": official,
             "mk_path": mk_path,
             "kernels": kernel_info,
             "n_kernels": len(entries),
@@ -3353,6 +3491,9 @@ class KernelDB:
         corruption, since every ``update`` re-downloads those kernels.
         ``missing_locations`` and ``missing_metakernels`` list rows whose
         file is gone from disk; ``clean`` and ``rm`` clean them up.
+        ``conflicting_locations`` are paths with more than one row (one file
+        registered under two hashes, #48); a ``scan`` of the directory keeps
+        the row matching the file and supersedes the rest.
         """
         registry = self.registry_rows()
         return {
@@ -3361,6 +3502,11 @@ class KernelDB:
             "n_metakernels": len(registry),
             "poisoned": self.poisoned_superseded(),
             "missing_locations": [path for _sha, path in self.stale_locations()],
+            "conflicting_locations": [
+                r[0] for r in self.con.execute(
+                    "SELECT abs_path FROM locations GROUP BY abs_path "
+                    "HAVING COUNT(*) > 1 ORDER BY abs_path").fetchall()
+            ],
             "missing_metakernels": [
                 r.filename for r in registry if not Path(r.mk_path).is_file()
             ],
@@ -3395,7 +3541,7 @@ class KernelDB:
         n_poisoned = len(self.poisoned_superseded())
         poisoned_line = (
             f"[yellow]Poisoned rows:    {n_poisoned}[/yellow]  "
-            f"(repair: scan <kernel_dir>)"
+            f"(repair: scan <directory>)"
             if n_poisoned else f"Poisoned rows:    {n_poisoned}"
         )
 
@@ -3818,8 +3964,7 @@ class KernelDB:
 
         mk = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(mk)
-        if mission is None:
-            mission = guess_mission(str(mk))
+        mission = self._mission_of(mk, mission)
 
         filenames = parsed.kernel_filenames()
         resolved_paths: list[str | None] = []

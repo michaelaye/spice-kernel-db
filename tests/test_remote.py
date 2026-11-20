@@ -231,7 +231,7 @@ class TestBrowseRemoteMetakernels:
         """After registering an MK in metakernel_registry, is_local should be True."""
         # Simulate having acquired juice_ops.tm
         db.con.execute("""
-            INSERT INTO metakernel_registry VALUES
+            INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES
             (?, ?, ?, ?, current_timestamp)
         """, ["/tmp/juice_ops.tm", "JUICE", "https://example.com/mk/juice_ops.tm", "juice_ops.tm"])
 

@@ -326,7 +326,7 @@ class TestPruneMetakernelsCLI:
         p.parent.mkdir(parents=True)
         p.write_text("\\begintext\n")
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES "
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES "
             "(?, ?, ?, ?, current_timestamp)",
             [str(p), "JUICE",
              "https://naif.example/former_versions/dead.tm", "dead.tm"],
@@ -1046,7 +1046,7 @@ class TestVerboseReachesGetAndUpdate:
         # #47: a tracked name given to get is re-fetched through update_metakernel
         db = KernelDB(tmp_path / "t.duckdb")
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES "
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES "
             "(?, 'JUICE', 'https://example.com/mk/x.tm', 'x.tm', now())",
             [str(tmp_path / "x.tm")],
         )
@@ -1387,7 +1387,7 @@ class TestVerbTree:
         # a second tracked metakernel whose source is gone
         db = KernelDB(tracked.db_path)
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES "
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES "
             "(?, 'JUICE', 'https://example.com/mk/gone.tm', 'gone.tm', now())",
             [str(tracked.tmp / "gone.tm")],
         )

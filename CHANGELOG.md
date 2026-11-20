@@ -69,6 +69,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A filename that is not tracked is still looked up on the configured mission's
   server.
 
+- **Several kernel roots** (#48). `[storage]` in `config.toml` now holds
+  `kernel_dirs`, an ordered list. The first root is where `get` downloads and
+  where `scan --archive` moves files. Every root is scanned, resolved against
+  (`which`, `check`) and deduplicated across, so `dedup` links a kernel in one
+  root to its identical twin in another. A file with only `kernel_dir` loads as
+  a one-root list and is rewritten as `kernel_dirs` on the next save.
+- **`config add-root <dir>` and `config remove-root <dir>`** edit the list
+  (#48). `add-root` creates the directory and does not add a root twice;
+  `remove-root` refuses the last root and leaves files and database rows alone.
+  `skd config` lists the roots, marking the first `(download target)` when there
+  are several.
+- **`scan` takes an optional directory** (#48). With none it scans every
+  configured kernel root.
+- **`import --unofficial` and the `official` column** (#48). A metakernel
+  assembled locally, such as a subsetter's output or planetarypy's
+  `archived_kernels.py`, can be marked as not published by an archive.
+  `metakernel_registry` gains `official BOOLEAN DEFAULT TRUE`, added when an
+  older database is first opened for writing; opened read-only before that
+  (`ls`, `show`, `doctor`, `check`), every row reads as official. `ls` appends `unofficial` to the name and `show`
+  prints `Official: no`. `RegistryRow`, `list_metakernels()` and
+  `info_metakernel()` carry `official`, and
+  `import_metakernel(path, mission=None, official=True)` sets it.
+- **Python functions for the roots** (#48): `kernel_roots()`,
+  `add_kernel_root(dir)` and `remove_kernel_root(dir)`, exported from the
+  package, and `ensure_config(seed_root=...)`, which writes a first
+  configuration with that root instead of prompting. An existing configuration
+  is never changed by the seed. `Config(db_path, kernel_dir=None,
+  kernel_dirs=None)` holds the list, and `Config.kernel_dir` stays a settable
+  property over the first root.
+  `KernelDB(kernel_roots=...)` and `db.kernel_roots` carry the roots used to
+  guess a mission, and `db.scan_roots()` scans every one.
+
 ### Changed
 
 - **`verify` folded into `check`** (#46). `verify` stays as a hidden alias
@@ -149,6 +181,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tracked metakernel's mission comes from the registry, and `guess_mission`
+  knows the kernel roots** (#43, #48). A metakernel in the default store
+  (`~/.local/share/spice-kernel-db/kernels/JUICE/mk/x.tm`) got the mission
+  `SPICE-KERNEL-DB`, the directory that holds the store, and `check` then
+  reported `Cross-mission: 102 kernels`. `check`, `rewrite`, `coverage` and the
+  server comparison now read a tracked metakernel's mission from its registry
+  row. `guess_mission(filepath, roots=None)` takes the first directory below a
+  configured root as the mission, classifies a file under a root but in no
+  mission directory from its filename alone, and applies the old heuristic only
+  outside every root. `scan` and `import` pass the configured roots. A `scan`
+  that meets an already tracked metakernel keeps the mission and `official`
+  flag of its row; `get` and `import` state them.
+- **`doctor` lists a path registered under more than one hash, and `scan`
+  repairs it** (#48). One file could carry two `locations` rows, such as a
+  0-byte row from an interrupted download beside the real one, and `check`
+  then reported `SIZE_MISMATCH` against the wrong row (`!= expected 0`).
+  `KernelDB.doctor()` returns the paths as `conflicting_locations` and the CLI
+  prints them; the exit code is unchanged. `register_file` used to supersede
+  one stale row at a path. It now supersedes all of them, so a `scan` of the
+  directory keeps the row that matches the file on disk.
+- **`check` no longer reports `AMBIGUOUS` for a registered path whose filename
+  exists elsewhere with other content** (#48). When an entry resolves to a path
+  (or to the file its symlink leads to) that is a registered location, that
+  row's size and hash are the expectation. Only an unregistered path falls back
+  to the filename, where several active `kernels` rows are still `AMBIGUOUS`.
+  Three different `naif0012.tls` across two stores no longer fail the check.
 - **`verify` and `list` crashed on a registry filename that `check` accepted**
   (#41). Both handed the bare name to the parser and died with
   `FileNotFoundError`; they now resolve it like `check` does.

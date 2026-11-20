@@ -31,8 +31,10 @@ Your choices are saved to `~/.config/spice-kernel-db/config.toml`:
 path = "~/.local/share/spice-kernel-db/kernels.duckdb"
 
 [storage]
-kernel_dir = "~/.local/share/spice-kernel-db/kernels"
+kernel_dirs = ["~/.local/share/spice-kernel-db/kernels"]
 ```
+
+`kernel_dirs` is the ordered list of kernel roots. The first is where `get` downloads. A file written by an older version, with a single `kernel_dir` line, still loads: it becomes a one-root list, and the next save rewrites it as `kernel_dirs`.
 
 You can edit this file directly at any time. The `--db` CLI flag overrides the configured database path for a single command.
 
@@ -48,10 +50,23 @@ If you want to share kernel files across machines via Dropbox (or similar sync s
 path = "~/.local/share/spice-kernel-db/kernels.duckdb"
 
 [storage]
-kernel_dir = "~/Dropbox/spice-kernels"
+kernel_dirs = ["~/Dropbox/spice-kernels"]
 ```
 
-After setting up a new machine, rebuild the index with `spice-kernel-db scan ~/Dropbox/spice-kernels`. The `get` command downloads into the shared Dropbox folder, and kernels sync to other machines automatically.
+After setting up a new machine, rebuild the index with `spice-kernel-db scan`, which scans every configured kernel root (here the Dropbox folder). The `get` command downloads into the shared Dropbox folder, and kernels sync to other machines automatically.
+
+### Adding a second kernel store
+
+A second directory of kernels, such as planetarypy's store, becomes a second kernel root:
+
+```bash
+skd config add-root ~/planetarypy_data/spice_kernels
+skd scan
+```
+
+`config add-root` appends the directory to `kernel_dirs`. The first root stays the download target. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](cli.qmd#several-kernel-roots) for the details.
+
+From Python, `add_kernel_root(dir)` does the same without a prompt, and `ensure_config(seed_root=dir)` writes a first configuration with `dir` as its root when none exists yet.
 
 ### Python API
 
@@ -559,7 +574,7 @@ Database statistics:
   Missions:         generic
 ```
 
-You can re-scan directories at any time. Existing files are updated (not duplicated) based on their SHA-256 hash and path.
+You can re-scan directories at any time. Existing files are updated (not duplicated) based on their SHA-256 hash and path. `spice-kernel-db scan` with no directory scans every configured kernel root.
 
 ### Auto-detecting mission names
 
@@ -571,9 +586,11 @@ spice-kernel-db scan /data/spice/JUICE/kernels
 
 This automatically detects `mission="JUICE"` and registers files under that mission.
 
+Under a configured kernel root the mission is the first directory below the root, so `<root>/JUICE/mk/x.tm` is a JUICE file. A file directly in a root, or in a type directory such as `mk`, is classified from its filename alone. The directory name of the root itself is never taken as a mission. Before #43 was fixed, the default store gave `SPICE-KERNEL-DB`.
+
 ### Archiving while scanning
 
-The `--archive` flag moves scanned files to your configured kernel storage directory and leaves symlinks in place:
+The `--archive` flag moves scanned files into the first kernel root and leaves symlinks in place:
 
 ```bash
 spice-kernel-db scan /data/downloads/kernels --archive --mission JUICE
@@ -825,7 +842,7 @@ For researchers working across multiple machines, sharing kernel files via Dropb
 path = "~/.local/share/spice-kernel-db/kernels.duckdb"  # local
 
 [storage]
-kernel_dir = "~/Dropbox/spice-kernels"  # shared
+kernel_dirs = ["~/Dropbox/spice-kernels"]  # shared
 ```
 
 **Initial setup on machine 1**:

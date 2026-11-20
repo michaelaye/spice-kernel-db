@@ -192,11 +192,16 @@ def doctor(
         if poisoned:
             print("    Present on disk, yet flagged as superseded by content that\n"
                   "    exists nowhere: every `update` re-downloads them.\n"
-                  "    Repair: spice-kernel-db scan <kernel_dir>")
+                  "    Repair: spice-kernel-db scan <directory>")
         gone = report["missing_locations"]
         print(f"  Kernel locations whose file is gone: {len(gone)}"
               + ("  (spice-kernel-db clean --execute)" if gone else ""))
         for path in gone:
+            print(f"    {path}")
+        conflicting = report["conflicting_locations"]
+        print(f"  Paths registered under more than one hash: {len(conflicting)}"
+              + ("  (spice-kernel-db scan <dir> keeps the one on disk)" if conflicting else ""))
+        for path in conflicting:
             print(f"    {path}")
         gone_mk = report["missing_metakernels"]
         print(f"  Tracked metakernels whose file is gone: {len(gone_mk)}"

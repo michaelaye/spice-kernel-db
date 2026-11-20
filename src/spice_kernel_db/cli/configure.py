@@ -11,7 +11,12 @@ import typer
 from rich.table import Table
 
 from spice_kernel_db import registry
-from spice_kernel_db.config import setup_interactive, show_config
+from spice_kernel_db.config import (
+    add_kernel_root,
+    remove_kernel_root,
+    setup_interactive,
+    show_config,
+)
 from spice_kernel_db.db import KernelDB
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
@@ -96,7 +101,9 @@ def config(
     setup: Annotated[bool, typer.Option(
         "--setup", help="Re-run interactive setup")] = False,
     config_args: Annotated[Optional[list[str]], typer.Argument(
-        help="'set <key> <value>' or 'get <key>' (keys: db_path, kernel_dir)")] = None,
+        help="'set <key> <value>', 'get <key>' (keys: db_path, kernel_dir), "
+             "'add-root <dir>' or 'remove-root <dir>' (the kernel roots; the "
+             "first is the download target)")] = None,
 ) -> None:
     cfg = state(ctx).config
     if setup:
@@ -117,14 +124,28 @@ def config(
         setattr(cfg, key, value)
         save_config(cfg)
         print(f"{key} = {value}")
+    elif verb == "add-root" and len(rest) == 1:
+        show_config(add_kernel_root(rest[0], cfg))
+        print(f"  spice-kernel-db scan {rest[0]} indexes it.")
+    elif verb == "remove-root" and len(rest) == 1:
+        try:
+            show_config(remove_kernel_root(rest[0], cfg))
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
     else:
-        print("Usage: spice-kernel-db config [set <key> <value> | get <key>]", file=sys.stderr)
+        print("Usage: spice-kernel-db config [set <key> <value> | get <key> | "
+              "add-root <dir> | remove-root <dir>]", file=sys.stderr)
         sys.exit(1)
 
 
+_CONFIG_KEYS = ("db_path", "kernel_dir")
+
+
 def _require_config_key(cfg, key: str) -> None:
-    if not hasattr(cfg, key):
-        print(f"Unknown key: {key}. Valid keys: db_path, kernel_dir", file=sys.stderr)
+    if key not in _CONFIG_KEYS:
+        print(f"Unknown key: {key}. Valid keys: {', '.join(_CONFIG_KEYS)}. "
+              f"The kernel roots are edited with add-root and remove-root.", file=sys.stderr)
         sys.exit(1)
 
 

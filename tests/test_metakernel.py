@@ -937,8 +937,10 @@ class TestVerifyMetakernel:
         db.close()
 
     def test_verify_detects_ambiguous_when_two_active_rows(self, tmp_path):
-        """C3: if two non-superseded kernels rows share a filename, verify
-        must flag AMBIGUOUS — resolution would be non-deterministic."""
+        """C3: if two non-superseded kernels rows share a filename and the
+        resolved path is not a registered location, verify must flag
+        AMBIGUOUS. A registered path is pinned by its own location row, so a
+        same-named kernel in another mission or root is no ambiguity (#48)."""
         db, out, _ = self._build_rewritten_mk(tmp_path)
         # Insert a phantom second active kernels row for naif0012.tls
         fake_hash = "a" * 64
@@ -947,6 +949,11 @@ class TestVerifyMetakernel:
             "size_bytes, superseded_by) VALUES (?, ?, 'lsk', 3, NULL)",
             [fake_hash, "naif0012.tls"],
         )
+        result = db.verify_metakernel(out)
+        assert result["fatal"] is False
+        assert all(e["status"] == "OK" for e in result["entries"])
+
+        db.con.execute("DELETE FROM locations WHERE abs_path LIKE '%/naif0012.tls'")
         result = db.verify_metakernel(out)
         assert result["fatal"] is True
         assert any(e["status"] == "AMBIGUOUS" for e in result["entries"])
@@ -1028,7 +1035,7 @@ class TestUpdateUnreachableMetakernel:
         (tmp_path / "x.tm").write_text("\\begintext\n")
         url = "https://naif.example/JUICE/kernels/mk/old.tm"
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES "
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES "
             "(?, ?, ?, ?, current_timestamp)",
             [mk_path, "JUICE", url, "old.tm"],
         )
@@ -1052,7 +1059,7 @@ class TestUpdateUnreachableMetakernel:
         (tmp_path / "x.tm").write_text("\\begintext\n")
         url = "https://naif.example/JUICE/kernels/mk/old.tm"
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES "
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES "
             "(?, ?, ?, ?, current_timestamp)",
             [mk_path, "JUICE", url, "old.tm"],
         )
@@ -1083,7 +1090,7 @@ class TestPruneMetakernels:
             p.write_text("\\begintext\n")
             paths.append(p)
             db.con.execute(
-                "INSERT INTO metakernel_registry VALUES "
+                "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES "
                 "(?, ?, ?, ?, current_timestamp)",
                 [str(p), "JUICE", url, fname],
             )

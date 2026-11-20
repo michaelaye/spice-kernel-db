@@ -60,7 +60,7 @@ spice-kernel-db scan /path/to/kernels
 
 By default, the tool skips files that match both the expected size and SHA-256 hash. If files were corrupted or partially downloaded, they'll be re-downloaded. Use `--force` to bypass all skip checks.
 
-If the *same* kernels re-download on every `get` or `update --execute` although they are byte-correct on disk, run `spice-kernel-db check <metakernel>` or `spice-kernel-db stats`. A non-zero **poisoned rows** count means those kernels are flagged as superseded by content that no longer exists anywhere (typically a pre-0.17.0 interrupted download or a Dropbox conflict copy that was later cleaned up), so resolution skips them. `spice-kernel-db scan <kernel_dir>` re-registers the files and clears the flag.
+If the *same* kernels re-download on every `get` or `update --execute` although they are byte-correct on disk, run `spice-kernel-db check <metakernel>` or `spice-kernel-db stats`. A non-zero **poisoned rows** count means those kernels are flagged as superseded by content that no longer exists anywhere (typically a pre-0.17.0 interrupted download or a Dropbox conflict copy that was later cleaned up), so resolution skips them. `spice-kernel-db scan <directory>` on the directory holding the files re-registers them and clears the flag.
 
 Before 0.20.0 this could also happen to intact files. The skip check needs the remote size, and a HEAD request that failed was silently recorded as "size unknown" — which the check reads as "cannot confirm", so the file was fetched again. Such kernels show as `unknown` in the size column. Size queries now retry and reuse connections, so a transient failure no longer costs you a download.
 
@@ -141,7 +141,7 @@ Or edit `~/.config/spice-kernel-db/config.toml` directly:
 path = "~/.local/share/spice-kernel-db/kernels.duckdb"
 
 [storage]
-kernel_dir = "~/.local/share/spice-kernel-db/kernels"
+kernel_dirs = ["~/.local/share/spice-kernel-db/kernels"]
 ```
 
 
@@ -219,11 +219,25 @@ After a `get` or `rewrite`, `spice-kernel-db check <mk>` walks every entry throu
 |--------|---------------|------------|
 | `DANGLING` | Symlink target moved or was deleted | Re-run `get` on this metakernel — the fixed `_link_existing_kernels` now repairs dangling links. |
 | `HASH_MISMATCH` (deep mode) | File was modified after registration | `clean --execute` to drop the location, then re-`get` to fetch a clean copy. |
-| `AMBIGUOUS` | Two non-superseded `kernels` rows share this filename | Indicates the DB has two distinct files with the same name. Use `find_by_filename` in the Python API to see them, decide which to keep, and `clean` the other. |
+| `AMBIGUOUS` | The entry resolves to a path the database has not registered, and two non-superseded `kernels` rows share its filename | A path the database knows is never ambiguous, even when another mission or kernel root holds a different file of the same name. Run `scan` so the path is registered. If the entry should still be ambiguous, use `find_by_filename` in the Python API to see the rows, decide which to keep, and `clean` the other. |
 | `UNREGISTERED` | File on disk but no `kernels` row | Run `scan <dir>` on the directory containing it. |
 | `BAD_PATH_VALUE` | `PATH_VALUES` not absolute | Use `get` (which writes absolute paths) instead of editing `.tm` files by hand. |
 | `TRAVERSAL` | A `KERNELS_TO_LOAD` entry escapes `PATH_VALUES` | The metakernel is malformed or hostile — don't `furnsh` it. |
 
+
+## `check` says `SIZE_MISMATCH` with "expected 0", or `doctor` lists a path under more than one hash
+
+One file on disk can have two `locations` rows: one for its real content and one for different content, typically a 0-byte row left by an interrupted download. `skd doctor` lists the path under "Paths registered under more than one hash". `check` compares the file with the wrong row and reports `SIZE_MISMATCH` with a detail such as `size 31200000 != expected 0`.
+
+Run `skd scan <directory>` on the directory that holds the file. The scan keeps the row that matches the file on disk and marks the other rows superseded. Run `skd doctor` again to confirm the list is empty.
+
+## Mission `SPICE-KERNEL-DB`, or "Cross-mission: 102 kernels" (fixed, #43)
+
+A metakernel in skd's default store, for example `~/.local/share/spice-kernel-db/kernels/JUICE/mk/x.tm`, was given the mission `SPICE-KERNEL-DB`. The path guess took the directory that holds the store as the mission. `check` then reported kernels as resolved from another mission, `Cross-mission: 102 kernels` in one case.
+
+Two changes fix it. A tracked metakernel's mission now comes from its registry row (`skd ls` shows it) and is never guessed from the path again. For a file under a configured kernel root, the mission is the first directory below the root (`JUICE`); see [Several kernel roots](cli.qmd#several-kernel-roots).
+
+A registry row written by an earlier version keeps its wrong mission until the metakernel is imported again. `skd import <path>` replaces the row, and `--mission JUICE` sets the mission explicitly.
 
 ## Mission has no metakernel directory at the default path
 

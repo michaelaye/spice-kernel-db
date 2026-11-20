@@ -31,6 +31,25 @@ Matching is case-insensitive; `--mission` narrows it to one mission. A base name
 
 The same terminal rule applies to every other picker (`get` with no argument, `which` with no argument, an ambiguous body name in `coverage`): a script never blocks on a prompt. Python callers get the same resolution from `KernelDB.resolve_metakernel()`.
 
+## Several kernel roots
+
+The configuration holds an ordered list of kernel roots: `kernel_dirs` in the `[storage]` section of `config.toml`. A root is a directory of kernels laid out as `<root>/<mission>/<type>/<file>`. The default store is one root. A second root is typically another tool's store, such as planetarypy's, or a directory of kernels you already had.
+
+| Command | What the roots change |
+|:---|:---|
+| `get` | Downloads into the **first** root only, the download target. |
+| `scan` | With no directory, scans every root in turn and skips a root that does not exist, saying so. With a directory, scans just that one. `--archive` moves files into the first root. |
+| `which`, `check` | Resolve against every file the database knows, so a kernel that lives in any scanned root is found. |
+| `dedup` | Plans over every location in the database, so a kernel in one root and its identical twin in another are linked. |
+
+`dedup` keeps a copy in the `generic` mission when there is one and otherwise the first path in sort order. The order of the roots plays no part, so run `skd dedup` without `--execute` first and read the plan.
+
+A root is only searched once it has been scanned. After `skd config add-root <dir>`, run `skd scan` to index it.
+
+The mission of a file found under a root is the first directory below the root. A file directly in a root, or in a type directory such as `mk` or `spk`, gets its mission from the filename alone. Outside every root the mission is guessed from the path as before. A tracked metakernel keeps the mission in its registry row: `check`, `rewrite` and `coverage` read it from there and never guess it from the path again.
+
+Edit the list with `skd config add-root <dir>` and `skd config remove-root <dir>` (see [`config`](#config)). From Python, use `kernel_roots()`, `add_kernel_root()` and `remove_kernel_root()` ([API](api.qmd#kernel-roots)).
+
 ## Verbs at a glance
 
 The last column says what changed with the rename in issue #47. The old names are listed in [Renamed commands](#renamed-commands).
@@ -47,15 +66,15 @@ The last column says what changed with the rename in issue #47. The old names ar
 | `stats` | inspect | Database statistics, then the duplicate kernels. | now includes the duplicate report |
 | `check <mk>` | inspect | Three verdicts: present, resolves, matches remote. | unchanged since #46 |
 | `doctor` | inspect | Database health: poisoned rows, files gone from disk. | unchanged since #46 |
-| `scan <dir>` | maintain | Indexes every kernel file under a directory. | never prompts |
-| `import <mk-file>` | maintain | Tracks a metakernel that is already on disk. | new |
+| `scan [dir]` | maintain | Indexes every kernel file under a directory, or under every kernel root when none is given. | never prompts; directory optional since #48 |
+| `import <mk-file>` | maintain | Tracks a metakernel that is already on disk; `--unofficial` marks one assembled locally. | new |
 | `rewrite <mk>` | maintain | Writes a metakernel with a local symlink tree. | unchanged |
 | `rm <mk>` | maintain | Stops tracking a metakernel; the file stays. | renamed from an option |
 | `clean` | maintain | Drops rows and symlinks that point at nothing. | renamed, options regrouped |
 | `dedup` | maintain | Replaces duplicate kernel files with symlinks. | unchanged |
 | `reset` | maintain | Deletes the database. | moved to the maintain group |
 | `mission add/list/remove` | configure | Manages configured missions. | unchanged |
-| `config` | configure | Shows or updates the configuration. | unchanged |
+| `config` | configure | Shows or updates the configuration, including the kernel roots. | `add-root` and `remove-root` added (#48) |
 
 ## `browse`
 
@@ -264,7 +283,7 @@ skd ls JUICE
 └─────────┴───────────────────────┴─────────┴───────────────────────┘
 ```
 
-The **Source** column shows the host the metakernel was fetched from; it is empty for a metakernel added by `scan` or `import`. When two tracked metakernels list the same kernels, the second carries a line `↳ identical to <first>`. With nothing tracked, `ls` prints `No tracked metakernels.`
+The **Source** column shows the host the metakernel was fetched from; it is empty for a metakernel added by `scan` or `import`. When two tracked metakernels list the same kernels, the second carries a line `↳ identical to <first>`. With nothing tracked, `ls` prints `No tracked metakernels.` A metakernel imported with `--unofficial` carries the word `unofficial` after its name.
 
 
 ## `show`
@@ -306,7 +325,7 @@ Metakernel: juice_ops.tm
   Total: 3 | In DB: 2 | Missing: 1
 ```
 
-The **Source** line is absent for a metakernel added by `scan` or `import`. **Status** is `in db` when the kernel resolves to a file in the database and `missing` otherwise.
+The **Source** line is absent for a metakernel added by `scan` or `import`. A metakernel imported with `--unofficial` has the line `Official:     no (assembled locally, not an archive metakernel)` below **Acquired**. **Status** is `in db` when the kernel resolves to a file in the database and `missing` otherwise.
 
 `show` also takes a `.tm` file that is not tracked. It lists the kernels the file loads, with the type counts and the `(+N aliases)` marks, and ends with `Not tracked; spice-kernel-db import <path> tracks it.` A name that matches nothing, and is not a file, exits 1.
 
@@ -386,7 +405,7 @@ skd stats
 
 The statistics are the unique kernels, total locations, total size, number of duplicates, poisoned rows, registered missions, and a breakdown by kernel type.
 
-A **poisoned row** is a kernel that is present on disk but flagged as superseded by content that exists nowhere. Such a kernel is re-downloaded on every `update --execute`. The count is highlighted when non-zero; `scan <kernel_dir>` repairs it.
+A **poisoned row** is a kernel that is present on disk but flagged as superseded by content that exists nowhere. Such a kernel is re-downloaded on every `update --execute`. The count is highlighted when non-zero; `scan <directory>` on the directory holding the file repairs it.
 
 The duplicate section lists each kernel that exists in two or more locations, largest first and at most 30, showing the paths and missions of every copy, with a total wasted space calculation. It reads `No duplicates found.` when there are none. `dedup` replaces the copies with symlinks.
 
@@ -442,9 +461,13 @@ Per-entry statuses behind the *resolves* verdict (shown as a table only when som
 | `TRAVERSAL` | resolves | Entry resolves outside every `PATH_VALUE` root |
 | `SIZE_MISMATCH` | resolves | File size disagrees with the database record |
 | `HASH_MISMATCH` | resolves | (`--hash`) SHA-256 disagrees with the database record |
-| `AMBIGUOUS` | resolves | Several non-superseded `kernels` rows for the same filename |
+| `AMBIGUOUS` | resolves | The resolved path is not registered and several non-superseded `kernels` rows carry its filename |
 | `BAD_PATH_VALUE` | resolves | `PATH_VALUES` entry not absolute or directory missing |
 | `UNREGISTERED` | none | File exists but no `kernels` row; `scan` registers it |
+
+The resolved path pins the file. When an entry resolves to a path the database has registered as a location (or to a symlink whose target is one), that location's size and hash are the expectation, whatever other missions or kernel roots call a file by the same name. Two stores can each hold a different `naif0012.tls` without either entry being flagged. Only an unregistered path falls back to the filename, where several active rows give `AMBIGUOUS`.
+
+`check` takes the mission of a tracked metakernel from its registry row, not from its path.
 
 If the metakernel was fetched from a remote server, `check` also says when a newer version is listed there (one directory listing, nothing downloaded).
 
@@ -457,26 +480,31 @@ Database health, nothing per metakernel.
 skd doctor [--json]
 ```
 
-Reports the table counts, poisoned supersession rows (a kernel present on disk but flagged as superseded by content that exists nowhere, so every `update --execute` re-downloads it; `scan <kernel_dir>` repairs it), kernel locations whose file is gone (`clean --execute` removes them) and tracked metakernels whose file is gone (`rm <name>`). Exits 1 only on poisoned rows; a missing file is listed and does not change the exit code.
+Reports the table counts, poisoned supersession rows (a kernel present on disk but flagged as superseded by content that exists nowhere, so every `update --execute` re-downloads it; `scan <directory>` on the directory holding the file repairs it), kernel locations whose file is gone (`clean --execute` removes them), paths registered under more than one hash and tracked metakernels whose file is gone (`rm <name>`). Exits 1 only on poisoned rows; a missing file or a path with several hashes is listed and does not change the exit code.
+
+A path registered under more than one hash is one file with several `locations` rows, for example a 0-byte row left by an interrupted download beside the row for the real content. `check` reports such a path as `SIZE_MISMATCH` against the wrong row. `scan <directory>` on the directory holding the file keeps the row that matches the file on disk and marks the other rows superseded.
 
 
 ## `scan`
 
-Recursively scan a directory and register all kernel files.
+Recursively scan a directory and register all kernel files. With no directory, scan every configured kernel root in turn (see [Several kernel roots](#several-kernel-roots)).
 
 ```bash
-skd [-v] scan <directory> [--mission NAME] [--archive]
+skd [-v] scan [directory] [--mission NAME] [--archive]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `directory` | Root directory to scan recursively |
+| `directory` | Directory to scan recursively. Default: each kernel root in the configuration. |
 | `--mission` | Override auto-detected mission name |
-| `--archive` | Move files to the configured kernel directory and leave symlinks at the original locations |
+| `--archive` | Move files to the first kernel root and leave symlinks at the original locations |
 
 With the root option `-v`, `scan` prints each registered file. After the scan it prints the database statistics.
 
 ```bash
+# Every configured kernel root
+skd scan
+
 # Auto-detect mission from path structure
 skd scan /data/spice/JUICE/kernels
 
@@ -490,7 +518,9 @@ skd -v scan /data/spice/MRO/kernels
 skd scan /tmp/downloaded_kernels --mission JUICE --archive
 ```
 
-With `--archive`, each kernel file is moved into the configured kernel directory (organized as `{kernel_dir}/{mission}/{type}/{filename}`) and a symlink is left at the original location. This lets you import kernels from anywhere while keeping the original paths functional.
+With `--archive`, each kernel file is moved into the first kernel root (organized as `{first_root}/{mission}/{type}/{filename}`) and a symlink is left at the original location. This lets you import kernels from anywhere while keeping the original paths functional.
+
+A `.tm` file that `scan` meets is tracked as well. When it is already tracked, `scan` keeps the mission and the `official` flag of its registry row, because a scan only guesses them. `get` and `import` state them and replace the row.
 
 `scan` never prompts, so it is safe in a script. When it meets a mission that is not configured yet, it does one of two things:
 
@@ -509,13 +539,14 @@ Symlinks require filesystem support. On Windows, Developer Mode or administrator
 Track a metakernel that is already on disk, without downloading anything.
 
 ```bash
-skd import <metakernel-file> [--mission NAME]
+skd import <metakernel-file> [--mission NAME] [--unofficial]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `metakernel-file` | Path to the `.tm` file |
-| `--mission` | Override auto-detected mission name (default: guessed from the path) |
+| `--mission` | Override auto-detected mission name (default: the directory below the kernel root when the file is under one, otherwise guessed from the path) |
+| `--unofficial` | Mark the metakernel as assembled locally, not an archive metakernel. `ls` appends `unofficial` to its name and `show` prints `Official: no`. |
 
 ```bash
 skd import ~/spice/JUICE/mk/juice_ops.tm
@@ -527,6 +558,8 @@ skd import ~/spice/JUICE/mk/juice_ops.tm
 ```
 
 `import` resolves each entry of the file through its own `PATH_VALUES` and `PATH_SYMBOLS`, registers the kernels that exist on disk, indexes the entries, and adds the registry row with no source URL. It makes no network request. After it, the metakernel works with `show`, `check`, `which --metakernel`, `rewrite` and `coverage`. Use `scan` instead to register a whole directory of kernels.
+
+The registry keeps an `official` flag for each metakernel. It is true unless `--unofficial` is given. Use `--unofficial` for a metakernel built on this machine, such as a subsetter's output or the one planetarypy assembles in `archived_kernels.py`, so that it is not mistaken for one published by an archive.
 
 
 ## `rewrite`
@@ -757,13 +790,17 @@ Show or update configuration.
 skd config [--setup]
 skd config get <key>
 skd config set <key> <value>
+skd config add-root <dir>
+skd config remove-root <dir>
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--setup` | Re-run the interactive first-time setup |
-| `get <key>` | Print one setting. The keys are `db_path` and `kernel_dir`. |
-| `set <key> <value>` | Change one setting and save it. |
+| `get <key>` | Print one setting. The keys are `db_path` and `kernel_dir`; `kernel_dir` is the first kernel root. Any other key, `kernel_dirs` included, is refused with a pointer to `add-root` and `remove-root`. |
+| `set <key> <value>` | Change one setting and save it. `set kernel_dir` replaces the first kernel root. |
+| `add-root <dir>` | Append a directory to the kernel roots and save. The directory is created when missing. A directory that is already a root is not added twice. |
+| `remove-root <dir>` | Remove a directory from the kernel roots and save. The last root cannot be removed. Files on disk and database rows stay as they are; `clean` drops rows whose file is gone. |
 
 ```bash
 # Show current settings
@@ -775,9 +812,16 @@ skd config --setup
 # Read or change one setting
 skd config get kernel_dir
 skd config set kernel_dir ~/Dropbox/spice-kernels
+
+# Add a second store, then index it
+skd config add-root ~/planetarypy_data/spice_kernels
+skd scan
+
+# Stop using it
+skd config remove-root ~/planetarypy_data/spice_kernels
 ```
 
-Without arguments, prints the current configuration: database path, kernel directory, and config file location.
+Without arguments, prints the current configuration: config file location, database path and the kernel roots, one per line. With more than one root, the first is marked `(download target)`. `add-root` and `remove-root` print the same listing afterwards, and `add-root` reminds you to scan the new root.
 
 
 ## Renamed commands

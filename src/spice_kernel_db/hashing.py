@@ -74,41 +74,60 @@ def canonicalize_mission(name: str | None) -> str:
     return s.upper()
 
 
-def guess_mission(filepath: str) -> str:
+_KERNEL_TYPE_DIRS = frozenset({"ck", "spk", "pck", "fk", "ik", "lsk", "sclk", "dsk", "mk"})
+
+
+def guess_mission(filepath: str, roots: list[Path] | None = None) -> str:
     """Best-effort mission name from path components.
 
-    Heuristic: look for a directory named before 'kernels/' that isn't
-    a generic infrastructure name, then fall back to kernel-type directory
-    patterns, then to filename patterns. Result is run through
-    :func:`canonicalize_mission` for consistent casing.
+    Under one of *roots* (the configured kernel roots, #48) the mission is
+    the first component after the root: skd's own store is laid out as
+    ``<root>/<MISSION>/<type>/<file>``, and reading it any other way gave
+    the store directory as the mission (#43). Elsewhere: a directory before
+    ``kernels/`` that is not a generic infrastructure name, then a
+    kernel-type directory's parent, then filename patterns. Result is run
+    through :func:`canonicalize_mission` for consistent casing.
     """
-    _KERNEL_TYPE_DIRS = {"ck", "spk", "pck", "fk", "ik", "lsk", "sclk", "dsk", "mk"}
-    parts = Path(filepath).parts
+    path = Path(filepath)
+    if roots:
+        resolved = path.expanduser().resolve()
+        for r in roots:
+            try:
+                rel = resolved.relative_to(r)
+            except ValueError:
+                continue
+            if len(rel.parts) > 1 and rel.parts[0].lower() not in _KERNEL_TYPE_DIRS:
+                return canonicalize_mission(rel.parts[0])
+            # Under a root but in no mission directory: only the filename can say.
+            return _guess_from_filename(path)
+    parts = path.parts
     # Pattern: .../MISSION/kernels/...
-    for i, p in enumerate(parts):
-        if p.lower() == "kernels" and i > 0:
+    for i, part in enumerate(parts):
+        if part.lower() == "kernels" and i > 0:
             candidate = parts[i - 1]
             if candidate.lower() not in ("naif", "pub", "data", "spice"):
                 return canonicalize_mission(candidate)
 
     # Pattern: .../MISSION/<kernel_type>/file (no intermediate kernels/ dir)
-    for i, p in enumerate(parts):
-        if p.lower() in _KERNEL_TYPE_DIRS and i > 0:
+    for i, part in enumerate(parts):
+        if part.lower() in _KERNEL_TYPE_DIRS and i > 0:
             candidate = parts[i - 1]
             if candidate.lower() not in (
                 "naif", "pub", "data", "spice", "kernels",
             ) and "generic" not in candidate.lower():
                 return canonicalize_mission(candidate)
 
-    # Fallback: known mission names in filename
-    name = Path(filepath).stem.lower()
+    return _guess_from_filename(path)
+
+
+def _guess_from_filename(p: str | Path) -> str:
+    """Known mission names, then generic prefixes, in the filename alone."""
+    name = Path(p).stem.lower()
     for mission in _KNOWN_MISSIONS:
         if mission in name:
             return canonicalize_mission(mission)
-
     if name.startswith(_GENERIC_PREFIXES):
         return "generic"
-
     return "unknown"
 
 

@@ -1567,7 +1567,7 @@ class TestH6StalenessDatetimeComparison:
         (tmp_path / "x.tm").write_text("\\begintext\n")
         acq = datetime(2025, 11, 27, 14, 30, 45)
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES (?, ?, ?, ?, ?)",
             [mk_path, "JUICE", "https://e.example/mk/x.tm", "x.tm", acq],
         )
 
@@ -1601,7 +1601,7 @@ class TestH6StalenessDatetimeComparison:
         (tmp_path / "x.tm").write_text("\\begintext\n")
         acq = datetime(2025, 11, 27, 14, 30, 45)
         db.con.execute(
-            "INSERT INTO metakernel_registry VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) VALUES (?, ?, ?, ?, ?)",
             [mk_path, "JUICE", "https://e.example/mk/x.tm", "x.tm", acq],
         )
         same_minute = RemoteMetakernel(
@@ -1779,7 +1779,7 @@ class TestPoisonedRowsAreReported:
         out = capsys.readouterr().out
         assert "Poisoned supersession rows: 1" in out
         assert "pck00011.tpc" in out and str(p) in out
-        assert "scan <kernel_dir>" in out
+        assert "scan <directory>" in out
 
     def test_check_is_silent_and_exits_0_when_clean(self, tmp_path, capsys):
         from unittest.mock import patch

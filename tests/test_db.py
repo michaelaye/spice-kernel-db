@@ -183,7 +183,7 @@ class TestResolveKernel:
         """A .tm file tracked only in metakernel_registry is resolvable."""
         mk = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
         populated_db.con.execute(
-            "INSERT OR REPLACE INTO metakernel_registry "
+            "INSERT OR REPLACE INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) "
             "VALUES (?, ?, ?, ?, current_timestamp)",
             [str(mk), "JUICE", "https://example.com/juice_test.tm",
              "juice_test.tm"],
@@ -200,7 +200,7 @@ class TestResolveKernel:
         """Resolving a .tm registered in another mission emits a warning."""
         mk = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
         populated_db.con.execute(
-            "INSERT OR REPLACE INTO metakernel_registry "
+            "INSERT OR REPLACE INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) "
             "VALUES (?, ?, ?, ?, current_timestamp)",
             [str(mk), "JUICE", "https://example.com/juice_test.tm",
              "juice_test.tm"],
@@ -347,6 +347,224 @@ class TestConfig:
         config_file = tmp_path / "nonexistent" / "config.toml"
         monkeypatch.setattr("spice_kernel_db.config.CONFIG_FILE", config_file)
         assert load_config() is None
+
+
+class TestKernelRoots:
+    """#48: several kernel roots in config.toml, the official flag, and (#43)
+    a tracked metakernel's mission taken from the registry, not its path."""
+
+    @staticmethod
+    def _store(root: Path, mission: str, tls: str = "LSK") -> Path:
+        """``<root>/<MISSION>/{lsk,mk}`` with one leapsecond kernel and one
+        metakernel listing it; returns the metakernel path."""
+        (root / mission / "lsk").mkdir(parents=True)
+        (root / mission / "mk").mkdir(parents=True)
+        (root / mission / "lsk" / "naif0012.tls").write_text(tls)
+        mk = root / mission / "mk" / f"{mission.lower()}_ops.tm"
+        mk.write_text(
+            "\\begindata\n"
+            f"PATH_VALUES = ( '{root / mission}' )\n"
+            "PATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/lsk/naif0012.tls' )\n"
+            "\\begintext\n"
+        )
+        return mk
+
+    # C26
+    def test_config_roots_round_trip(self, tmp_path):
+        from spice_kernel_db.config import CONFIG_FILE
+
+        cfg = Config(db_path="/tmp/t.duckdb", kernel_dirs=["/a", "/b"])
+        assert cfg.kernel_dir == "/a"
+        save_config(cfg)
+        loaded = load_config()
+        assert loaded.kernel_dirs == ["/a", "/b"] and loaded.kernel_dir == "/a"
+        # a config written before #48: one kernel_dir key
+        CONFIG_FILE.write_text('[database]\npath = "/tmp/t.duckdb"\n\n'
+                               '[storage]\nkernel_dir = "/old"\n')
+        old = load_config()
+        assert old.kernel_dirs == ["/old"] and old.kernel_dir == "/old"
+        old.kernel_dir = "/new"
+        assert old.kernel_dirs == ["/new"]
+
+    # C27
+    def test_add_and_remove_root(self, tmp_path, capsys):
+        from spice_kernel_db import add_kernel_root, kernel_roots, remove_kernel_root
+        from spice_kernel_db.cli import main
+
+        save_config(Config(db_path=str(tmp_path / "t.duckdb"), kernel_dir=str(tmp_path / "one")))
+        two = tmp_path / "two"
+        cfg = add_kernel_root(two)
+        assert cfg.kernel_dirs == [str(tmp_path / "one"), str(two)] and two.is_dir()
+        assert add_kernel_root(two).kernel_dirs == cfg.kernel_dirs  # idempotent
+        assert kernel_roots() == [tmp_path / "one", two]
+        with pytest.raises(ValueError, match="not a configured"):
+            remove_kernel_root(tmp_path / "three")
+        assert remove_kernel_root(two).kernel_dirs == [str(tmp_path / "one")]
+        with pytest.raises(ValueError, match="only kernel root"):
+            remove_kernel_root(tmp_path / "one")
+
+        main(["config", "add-root", str(two)])
+        out = capsys.readouterr().out
+        assert "(download target)" in out and str(two) in out and "scan" in out
+        with pytest.raises(SystemExit) as exc:
+            main(["config", "remove-root", str(tmp_path / "nope")])
+        assert exc.value.code == 1
+        main(["config"])
+        assert str(two) in capsys.readouterr().out
+
+    def test_ensure_config_seeds_first_root(self, tmp_path, monkeypatch):
+        from spice_kernel_db.config import ensure_config
+
+        monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("prompted"))
+        seed = tmp_path / "planetarypy_data" / "spice_kernels"
+        cfg = ensure_config(seed_root=seed)
+        assert cfg.kernel_dirs == [str(seed)] and seed.is_dir()
+        assert load_config().kernel_dir == str(seed)
+        # an existing config is never changed by the seed
+        assert ensure_config(seed_root=tmp_path / "other").kernel_dirs == [str(seed)]
+
+    # C28
+    def test_guess_mission_under_a_root(self, tmp_path):
+        store = tmp_path / ".local" / "share" / "spice-kernel-db" / "kernels"
+        mk = self._store(store, "JUICE")
+        assert guess_mission(str(mk)) == "SPICE-KERNEL-DB"  # the #43 misreading
+        assert guess_mission(str(mk), [store]) == "JUICE"
+        assert guess_mission(str(store / "lsk" / "naif0012.tls"), [store]) == "generic"  # no mission dir
+        assert guess_mission("/data/MRO/kernels/ck/mro.bc", [store]) == "MRO"  # outside: heuristic
+
+    @pytest.fixture
+    def two_roots(self, tmp_path):
+        """Two configured roots, each with one mission store, the first
+        scanned; ``run`` returns the exit code of ``skd ...``."""
+        from types import SimpleNamespace
+
+        from spice_kernel_db.cli import main
+
+        one, two = tmp_path / "one", tmp_path / "two"
+        mk1 = self._store(one, "JUICE", "LSK ONE")
+        mk2 = self._store(two, "MRO", "LSK ONE")  # the same bytes under a second root
+        (two / "MRO" / "lsk" / "only_in_two.tls").write_text("ONLY TWO")
+        db_path = tmp_path / "t.duckdb"
+        save_config(Config(db_path=str(db_path), kernel_dirs=[str(one), str(two)]))
+        db = KernelDB(db_path)
+        db.scan_directory(one)
+        db.close()
+
+        def run(*argv: str) -> int:
+            with patch.object(KernelDB, "newer_remote_version", lambda *a, **k: None):
+                try:
+                    main(["--db", str(db_path), *argv])
+                except SystemExit as exc:
+                    return exc.code or 0
+            return 0
+
+        return SimpleNamespace(one=one, two=two, mk1=mk1, mk2=mk2, db_path=db_path, run=run)
+
+    # C29
+    def test_check_uses_the_registry_mission(self, two_roots, capsys):
+        assert two_roots.run("scan", str(two_roots.two)) == 0
+        out = capsys.readouterr().out
+        assert "MRO" in out and "SPICE-KERNEL-DB" not in out
+        assert two_roots.run("check", "juice_ops.tm") == 0
+        out = capsys.readouterr().out
+        assert "Mission:        JUICE" in out and "Cross-mission" not in out
+        db = KernelDB(two_roots.db_path, read_only=True)
+        try:
+            assert {r.mission for r in db.registry_rows()} == {"JUICE", "MRO"}
+        finally:
+            db.close()
+
+    # C30
+    def test_second_root_resolves_and_dedups(self, two_roots, capsys):
+        assert two_roots.run("which", "only_in_two.tls") == 1  # not scanned yet
+        capsys.readouterr()
+        assert two_roots.run("scan") == 0  # C31: no directory means every root
+        out = capsys.readouterr().out
+        assert out.count("Scanned ") == 2
+        assert two_roots.run("which", "only_in_two.tls") == 0
+        assert capsys.readouterr().out.splitlines()[0] == str(
+            two_roots.two / "MRO" / "lsk" / "only_in_two.tls")
+        assert two_roots.run("dedup") == 0
+        out = capsys.readouterr().out
+        assert "WOULD replace" in out and "naif0012.tls" in out
+        assert str(two_roots.one) in out and str(two_roots.two) in out
+
+    def test_scan_repairs_a_path_registered_under_two_hashes(self, two_roots, capsys):
+        """#48: a 0-byte registration from an interrupted download sat beside
+        the real row for the same path; check compared against size 0, doctor
+        said nothing, and scan superseded only one of the stale rows."""
+        tls = two_roots.one / "JUICE" / "lsk" / "naif0012.tls"
+        db = KernelDB(two_roots.db_path)
+        for sha in ("0" * 64, "1" * 64):
+            db.con.execute("INSERT INTO kernels (sha256, filename, kernel_type, size_bytes) "
+                           "VALUES (?, 'naif0012.tls', 'lsk', 0)", [sha])
+            db.con.execute("INSERT INTO locations (sha256, abs_path, mission) VALUES (?, ?, 'JUICE')",
+                           [sha, str(tls)])
+        db.close()
+        assert two_roots.run("doctor") == 0
+        assert str(tls) in capsys.readouterr().out
+        assert two_roots.run("check", "juice_ops.tm") == 0  # the active, latest row wins
+        capsys.readouterr()
+        assert two_roots.run("scan", str(two_roots.one)) == 0
+        db = KernelDB(two_roots.db_path, read_only=True)
+        try:
+            rows = db.con.execute("SELECT sha256 FROM locations WHERE abs_path = ?", [str(tls)]).fetchall()
+            assert len(rows) == 1 and rows[0][0] not in ("0" * 64, "1" * 64)
+            assert db.doctor()["conflicting_locations"] == []
+        finally:
+            db.close()
+
+    # C32
+    def test_official_flag(self, two_roots, capsys, tmp_path):
+        import duckdb
+
+        # a database from before the column existed opens and migrates
+        old = tmp_path / "old.duckdb"
+        con = duckdb.connect(str(old))
+        con.execute("CREATE TABLE metakernel_registry (mk_path VARCHAR PRIMARY KEY, mission VARCHAR, "
+                    "source_url VARCHAR, filename VARCHAR, acquired_at TIMESTAMP)")
+        con.execute("CREATE TABLE metakernel_entries (mk_path VARCHAR, entry_index INTEGER, "
+                    "raw_entry VARCHAR, filename VARCHAR, PRIMARY KEY (mk_path, entry_index))")
+        con.execute("INSERT INTO metakernel_registry VALUES ('/x/a.tm', 'JUICE', NULL, 'a.tm', now())")
+        con.close()
+        db = KernelDB(old, read_only=True)  # no migration possible: reads as official
+        try:
+            assert db.registry_rows()[0].official is True
+            assert db.list_metakernels(show=False)[0]["official"] is True
+        finally:
+            db.close()
+        db = KernelDB(old)  # the first write connection migrates
+        try:
+            assert db.registry_rows()[0].official is True
+            assert "official" in db._columns("metakernel_registry")
+        finally:
+            db.close()
+
+        sub = tmp_path / "subset.tm"
+        shutil.copy(two_roots.mk1, sub)
+        assert two_roots.run("import", str(sub), "--mission", "JUICE", "--unofficial") == 0
+        assert two_roots.run("ls") == 0
+        out = capsys.readouterr().out
+        assert "subset.tm" in out and "unofficial" in out
+        assert out.count("unofficial") == 1  # juice_ops.tm is not marked
+        assert two_roots.run("show", "subset.tm") == 0
+        assert "Official:     no" in capsys.readouterr().out
+        assert two_roots.run("show", "juice_ops.tm") == 0
+        assert "Official:" not in capsys.readouterr().out
+
+        # a re-scan of the root keeps what import stated: the registry row is
+        # the authority for mission and official (#43, #48)
+        shutil.copy(sub, two_roots.one / "JUICE" / "mk" / "subset.tm")
+        assert two_roots.run("import", str(two_roots.one / "JUICE" / "mk" / "subset.tm"),
+                             "--mission", "MRO", "--unofficial") == 0
+        assert two_roots.run("scan", str(two_roots.one)) == 0
+        db = KernelDB(two_roots.db_path, read_only=True)
+        try:
+            row = db.registry_row(str(two_roots.one / "JUICE" / "mk" / "subset.tm"))
+            assert (row.mission, row.official) == ("MRO", False)
+        finally:
+            db.close()
 
 
 class TestArchiveOnScan:
