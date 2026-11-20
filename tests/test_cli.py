@@ -1297,13 +1297,19 @@ class TestVerbTree:
 
     # C16
     def test_help_lists_the_new_verbs_only(self, tracked, capsys):
+        # Click's own command table: Rich draws the help with ASCII boxes
+        # on a non-UTF-8 terminal (CI), so the text is not parsed.
+        import typer.main
+
+        from spice_kernel_db.cli import app
+
+        commands = typer.main.get_command(app).commands
+        assert {n for n, c in commands.items() if not c.hidden} == self.NEW_VERBS
+        assert {n for n, c in commands.items() if c.hidden} >= self.OLD_VERBS
         assert tracked.run("--help") == 0
         out = capsys.readouterr().out
-        listed = {line[2:].split()[0] for line in out.splitlines()
-                  if line.startswith("│ ") and line[2] not in " -"}
-        assert listed == self.NEW_VERBS
         for panel in ("acquire", "inspect", "maintain", "configure"):
-            assert f"─ {panel} ─" in out
+            assert panel in out
         assert "browse & acquire" not in out and "transform" not in out
 
     # C17
@@ -1346,12 +1352,6 @@ class TestVerbTree:
         assert tracked.run("mk", "--remove", "juice_crema_5_2.tm") == 0
         assert "note: 'mk --remove' is now 'rm'" in capsys.readouterr().err
         assert tracked.run("show", "juice_crema_5_2.tm") == 1
-
-    def test_old_names_are_hidden(self, tracked, capsys):
-        tracked.run("--help")
-        out = capsys.readouterr().out
-        for old in self.OLD_VERBS:
-            assert f"│ {old} " not in out
 
     # C18
     def test_get_on_a_tracked_name_uses_its_source(self, tracked, capsys):
