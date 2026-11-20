@@ -727,7 +727,7 @@ class TestUpdateMetakernelRaisesLookupError:
             INSERT INTO metakernel_registry (mk_path, filename, mission, source_url, acquired_at)
             VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP)
         """, ["/tmp/test.tm", "test.tm", "TEST"])
-        with pytest.raises(LookupError, match="added via scan"):
+        with pytest.raises(LookupError, match="added by scan or import"):
             db.update_metakernel("test.tm")
         db.close()
 
@@ -792,7 +792,7 @@ class TestRemoveMetakernel:
             kernel_dir=str(tmp_path / "kernels"),
         )
         with patch("spice_kernel_db.config.load_config", return_value=cfg):
-            main(["mk", "--remove", "stale.tm"])
+            main(["rm", "stale.tm"])
 
         # Row is gone — and we did not raise.
         db = KernelDB(db_path, read_only=True)
@@ -821,7 +821,7 @@ class TestResolveMetakernel:
         with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
             main([
                 "--db", str(tmp_spice_tree / "test.duckdb"),
-                "resolve", "--metakernel", str(mk_path),
+                "which", "--metakernel", str(mk_path),
                 "--mission", "JUICE",
             ])
 

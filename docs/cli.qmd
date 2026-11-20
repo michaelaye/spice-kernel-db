@@ -5,14 +5,13 @@ subtitle: "Command-line interface"
 
 On first run, the tool prompts for configuration (database path and kernel storage directory). These are saved to `~/.config/spice-kernel-db/config.toml`. All commands share a `--db` option to override the configured database path.
 
-The root options come before the command: `spice-kernel-db [--db PATH] [-v] COMMAND ...`.
-`spice-kernel-db --help` (or `-h`) lists the commands in four groups: browse & acquire,
-inspect, transform and configure. `spice-kernel-db --install-completion` installs shell
-completion for the current shell; `--show-completion` prints it instead.
+`spice-kernel-db` and `skd` are the same program. The examples use `skd`.
+
+The root options come before the command: `skd [--db PATH] [-v] COMMAND ...`. `-v` is a root option only; no command has its own `-v`. `skd --help` (or `-h`) lists the commands in four groups: acquire, inspect, maintain and configure. `skd --install-completion` installs shell completion for the current shell; `--show-completion` prints it instead.
 
 ## Naming a metakernel
 
-Every command that takes a metakernel (`check`, `list`, `verify`, `coverage`, `update`, `rewrite`, `metakernels`, `resolve --metakernel`) resolves the argument the same way. Any of these forms names the same tracked file:
+Every command that takes a metakernel (`show`, `check`, `coverage`, `rewrite`, `rm`, `which --metakernel`) resolves the argument the same way. `get` resolves a name that is not a URL against the tracked metakernels first. Any of these forms names the same tracked file:
 
 | Form | Example |
 |:---|:---|
@@ -30,395 +29,40 @@ Matching is case-insensitive; `--mission` narrows it to one mission. A base name
 | no argument, at a terminal | a numbered picker over the tracked metakernels | |
 | no argument, in a script or notebook (stdin not a terminal) | prints the candidates on stderr and stops | 2 |
 
-The same terminal rule applies to every other picker (`get` with no argument, `aliases` with no argument, an ambiguous body name in `coverage`): a script never blocks on a prompt. Python callers get the same resolution from `KernelDB.resolve_metakernel()`.
+The same terminal rule applies to every other picker (`get` with no argument, `which` with no argument, an ambiguous body name in `coverage`): a script never blocks on a prompt. Python callers get the same resolution from `KernelDB.resolve_metakernel()`.
 
-## `scan`
+## Verbs at a glance
 
-Recursively scan a directory and register all kernel files.
+The last column says what changed with the rename in issue #47. The old names are listed in [Renamed commands](#renamed-commands).
 
-```bash
-spice-kernel-db scan <directory> [--mission NAME] [-v] [--archive]
-```
-
-| Option | Description |
-|--------|-------------|
-| `directory` | Root directory to scan recursively |
-| `--mission` | Override auto-detected mission name |
-| `-v, --verbose` | Print each registered file |
-| `--archive` | Move files to the configured kernel directory and leave symlinks at the original locations |
-
-```bash
-# Auto-detect mission from path structure
-spice-kernel-db scan /data/spice/JUICE/kernels
-
-# Explicit mission label
-spice-kernel-db scan /data/spice/generic_kernels --mission generic
-
-# Verbose output
-spice-kernel-db scan /data/spice/MRO/kernels -v
-
-# Import kernels from a random directory into the central archive
-spice-kernel-db scan /tmp/downloaded_kernels --mission JUICE --archive
-```
-
-With `--archive`, each kernel file is moved into the configured kernel directory (organized as `{kernel_dir}/{mission}/{type}/{filename}`) and a symlink is left at the original location. This lets you import kernels from anywhere while keeping the original paths functional.
-
-::: {.callout-note}
-Symlinks require filesystem support. On Windows, Developer Mode or administrator privileges are needed. If symlink creation fails, the file is still moved and registered — only the symlink is skipped (with a warning).
-:::
-
-## `stats`
-
-Print database summary statistics.
-
-```bash
-spice-kernel-db stats
-```
-
-Shows unique kernels, total locations, total size, number of duplicates, poisoned rows, registered missions, and a breakdown by kernel type.
-
-A **poisoned row** is a kernel that is present on disk but flagged as superseded by content that exists nowhere. Such a kernel is re-downloaded on every `update`. The count is highlighted when non-zero; `scan <kernel_dir>` repairs it.
-
-
-## `duplicates`
-
-Report all duplicated kernels.
-
-```bash
-spice-kernel-db duplicates
-```
-
-Lists each kernel that exists in 2+ locations, showing all paths and missions, with a total wasted space calculation.
-
-
-## `check`
-
-Check a metakernel. Three questions, each answered on its own line with its own exit bit:
-
-| Verdict | Question | Exit bit | Runs |
+| Verb | Group | What it does | Since the rename |
 |:---|:---|:---|:---|
-| present | does every kernel the metakernel lists exist on disk? | 1 | always |
-| resolves | does every entry resolve through `PATH_VALUES`/`PATH_SYMBOLS` to the file the database knows (size, with `--hash` also SHA-256), with no traversal, dangling link or ambiguous name? | 2 | always |
-| matches remote | does every kernel's size (with `--hash` also its SHA-256) match the server? | 4 | `--remote` |
-
-The exit code is the sum, so a script can read it: `0` all green, `1` a kernel missing, `2` the metakernel does not resolve, `4` a kernel differs from the server, `5` missing plus differs, and so on. The output never collapses into one tick; a verdict that did not run says `not checked`. (Exit 2 is also the code for an ambiguous name or a usage error; those print their reason before any verdict runs.)
-
-```bash
-spice-kernel-db check [metakernel] [--remote] [--hash] [--spice] [--json] [--mission NAME] [-v]
-```
-
-| Option | Description |
-|--------|-------------|
-| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
-| `--remote` | Also compare each kernel's size with the server, one HEAD per kernel. The only network check. |
-| `--hash` | Compare SHA-256 against the database, and with `--remote` against the server (downloads each kernel, slow). |
-| `--spice` | With `--remote`, `furnsh` each local kernel and report what SPICE cannot read (requires spiceypy). |
-| `--json` | The three verdicts and their evidence as JSON, nothing else on stdout. |
-| `--mission` | Preferred mission for kernel resolution |
-| `-v, --verbose` | Full per-file warnings instead of the compact summary |
-
-```bash
-# At a terminal: pick from the tracked metakernels
-spice-kernel-db check
-
-# Local verdicts only
-spice-kernel-db check juice_crema_5_2
-
-# Before an analysis run: everything, including the server
-spice-kernel-db check juice_crema_5_2 --remote --hash
-
-# In a script
-spice-kernel-db check juice_crema_5_2 --json || echo "exit $?"
-```
-
-Per-entry statuses behind the *resolves* verdict (shown as a table only when something is wrong):
-
-| Status | Verdict | Meaning |
-|--------|---------|---------|
-| `OK` | — | Verified |
-| `NOT_FOUND`, `DANGLING` | present, or resolves when every kernel exists elsewhere | No file at the resolved path; `rewrite` points the metakernel at the local copies |
-| `NOT_FILE` | resolves | Path exists but isn't a regular file |
-| `TRAVERSAL` | resolves | Entry resolves outside every `PATH_VALUE` root |
-| `SIZE_MISMATCH` | resolves | File size disagrees with the database record |
-| `HASH_MISMATCH` | resolves | (`--hash`) SHA-256 disagrees with the database record |
-| `AMBIGUOUS` | resolves | Several non-superseded `kernels` rows for the same filename |
-| `BAD_PATH_VALUE` | resolves | `PATH_VALUES` entry not absolute or directory missing |
-| `UNREGISTERED` | none | File exists but no `kernels` row; `scan` registers it |
-
-If the metakernel was fetched from a remote server, `check` also says when a newer version is listed there (one directory listing, nothing downloaded).
-
-`verify` is a hidden alias of `check` (`--deep` is `--hash`) kept for old scripts; it prints a rename note on stderr. The database-wide report it used to carry is now `doctor`.
-
-
-## `doctor`
-
-Database health, nothing per metakernel.
-
-```bash
-spice-kernel-db doctor [--json]
-```
-
-Reports the table counts, poisoned supersession rows (a kernel present on disk but flagged as superseded by content that exists nowhere, so every `update` re-downloads it; `scan <kernel_dir>` repairs it), kernel locations whose file is gone (`prune --execute` removes them) and tracked metakernels whose file is gone (`mk --remove <name>`). Exits 1 only on poisoned rows; a missing file is listed and does not change the exit code.
-
-
-## `rewrite`
-
-Rewrite a metakernel with a local symlink tree.
-
-```bash
-spice-kernel-db rewrite <metakernel> -o <output> [--link-root DIR] [--mission NAME]
-```
-
-| Option | Description |
-|--------|-------------|
-| `metakernel` | Path to original `.tm` file |
-| `-o, --output` | Output `.tm` path (required) |
-| `--link-root` | Root for symlink tree (default: `kernels/` next to output) |
-| `--mission` | Mission name for preferred-mission resolution |
-
-```bash
-# Basic usage
-spice-kernel-db rewrite juice_crema_5_1.tm -o juice_local.tm
-
-# Custom symlink root
-spice-kernel-db rewrite juice_crema_5_1.tm -o juice_local.tm \
-    --link-root /data/spice/unified
-
-# Explicit mission
-spice-kernel-db rewrite juice_crema_5_1.tm -o juice_local.tm --mission JUICE
-```
-
-
-## `resolve`
-
-Find the local path for a single kernel filename.
-
-```bash
-spice-kernel-db resolve <filename> [--mission NAME]
-```
-
-| Option | Description |
-|--------|-------------|
-| `filename` | Kernel filename to look up |
-| `--mission` | Preferred mission for resolution |
-
-```bash
-spice-kernel-db resolve naif0012.tls --mission JUICE
-# /data/spice/JUICE/kernels/lsk/naif0012.tls
-
-spice-kernel-db resolve mro_sc_2024.bc --mission JUICE
-# /data/spice/MRO/kernels/ck/mro_sc_2024.bc
-#   ⚠ mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]
-```
-
-Prints the resolved path to stdout and any warnings to stderr.
-
-
-## `aliases`
-
-Show every filename a deduplicated kernel is known under. Content-addressed deduplication stores one physical file per unique content hash under a single canonical name; other filenames with identical content become aliases. This command lets you follow that trail from any name (or hash) back to the content and to all the sibling names it shares.
-
-```bash
-spice-kernel-db aliases [name-or-hash]
-```
-
-| Option | Description |
-|--------|-------------|
-| `name_or_hash` | A kernel filename (canonical *or* alias) or a SHA-256 (full or ≥6-char prefix). **Omit to pick from the deduplicated kernels interactively.** |
-
-```bash
-# Direct lookup
-spice-kernel-db aliases bc_mpo_hga_scm_20220101_20230101_s20221229_v01.bc
-
-# No argument → interactive picker over deduplicated kernels
-spice-kernel-db aliases
-```
-
-Prints the content hash, canonical name, kernel type and size, the full list of alias filenames (with the canonical one marked), and every on-disk location. With no argument it lists every deduplicated kernel (those whose content is shared under more than one filename), sorted most-aliased first, and lets you pick one. Exits non-zero if a supplied name or hash is unknown.
-
-The `get`, `update`, and `list` commands also annotate any deduplicated kernel inline with `(+N aliases)` in their kernel tables, pointing you at `aliases <name>` for the full trail.
-
-::: {.callout-tip}
-## Discover upstream aliases without deduplicating
-
-Because identity is content-based, `aliases` surfaces names an *archive* (e.g. ESA) publishes the same bytes under — revealing, for example, that a `_v13` kernel is byte-identical to `_v12`, or that two trajectory scenarios reuse the same solar-array/antenna kernels. This is a pure discovery feature: it needs **no `dedup` step** (symlinking duplicates is a separate, optional space-saving operation). See [Discovering archive-side aliases](design.qmd#content-identity).
-:::
-
-
-## `verify`
-
-Renamed: `verify <mk>` is `check <mk>`, `verify --deep` is `check --hash`, and the database-wide checks are `doctor`. The old name still works as a hidden alias and prints a note.
-
-
-## `prune`
-
-Remove stale database or filesystem state. Three mutually exclusive modes:
-
-```bash
-# Mode 1 (default): locations whose file no longer exists on disk
-spice-kernel-db prune [--execute]
-
-# Mode 2: metakernel registry rows whose source URL returns 4xx
-spice-kernel-db prune --metakernels [--execute] [--delete-files]
-
-# Mode 3: dangling symlinks under each mission's download tree
-spice-kernel-db prune --orphan-symlinks [--execute]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--execute` | Actually remove entries. Default: dry run. |
-| `--metakernels`, `--mk` | Metakernel-registry mode. Sends HEAD to each row's effective URL (`source_url` if set, otherwise `mission.mk_dir_url + filename`); 403/404/410 = dead. |
-| `--orphan-symlinks` | Walk each mission's download tree (derived from `metakernel_registry.mk_path`) recursively and find symlinks whose target no longer exists. These accumulate when an underlying kernel store moves, or after Mode 1 removes a location row. |
-| `--delete-files` | With `--metakernels --execute`: also unlink the on-disk `.tm` files. |
-
-Network errors (timeouts, DNS failures) in `--metakernels` mode are **never** treated as dead — pruning would otherwise discard real state when you happened to be offline.
-
-`--metakernels` and `--orphan-symlinks` are mutually exclusive — run them sequentially if you want both.
-
-```bash
-# Default — preview stale kernel locations
-spice-kernel-db prune
-
-# Find dead metakernel registry rows
-spice-kernel-db prune --metakernels --execute
-
-# Sweep up dangling symlinks left behind
-spice-kernel-db prune --orphan-symlinks --execute
-```
-
-
-## `dedup`
-
-Replace duplicate kernel files with symlinks.
-
-```bash
-spice-kernel-db dedup [--execute]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--execute` | Actually replace files (default: dry run) |
-
-```bash
-# Preview (default, safe)
-spice-kernel-db dedup
-
-# Do it
-spice-kernel-db dedup --execute
-```
-
-The canonical copy (the file that symlinks point to) is chosen with a preference for files in the `generic` mission.
-
-
-## `metakernels` (alias: `mk`)
-
-List tracked metakernels or show detailed info about a specific one.
-
-```bash
-spice-kernel-db metakernels [name] [--mission NAME]
-spice-kernel-db mk [name] [--mission NAME]
-```
-
-| Option | Description |
-|--------|-------------|
-| `name` | Optional: show info for a specific metakernel (by filename) |
-| `--mission` | Filter listing by mission name |
-
-```bash
-# List all tracked metakernels
-spice-kernel-db metakernels
-
-# Filter by mission
-spice-kernel-db metakernels --mission JUICE
-
-# Detailed info for a specific metakernel
-spice-kernel-db metakernels juice_crema_5_1.tm
-```
-
-When no `name` is given, prints a summary table with kernel counts and availability. When a `name` is given, shows per-kernel status with type, size, and whether each kernel is in the database or missing.
-
-
-## `get`
-
-Fetch a remote metakernel, show which kernels are needed, and download missing ones.
-
-```bash
-spice-kernel-db get [url] [--download-dir DIR] [--mission NAME] [-y] [--force]
-```
-
-| Option | Description |
-|--------|-------------|
-| `url` | URL to a remote `.tm` metakernel, or just a filename (e.g. `juice_ops.tm`). **Omit to select interactively.** |
-| `--download-dir` | Override default kernel storage directory |
-| `--mission` | Override auto-detected mission name (required if multiple missions known and using filename) |
-| `-y, --yes` | Skip confirmation prompt |
-| `--force` | Re-download all kernels even if already on disk (skips DB lookups and remote size queries) |
-
-```bash
-# By filename (after browsing a mission at least once)
-spice-kernel-db get juice_ops.tm
-
-# By filename with explicit mission (when multiple missions are known)
-spice-kernel-db get juice_ops.tm --mission JUICE
-
-# By full URL
-spice-kernel-db get https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
-
-# Auto-confirm download
-spice-kernel-db get juice_ops.tm -y
-```
-
-When a filename is given instead of a URL, the tool looks up the mk/ directory URL from the `missions` table (configured via `mission add`). Mission names support case-insensitive prefix matching (e.g. `--mission bepi` matches `BEPICOLOMBO`). If multiple missions are known, use `--mission` to disambiguate.
-
-The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
-
-**Archived metakernels.** ESA (and some NAIF directories) rotate older versioned metakernels into a `former_versions/` subdirectory once a newer version supersedes them. When a filename you request is not present in the live `mk/` listing, `get` automatically retries under `former_versions/<filename>` before failing. The kernels referenced by the older metakernel are typically still available at their original locations (ESA in particular is purely additive — old kernel files are kept alongside new ones), so the rest of the download proceeds unchanged:
-
-```bash
-# A 2022-era versioned metakernel — auto-fetched from former_versions/
-spice-kernel-db get juice_crema_2_0_ops_v200.tm --mission JUICE
-```
-
-If both the live and `former_versions/` URLs 404, the error names both attempted URLs so you can diagnose archive layouts that don't follow this convention.
-
-
-## `update`
-
-Re-fetch a metakernel from its source URL and download any new or missing kernels.
-
-```bash
-spice-kernel-db update [metakernel] [--mission NAME] [--download-dir DIR] [-y] [--force]
-```
-
-| Option | Description |
-|--------|-------------|
-| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
-| `--mission` | Override mission name |
-| `--download-dir` | Override default kernel storage directory |
-| `-y, --yes` | Skip confirmation prompt |
-| `--force` | Re-download all kernels even if already on disk |
-
-```bash
-# Interactive selection
-spice-kernel-db update
-
-# By filename
-spice-kernel-db update juice_ops.tm
-
-# Auto-confirm
-spice-kernel-db update juice_ops.tm -y
-```
-
-This is a convenience command that combines looking up the source URL from the metakernel registry and calling `get`. It's the recommended action after `check` or `browse` reports that a remote update is available. Metakernels added via `scan` (without a source URL) cannot be updated this way — use `get` with an explicit URL instead.
-
+| `browse [mission]` | acquire | Lists the metakernels on a mission's server. | unchanged |
+| `get <mk>` | acquire | Downloads a metakernel and the kernels it needs that are missing. | also re-fetches a tracked metakernel from its source |
+| `update` | acquire | Re-fetches every tracked metakernel from its source and reports what is missing; `--execute` downloads. | now walks all tracked metakernels, dry run by default |
+| `ls [mission]` | inspect | Lists the tracked metakernels. | renamed |
+| `show <mk>` | inspect | Registry details of a metakernel and the kernels it lists. | renamed, two commands merged |
+| `which <kernel>` | inspect | Local path of a kernel, and every filename its content is known under. | renamed, two commands merged |
+| `coverage <body>` | inspect | SPK coverage of a body in a metakernel. | unchanged |
+| `stats` | inspect | Database statistics, then the duplicate kernels. | now includes the duplicate report |
+| `check <mk>` | inspect | Three verdicts: present, resolves, matches remote. | unchanged since #46 |
+| `doctor` | inspect | Database health: poisoned rows, files gone from disk. | unchanged since #46 |
+| `scan <dir>` | maintain | Indexes every kernel file under a directory. | never prompts |
+| `import <mk-file>` | maintain | Tracks a metakernel that is already on disk. | new |
+| `rewrite <mk>` | maintain | Writes a metakernel with a local symlink tree. | unchanged |
+| `rm <mk>` | maintain | Stops tracking a metakernel; the file stays. | renamed from an option |
+| `clean` | maintain | Drops rows and symlinks that point at nothing. | renamed, options regrouped |
+| `dedup` | maintain | Replaces duplicate kernel files with symlinks. | unchanged |
+| `reset` | maintain | Deletes the database. | moved to the maintain group |
+| `mission add/list/remove` | configure | Manages configured missions. | unchanged |
+| `config` | configure | Shows or updates the configuration. | unchanged |
 
 ## `browse`
 
 Browse remote metakernels in a NAIF mission `mk/` directory, or list known directories.
 
 ```bash
-spice-kernel-db browse [url] [--mission NAME]
+skd browse [url] [--mission NAME]
 ```
 
 | Option | Description |
@@ -432,24 +76,24 @@ spice-kernel-db browse [url] [--mission NAME]
 
 ```bash
 # List all known mk/ directories (from missions table and previously acquired metakernels)
-spice-kernel-db browse
+skd browse
 
 # Browse by mission name (prefix matching, case-insensitive)
-spice-kernel-db browse JUICE
-spice-kernel-db browse bepi    # matches BEPICOLOMBO
+skd browse JUICE
+skd browse bepi    # matches BEPICOLOMBO
 
 # Browse by full URL
-spice-kernel-db browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
+skd browse https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/
 
 # Sort by latest remote modification date (newest at the bottom)
-spice-kernel-db browse JUICE --sort date
+skd browse JUICE --sort date
 
 # Browse only the archived versions in former_versions/
-spice-kernel-db browse JUICE --archived
-spice-kernel-db browse JUICE --archived --sort date  # combine with sort
+skd browse JUICE --archived
+skd browse JUICE --archived --sort date  # combine with sort
 
 # Narrow a large listing with a substring filter (combinable with --archived)
-spice-kernel-db browse JUICE --archived --filter crema_5_1
+skd browse JUICE --archived --filter crema_5_1
 ```
 
 **Without a URL**, lists configured missions from the `missions` table:
@@ -497,12 +141,222 @@ With `--show-versioned`, versioned snapshots are listed under each base metakern
 ```
 
 
+## `get`
+
+Fetch a metakernel, show which kernels are needed, and download the missing ones.
+
+```bash
+skd get [url-or-name] [--download-dir DIR] [--mission NAME] [-y] [--force]
+```
+
+| Option | Description |
+|--------|-------------|
+| `url-or-name` | A URL, a tracked metakernel, or a `.tm` filename on the configured mission's server. See the table below. **Omit to pick from the server listing** at a terminal. |
+| `--download-dir` | Override default kernel storage directory |
+| `--mission` | Override auto-detected mission name (use it to disambiguate when several missions are known and you pass a filename) |
+| `-y, --yes` | Skip confirmation prompt |
+| `--force` | Re-download all kernels even if already on disk (skips DB lookups and remote size queries) |
+
+What the argument means:
+
+| Argument | What `get` does |
+|:---|:---|
+| a URL | Fetches that file. |
+| a tracked metakernel (any form in [Naming a metakernel](#naming-a-metakernel)) | Re-fetches it from its stored source URL, downloads the kernels that are missing, and re-indexes the directories the metakernel points at. |
+| a `.tm` filename that is not tracked | Looks it up in the `mk/` directory of the configured mission, then under `former_versions/`. |
+| nothing | At a terminal, a picker over the mission's server listing. |
+
+```bash
+# By filename (after browsing a mission at least once)
+skd get juice_ops.tm
+
+# By filename with explicit mission (when multiple missions are known)
+skd get juice_ops.tm --mission JUICE
+
+# By full URL
+skd get https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
+
+# Auto-confirm download
+skd get juice_ops.tm -y
+
+# A tracked metakernel: fetch the newest version of what it points at
+skd get juice_crema_5_2
+```
+
+When a filename is given instead of a URL, the tool looks up the mk/ directory URL from the `missions` table (configured via `mission add`). Mission names support case-insensitive prefix matching (e.g. `--mission bepi` matches `BEPICOLOMBO`).
+
+The tool fetches the remote metakernel, resolves each kernel entry to a full URL, checks your local database, queries remote file sizes (in parallel), and displays a summary table. Kernels whose content is known under other filenames are marked `(+N aliases)`; `which <name>` shows the full trail. Downloaded kernels are stored preserving the remote subdirectory structure (e.g. `lsk/`, `spk/`, `ck/`) and automatically registered in the database.
+
+**Metakernels without a source URL.** A metakernel added by `scan` or `import` has no stored source URL. `get <name>` then tries the mission's `mk/` URL plus the filename. If the mission has no `mk/` URL, it fails with `This metakernel was added via scan, not downloaded.` and asks for a URL.
+
+**A source that has gone.** When the stored source answers 403, 404 or 410, `get <name>` prints a red *Metakernel unreachable* panel with the URL, the HTTP status and the filename, and exits 2. The panel names the two ways out: `skd clean --registry` for every such row, or `skd rm <name>` for this one.
+
+**Archived metakernels.** ESA (and some NAIF directories) rotate older versioned metakernels into a `former_versions/` subdirectory once a newer version supersedes them. When a filename you request is not present in the live `mk/` listing, `get` automatically retries under `former_versions/<filename>` before failing. The kernels referenced by the older metakernel are typically still available at their original locations (ESA in particular is purely additive — old kernel files are kept alongside new ones), so the rest of the download proceeds unchanged:
+
+```bash
+# A 2022-era versioned metakernel — auto-fetched from former_versions/
+skd get juice_crema_2_0_ops_v200.tm --mission JUICE
+```
+
+If both the live and `former_versions/` URLs 404, the error names both attempted URLs so you can diagnose archive layouts that don't follow this convention. If the server does not answer at all, `get` says so and exits 1 instead of reporting the file as missing.
+
+
+## `update`
+
+Re-fetch every tracked metakernel from its source and report what is missing. Nothing is written unless you pass `--execute`.
+
+```bash
+skd update [--execute] [--download-dir DIR]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--execute` | Download the missing kernels. Default: report only. `--execute` is the confirmation; there is no per-metakernel prompt. |
+| `--download-dir` | Override default kernel storage directory |
+
+`--mission`, `-y` and `--force` are hidden from `--help` and have no effect on the walk. They exist for the deprecated one-argument form described under [Renamed commands](#renamed-commands).
+
+```bash
+# What is missing across everything I track? Nothing is written.
+skd update
+
+# Download all of it
+skd update --execute
+```
+
+For each tracked metakernel, `update` fetches it from its source URL and prints the same status table as `get`. A dry run stops there. With `--execute` the missing kernels are downloaded and the directories the metakernel points at are re-indexed. A summary table closes the run, one row per metakernel, with the count of missing kernels (dry run) or downloaded kernels (`--execute`). A dry run ends with the line `Dry run: pass --execute to download.`
+
+- Alias rows, where a symlink stands next to its target, are skipped. The target is walked under its own name.
+- A row with no stored source URL is fetched from the mission's `mk/` URL plus the filename. If the mission has no `mk/` URL, the row gets a note in the summary table.
+- A source that answers 403, 404 or 410 gets a note in the summary table (`source gone (HTTP 404); spice-kernel-db clean --registry`) and the walk goes on. The exit code stays 0.
+- A source that cannot be reached at all is noted the same way and does not stop the walk.
+
+Use `get <name>` to update one metakernel.
+
+
+## `ls`
+
+List tracked metakernels.
+
+```bash
+skd ls [mission]
+```
+
+| Option | Description |
+|--------|-------------|
+| `mission` | Only this mission. Case-insensitive prefix, so `ju` matches `JUICE`. |
+
+```bash
+# All tracked metakernels
+skd ls
+
+# One mission
+skd ls JUICE
+```
+
+```
+                   Tracked metakernels
+┏━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Mission ┃ Metakernel            ┃ Kernels ┃ Source                ┃
+┡━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━┩
+│ JUICE   │ juice_ops.tm          │      42 │ spiftp.esac.esa.int   │
+│ MRO     │ mro_v16.tm            │      31 │ naif.jpl.nasa.gov     │
+└─────────┴───────────────────────┴─────────┴───────────────────────┘
+```
+
+The **Source** column shows the host the metakernel was fetched from; it is empty for a metakernel added by `scan` or `import`. When two tracked metakernels list the same kernels, the second carries a line `↳ identical to <first>`. With nothing tracked, `ls` prints `No tracked metakernels.`
+
+
+## `show`
+
+Registry details of one metakernel and the kernels it lists.
+
+```bash
+skd show [metakernel] [--mission NAME] [--type TYPE]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
+| `--mission` | Preferred mission for kernel resolution |
+| `--type` | Only kernels of this type (`ck`, `spk`, `fk`, `ik`, `pck`, `lsk`, `sclk`, `dsk`). The totals stay whole. |
+
+```bash
+# Details and kernel table
+skd show juice_ops.tm
+
+# Only the SPK kernels
+skd show juice_ops.tm --type spk
+```
+
+```
+Metakernel: juice_ops.tm
+  Mission:      JUICE
+  Source:       https://spiftp.esac.esa.int/data/SPICE/JUICE/kernels/mk/juice_ops.tm
+  Acquired:     2026-11-12 14:23:11.502892
+  Local path:   ~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm
+┏━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━┓
+┃ Kernel       ┃ Type ┃    Size ┃ Status  ┃
+┡━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━┩
+│ naif0012.tls │ lsk  │  5.2 KB │ in db   │
+│ de432s.bsp   │ spk  │ 31.2 MB │ in db   │
+│ missing.bsp  │ spk  │       — │ missing │
+└──────────────┴──────┴─────────┴─────────┘
+
+  Total: 3 | In DB: 2 | Missing: 1
+```
+
+The **Source** line is absent for a metakernel added by `scan` or `import`. **Status** is `in db` when the kernel resolves to a file in the database and `missing` otherwise.
+
+`show` also takes a `.tm` file that is not tracked. It lists the kernels the file loads, with the type counts and the `(+N aliases)` marks, and ends with `Not tracked; spice-kernel-db import <path> tracks it.` A name that matches nothing, and is not a file, exits 1.
+
+
+## `which`
+
+Find the local path of a kernel, and every filename its content is known under.
+
+```bash
+skd which [kernel] [--mission NAME] [--metakernel MK]
+```
+
+| Option | Description |
+|--------|-------------|
+| `kernel` | A kernel filename (canonical or alias) or a SHA-256 prefix of six or more characters. **Omit to pick from the deduplicated kernels** at a terminal. |
+| `--mission` | Preferred mission for resolution |
+| `--metakernel` | Resolve every kernel of this metakernel instead (any form in [Naming a metakernel](#naming-a-metakernel)). One `kernel<TAB>path` line each; a kernel that does not resolve prints `kernel<TAB>NOT FOUND` on stderr and the exit code is 1. |
+
+```bash
+skd which naif0012.tls --mission JUICE
+# /data/spice/JUICE/kernels/lsk/naif0012.tls
+
+skd which mro_sc_2024.bc --mission JUICE
+# /data/spice/MRO/kernels/ck/mro_sc_2024.bc
+#   ⚠ mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]
+
+# By content hash prefix
+skd which 3f9a1c
+
+# Every kernel of a metakernel, for a script
+skd which --metakernel juice_ops > paths.tsv
+```
+
+The first line on stdout is the local path; warnings go to stderr. A kernel that is not in the database prints `Not found: <kernel>` on stderr with a hint to run `scan`, and exits 1.
+
+When the content is known under more than one filename, the path is followed by three tables: the content hash with the canonical name, type and size; the filenames the content is known under, with the canonical one marked; and every on-disk location, each marked as a real file, a symlink or missing. With no argument, `which` lists the deduplicated kernels, most aliases first, and lets you pick one.
+
+::: {.callout-tip}
+## Discover upstream aliases without deduplicating
+
+Because identity is content-based, `which` surfaces names an *archive* (e.g. ESA) publishes the same bytes under — revealing, for example, that a `_v13` kernel is byte-identical to `_v12`, or that two trajectory scenarios reuse the same solar-array/antenna kernels. This is a pure discovery feature: it needs **no `dedup` step** (symlinking duplicates is a separate, optional space-saving operation). See [Discovering archive-side aliases](design.qmd#content-identity).
+:::
+
+
 ## `coverage`
 
 Check SPK body coverage in a metakernel. See the [Coverage](coverage.qmd) page for full details.
 
 ```bash
-spice-kernel-db coverage <body> [metakernel] [--mission NAME]
+skd coverage <body> [metakernel] [--mission NAME]
 ```
 
 | Option | Description |
@@ -513,13 +367,300 @@ spice-kernel-db coverage <body> [metakernel] [--mission NAME]
 
 ```bash
 # Interactive — pick metakernel, resolve body name
-spice-kernel-db coverage Earth
+skd coverage Earth
 
 # Explicit
-spice-kernel-db coverage 399 juice_ops.tm --mission JUICE
+skd coverage 399 juice_ops.tm --mission JUICE
 ```
 
 Requires the optional `spiceypy` dependency: `pip install spice-kernel-db[spice]`
+
+
+## `stats`
+
+Print database statistics, then the duplicate kernels.
+
+```bash
+skd stats
+```
+
+The statistics are the unique kernels, total locations, total size, number of duplicates, poisoned rows, registered missions, and a breakdown by kernel type.
+
+A **poisoned row** is a kernel that is present on disk but flagged as superseded by content that exists nowhere. Such a kernel is re-downloaded on every `update --execute`. The count is highlighted when non-zero; `scan <kernel_dir>` repairs it.
+
+The duplicate section lists each kernel that exists in two or more locations, largest first and at most 30, showing the paths and missions of every copy, with a total wasted space calculation. It reads `No duplicates found.` when there are none. `dedup` replaces the copies with symlinks.
+
+
+## `check`
+
+Check a metakernel. Three questions, each answered on its own line with its own exit bit:
+
+| Verdict | Question | Exit bit | Runs |
+|:---|:---|:---|:---|
+| present | does every kernel the metakernel lists exist on disk? | 1 | always |
+| resolves | does every entry resolve through `PATH_VALUES`/`PATH_SYMBOLS` to the file the database knows (size, with `--hash` also SHA-256), with no traversal, dangling link or ambiguous name? | 2 | always |
+| matches remote | does every kernel's size (with `--hash` also its SHA-256) match the server? | 4 | `--remote` |
+
+The exit code is the sum, so a script can read it: `0` all green, `1` a kernel missing, `2` the metakernel does not resolve, `4` a kernel differs from the server, `5` missing plus differs, and so on. The output never collapses into one tick; a verdict that did not run says `not checked`. (Exit 2 is also the code for an ambiguous name or a usage error; those print their reason before any verdict runs.)
+
+```bash
+skd check [metakernel] [--remote] [--hash] [--spice] [--json] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Any form in [Naming a metakernel](#naming-a-metakernel). **Omit to pick from the tracked metakernels** at a terminal. |
+| `--remote` | Also compare each kernel's size with the server, one HEAD per kernel. The only network check. |
+| `--hash` | Compare SHA-256 against the database, and with `--remote` against the server (downloads each kernel, slow). |
+| `--spice` | With `--remote`, `furnsh` each local kernel and report what SPICE cannot read (requires spiceypy). |
+| `--json` | The three verdicts and their evidence as JSON, nothing else on stdout. |
+| `--mission` | Preferred mission for kernel resolution |
+
+With the root option `-v`, per-file warnings are printed in full instead of the compact summary.
+
+```bash
+# At a terminal: pick from the tracked metakernels
+skd check
+
+# Local verdicts only
+skd check juice_crema_5_2
+
+# Before an analysis run: everything, including the server
+skd check juice_crema_5_2 --remote --hash
+
+# In a script
+skd check juice_crema_5_2 --json || echo "exit $?"
+```
+
+Per-entry statuses behind the *resolves* verdict (shown as a table only when something is wrong):
+
+| Status | Verdict | Meaning |
+|--------|---------|---------|
+| `OK` | — | Verified |
+| `NOT_FOUND`, `DANGLING` | present, or resolves when every kernel exists elsewhere | No file at the resolved path; `rewrite` points the metakernel at the local copies |
+| `NOT_FILE` | resolves | Path exists but isn't a regular file |
+| `TRAVERSAL` | resolves | Entry resolves outside every `PATH_VALUE` root |
+| `SIZE_MISMATCH` | resolves | File size disagrees with the database record |
+| `HASH_MISMATCH` | resolves | (`--hash`) SHA-256 disagrees with the database record |
+| `AMBIGUOUS` | resolves | Several non-superseded `kernels` rows for the same filename |
+| `BAD_PATH_VALUE` | resolves | `PATH_VALUES` entry not absolute or directory missing |
+| `UNREGISTERED` | none | File exists but no `kernels` row; `scan` registers it |
+
+If the metakernel was fetched from a remote server, `check` also says when a newer version is listed there (one directory listing, nothing downloaded).
+
+
+## `doctor`
+
+Database health, nothing per metakernel.
+
+```bash
+skd doctor [--json]
+```
+
+Reports the table counts, poisoned supersession rows (a kernel present on disk but flagged as superseded by content that exists nowhere, so every `update --execute` re-downloads it; `scan <kernel_dir>` repairs it), kernel locations whose file is gone (`clean --execute` removes them) and tracked metakernels whose file is gone (`rm <name>`). Exits 1 only on poisoned rows; a missing file is listed and does not change the exit code.
+
+
+## `scan`
+
+Recursively scan a directory and register all kernel files.
+
+```bash
+skd [-v] scan <directory> [--mission NAME] [--archive]
+```
+
+| Option | Description |
+|--------|-------------|
+| `directory` | Root directory to scan recursively |
+| `--mission` | Override auto-detected mission name |
+| `--archive` | Move files to the configured kernel directory and leave symlinks at the original locations |
+
+With the root option `-v`, `scan` prints each registered file. After the scan it prints the database statistics.
+
+```bash
+# Auto-detect mission from path structure
+skd scan /data/spice/JUICE/kernels
+
+# Explicit mission label
+skd scan /data/spice/generic_kernels --mission generic
+
+# Verbose output
+skd -v scan /data/spice/MRO/kernels
+
+# Import kernels from a random directory into the central archive
+skd scan /tmp/downloaded_kernels --mission JUICE --archive
+```
+
+With `--archive`, each kernel file is moved into the configured kernel directory (organized as `{kernel_dir}/{mission}/{type}/{filename}`) and a symlink is left at the original location. This lets you import kernels from anywhere while keeping the original paths functional.
+
+`scan` never prompts, so it is safe in a script. When it meets a mission that is not configured yet, it does one of two things:
+
+- If the mission's directory holds a `.spice-server` marker (written by `get`), the mission is configured on the spot and `scan` says so.
+- Otherwise it prints the command to run, for example `spice-kernel-db mission add JUICE --server-url <https://naif.jpl.nasa.gov/pub/naif/|https://spiftp.esac.esa.int/data/SPICE/>`, and carries on.
+
+The missions `generic` and `unknown` are never configured.
+
+::: {.callout-note}
+Symlinks require filesystem support. On Windows, Developer Mode or administrator privileges are needed. If symlink creation fails, the file is still moved and registered — only the symlink is skipped (with a warning).
+:::
+
+
+## `import`
+
+Track a metakernel that is already on disk, without downloading anything.
+
+```bash
+skd import <metakernel-file> [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel-file` | Path to the `.tm` file |
+| `--mission` | Override auto-detected mission name (default: guessed from the path) |
+
+```bash
+skd import ~/spice/JUICE/mk/juice_ops.tm
+# Tracked juice_ops.tm (JUICE): 40/42 kernels on disk and registered.
+#   Not on disk (2):
+#     $KERNELS/spk/missing_1.bsp
+#     $KERNELS/spk/missing_2.bsp
+#   spice-kernel-db get juice_ops.tm downloads them once the mission's server is configured.
+```
+
+`import` resolves each entry of the file through its own `PATH_VALUES` and `PATH_SYMBOLS`, registers the kernels that exist on disk, indexes the entries, and adds the registry row with no source URL. It makes no network request. After it, the metakernel works with `show`, `check`, `which --metakernel`, `rewrite` and `coverage`. Use `scan` instead to register a whole directory of kernels.
+
+
+## `rewrite`
+
+Rewrite a metakernel with a local symlink tree.
+
+```bash
+skd rewrite [metakernel] [-o OUTPUT] [--link-root DIR] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | The original metakernel: path, registry filename or base name. **Omit to pick from the tracked metakernels** at a terminal. |
+| `-o, --output` | Output `.tm` path (default: `<stem>_local.tm` next to the original) |
+| `--link-root` | Root for symlink tree (default: `kernels/` next to output) |
+| `--mission` | Mission name for preferred-mission resolution |
+
+```bash
+# Basic usage
+skd rewrite juice_crema_5_1.tm -o juice_local.tm
+
+# Custom symlink root
+skd rewrite juice_crema_5_1.tm -o juice_local.tm \
+    --link-root /data/spice/unified
+
+# Explicit mission
+skd rewrite juice_crema_5_1.tm -o juice_local.tm --mission JUICE
+```
+
+
+## `rm`
+
+Stop tracking a metakernel. The `.tm` file stays on disk.
+
+```bash
+skd rm [metakernel] [--mission NAME]
+```
+
+| Option | Description |
+|--------|-------------|
+| `metakernel` | Registry filename, base name or path. **Omit to pick from the tracked metakernels** at a terminal. |
+| `--mission` | Mission the name belongs to |
+
+```bash
+skd rm juice_crema_5_1_v462_20260223_001.tm
+```
+
+`rm` deletes the registry row and the indexed entries of that metakernel. The name is matched against the registry, not against the file system, so a row whose file is gone can be removed. A name that matches nothing exits 1. Kernels stay registered; `clean` removes rows for kernels whose file is gone.
+
+
+## `clean`
+
+Drop database rows and symlinks that point at nothing. Dry run unless `--execute` is given.
+
+```bash
+skd clean [--execute] [--locations] [--symlinks] [--registry] [--delete-files]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--execute` | Actually remove entries. Default: report only. |
+| `--locations` | Kernel locations whose file no longer exists on disk, then kernel rows left with no location. |
+| `--symlinks` | Dangling symlinks under each mission's download tree. The tree is derived from the tracked metakernels (the parent of each `mk/` directory) and walked recursively. These accumulate when an underlying kernel store moves, or after `--locations` removes a location row. |
+| `--registry` | Tracked metakernels whose source URL answers 403, 404 or 410. Sends one HEAD request per row to its source URL, or to the mission's `mk/` URL plus the filename when no source URL is stored; a row with neither is noted and skipped (`rm` drops it). **The only class that contacts the server.** |
+| `--delete-files` | With `--registry --execute`: also unlink the `.tm` files on disk. |
+
+Without a class flag, `--locations` and `--symlinks` run, the two classes that need no network. With one or more class flags, only the named classes run, so the classes can be combined.
+
+Network errors (timeouts, DNS failures) under `--registry` are **never** treated as dead. A removal would otherwise discard real state because you happened to be offline.
+
+```bash
+# Preview stale kernel locations and dangling symlinks
+skd clean
+
+# Remove them
+skd clean --execute
+
+# Preview which tracked metakernels have lost their source
+skd clean --registry
+
+# Remove those rows and their .tm files
+skd clean --registry --execute --delete-files
+```
+
+
+## `dedup`
+
+Replace duplicate kernel files with symlinks.
+
+```bash
+skd dedup [--execute] [-y]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--execute` | Actually replace files (default: dry run) |
+| `-y, --yes` | With `--execute`: skip the confirmation prompt. Without `-y`, the dry run is shown first and you are asked to proceed. |
+
+```bash
+# Preview (default, safe)
+skd dedup
+
+# Do it
+skd dedup --execute
+```
+
+The canonical copy (the file that symlinks point to) is chosen with a preference for files in the `generic` mission.
+
+
+## `reset`
+
+Delete the database and start fresh.
+
+```bash
+skd reset [-y]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-y, --yes` | Skip confirmation prompt |
+
+```bash
+# Interactive (asks for confirmation)
+skd reset
+
+# Skip confirmation
+skd reset -y
+```
+
+Deletes only the DuckDB database file. Kernel files in the configured kernel directory are **not** touched. After resetting, you can re-index existing kernels:
+
+```bash
+skd scan ~/.local/share/spice-kernel-db/kernels
+```
 
 
 ## `mission`
@@ -539,7 +680,7 @@ Interactive flow:
 5. Store in database
 
 ```bash
-spice-kernel-db mission add
+skd mission add
 ```
 
 | Option | Description |
@@ -551,15 +692,15 @@ spice-kernel-db mission add
 
 ```bash
 # Interactive
-spice-kernel-db mission add
+skd mission add
 
 # Non-interactive, explicit metakernel directory
-spice-kernel-db mission add LRO \
+skd mission add LRO \
   --server-url https://naif.jpl.nasa.gov/pub/naif/ \
   --mk-dir-url https://naif.jpl.nasa.gov/pub/naif/LRO/data/spice/mk/
 
 # Non-interactive, let the tool auto-discover (curated registry + alt-path probe)
-spice-kernel-db mission add OSIRIS-REX --server-url https://naif.jpl.nasa.gov/pub/naif/
+skd mission add OSIRIS-REX --server-url https://naif.jpl.nasa.gov/pub/naif/
 ```
 
 When discovery finds multiple candidate metakernel directories, the command lists them and asks you to re-run with `--mk-dir-url`. When it finds none, it points at the troubleshooting docs.
@@ -577,7 +718,7 @@ After setup, the command prints next steps for acquiring metakernels.
 Show all configured missions with their server, deduplication status, and mk/ directory URL.
 
 ```bash
-spice-kernel-db mission list
+skd mission list
 ```
 
 Example output:
@@ -596,7 +737,7 @@ Configured missions:
 Remove a configured mission from the database.
 
 ```bash
-spice-kernel-db mission remove <name>
+skd mission remove <name>
 ```
 
 | Option | Description |
@@ -604,7 +745,7 @@ spice-kernel-db mission remove <name>
 | `name` | Mission name to remove |
 
 ```bash
-spice-kernel-db mission remove MRO
+skd mission remove MRO
 ```
 
 
@@ -613,46 +754,48 @@ spice-kernel-db mission remove MRO
 Show or update configuration.
 
 ```bash
-spice-kernel-db config [--setup]
+skd config [--setup]
+skd config get <key>
+skd config set <key> <value>
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--setup` | Re-run the interactive first-time setup |
+| `get <key>` | Print one setting. The keys are `db_path` and `kernel_dir`. |
+| `set <key> <value>` | Change one setting and save it. |
 
 ```bash
 # Show current settings
-spice-kernel-db config
+skd config
 
 # Re-run setup (change database path, kernel directory, etc.)
-spice-kernel-db config --setup
+skd config --setup
+
+# Read or change one setting
+skd config get kernel_dir
+skd config set kernel_dir ~/Dropbox/spice-kernels
 ```
 
-Without `--setup`, prints the current configuration: database path, kernel directory, and config file location.
+Without arguments, prints the current configuration: database path, kernel directory, and config file location.
 
 
-## `reset`
+## Renamed commands
 
-Delete the database and start fresh.
+Issue #47 renamed most verbs. Each old name still runs. It prints `note: 'old' is now 'new'` on stderr, then runs the new command with the new command's options. The old names are hidden from `--help` and go away in 1.0.
 
-```bash
-spice-kernel-db reset [-y]
-```
-
-| Option | Description |
-|--------|-------------|
-| `-y, --yes` | Skip confirmation prompt |
-
-```bash
-# Interactive (asks for confirmation)
-spice-kernel-db reset
-
-# Skip confirmation
-spice-kernel-db reset -y
-```
-
-Deletes only the DuckDB database file. Kernel files in the configured kernel directory are **not** touched. After resetting, you can re-index existing kernels:
-
-```bash
-spice-kernel-db scan ~/.local/share/spice-kernel-db/kernels
-```
+| Old name | New name | Notes |
+|:---|:---|:---|
+| `list <mk>` | `show <mk>` | `--type` and `--mission` carry over. |
+| `metakernels [--mission NAME]`, `mk [--mission NAME]` | `ls [mission]` | |
+| `metakernels <name>`, `mk <name>` | `show <name>` | |
+| `metakernels --remove <name>`, `mk --remove <name>` | `rm <name>` | |
+| `resolve <kernel>` | `which <kernel>` | `which` also prints the alias tables when the content has several names. |
+| `resolve --metakernel <mk>` | `which --metakernel <mk>` | |
+| `aliases [name-or-hash]` | `which [kernel]` | |
+| `duplicates` | `stats` | The duplicate report follows the statistics. |
+| `prune [--execute]` | `clean --locations [--execute]` | The alias keeps the old behaviour. `clean` with no class flag also sweeps dangling symlinks. |
+| `prune --metakernels`, `prune --mk` | `clean --registry` | |
+| `prune --orphan-symlinks` | `clean --symlinks` | |
+| `verify <mk>` | `check <mk>` | `--deep` is `--hash`. `--strict` has no equivalent and is ignored with a note. The database-wide report is `doctor`. |
+| `update <name>` | `get <name>` | `update` with no argument is now the walk over all tracked metakernels. |

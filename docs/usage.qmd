@@ -326,38 +326,47 @@ db.get_metakernel(
 ### List all fetched metakernels
 
 ```bash
-spice-kernel-db metakernels
+spice-kernel-db ls
 ```
 
 ```
-Tracked metakernels:
-
-  Mission  Filename                     Acquired     Source URL
-  ───────  ───────────────────────────  ───────────  ──────────────────────────
-  JUICE    juice_ops.tm                 2024-12-03   https://naif.jpl.nasa...
-  JUICE    juice_crema_5_1.tm           2024-11-27   https://naif.jpl.nasa...
-  MRO      mro_v16.tm                   2024-10-12   https://naif.jpl.nasa...
+                   Tracked metakernels
+┏━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
+┃ Mission ┃ Metakernel         ┃ Kernels ┃ Source            ┃
+┡━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩
+│ JUICE   │ juice_ops.tm       │      42 │ naif.jpl.nasa.gov │
+│ JUICE   │ juice_crema_5_1.tm │     102 │ naif.jpl.nasa.gov │
+│ MRO     │ mro_v16.tm         │      31 │ naif.jpl.nasa.gov │
+└─────────┴────────────────────┴─────────┴───────────────────┘
 ```
 
 ### Show details for a specific metakernel
 
 ```bash
-spice-kernel-db metakernels juice_ops.tm
+spice-kernel-db show juice_ops.tm
 ```
 
 ```
 Metakernel: juice_ops.tm
-  Mission:       JUICE
-  Local path:    ~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm
-  Source URL:    https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
-  Acquired:      2024-12-03 14:23:11
-  Kernels:       42
+  Mission:      JUICE
+  Source:       https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm
+  Acquired:     2024-12-03 14:23:11.502892
+  Local path:   ~/.local/share/spice-kernel-db/kernels/JUICE/mk/juice_ops.tm
+┏━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
+┃ Kernel       ┃ Type ┃    Size ┃ Status ┃
+┡━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
+│ naif0012.tls │ lsk  │  5.2 KB │ in db  │
+│ de432s.bsp   │ spk  │ 31.2 MB │ in db  │
+│ ...          │      │         │        │
+└──────────────┴──────┴─────────┴────────┘
+
+  Total: 42 | In DB: 42 | Missing: 0
 ```
 
 ### Filter by mission
 
 ```bash
-spice-kernel-db metakernels --mission JUICE
+spice-kernel-db ls JUICE
 ```
 
 ### Python API
@@ -375,14 +384,14 @@ db.info_metakernel("juice_ops.tm")
 
 ## Listing kernels in a metakernel
 
-The `list` command shows all kernels inside a metakernel, grouped by type:
+The `show` command, given a tracked metakernel, prints the kernel table shown above. Given a `.tm` file that is not tracked, it lists every kernel the file loads, with the counts by type:
 
 ```bash
-spice-kernel-db list juice_ops.tm
+spice-kernel-db show ~/spice/JUICE/mk/juice_ops.tm
 ```
 
 ```
-Metakernel: juice_ops.tm
+Metakernel: ~/spice/JUICE/mk/juice_ops.tm
 Kernels: 42 total
 (5 ck, 2 fk, 1 ik, 1 lsk, 3 pck, 1 sclk, 29 spk)
 
@@ -392,12 +401,14 @@ Kernels: 42 total
    2  pck   pck00011.tpc
    3  spk   de432s.bsp
    ...
+
+Not tracked; spice-kernel-db import ~/spice/JUICE/mk/juice_ops.tm tracks it.
 ```
 
 Filter by kernel type:
 
 ```bash
-spice-kernel-db list juice_ops.tm --type spk
+spice-kernel-db show juice_ops.tm --type spk
 ```
 
 Without arguments, you'll be prompted to pick from locally acquired metakernels.
@@ -487,7 +498,7 @@ This preserves the original metakernel structure while bridging the gap between 
 To find where a specific kernel lives on disk:
 
 ```bash
-spice-kernel-db resolve naif0012.tls --mission JUICE
+spice-kernel-db which naif0012.tls --mission JUICE
 ```
 
 ```
@@ -497,13 +508,21 @@ spice-kernel-db resolve naif0012.tls --mission JUICE
 If the kernel isn't found in the preferred mission, the tool searches other missions:
 
 ```bash
-spice-kernel-db resolve mro_sc_2024.bc --mission JUICE
+spice-kernel-db which mro_sc_2024.bc --mission JUICE
 ```
 
 ```
 /data/spice/MRO/kernels/ck/mro_sc_2024.bc
   ⚠ mro_sc_2024.bc: not found in [JUICE] registry, using copy from [MRO]
 ```
+
+To resolve every kernel a metakernel loads, one `kernel<TAB>path` line each, pass `--metakernel`:
+
+```bash
+spice-kernel-db which --metakernel juice_ops
+```
+
+When the kernel's content is known under more than one filename, `which` also prints the filenames and the on-disk locations after the path.
 
 ### Python API
 
@@ -630,15 +649,17 @@ This gives you fine-grained control. For example:
 
 ### Viewing duplicates
 
+The duplicate report is the second half of `stats`, after the database statistics:
+
 ```bash
-spice-kernel-db duplicates
+spice-kernel-db stats
 ```
 
 ```
-======================================================================
-Duplicate kernels: 127 files with 2+ copies
-Total wasted space: 2847.3 MB
-======================================================================
+╭────────────────────────── Duplicate kernels ──────────────────────────╮
+│ 127 files with 2+ copies                                              │
+│ Total wasted space: 2847.3 MB                                         │
+╰───────────────────────────────────────────────────────────────────────╯
 
   de432s.bsp  (31.2 MB × 3 copies)
     [generic] /data/spice/generic_kernels/spk/planets/de432s.bsp

@@ -43,7 +43,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission()` (path heuristic) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
 | `config.py` | `Config` dataclass, TOML persistence at `~/.config/spice-kernel-db/config.toml` |
-| `cli/` | Typer CLI, one module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py` (list, check with its hidden `verify` alias, doctor, coverage, metakernels, resolve, aliases, stats, duplicates), `transform.py` (scan, rewrite, dedup, prune), `configure.py` (mission, config, reset); `prompts.py` holds the shared interactive pickers, `_app.py` the `app` object and per-invocation state, `__init__.py` the root options and `main()` |
+| `cli/` | Typer CLI, one module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py` (ls, show, which, coverage, stats, check, doctor, plus the hidden aliases list, metakernels/mk, resolve, aliases, duplicates, verify), `transform.py` (scan, import, rewrite, rm, clean, dedup, and the hidden prune), `configure.py` (mission, config, reset); `prompts.py` holds the shared interactive pickers, `_app.py` the `app` object and per-invocation state, `__init__.py` the root options and `main()` |
 
 ### Key Design Decisions
 
@@ -60,7 +60,7 @@ Steps 1 and 2 go through `find_by_filename`, which joins on `sha256`, so identic
 
 **Remote browsing** parses Apache `mod_autoindex` HTML directory listings. Version tags like `_v461_20251127_001` are stripped to group versioned snapshots under their base metakernel name.
 
-**Case-insensitive fuzzy matching** — all mission name lookups (get, browse, metakernels, mission remove) use case-insensitive prefix matching. `get_mission()` resolves via the `missions` table; SQL queries on `metakernel_registry` use `LOWER(mission) LIKE LOWER(?) || '%'` directly.
+**Case-insensitive fuzzy matching** — all mission name lookups (get, browse, ls, mission remove) use case-insensitive prefix matching. `get_mission()` resolves via the `missions` table; SQL queries on `metakernel_registry` use `LOWER(mission) LIKE LOWER(?) || '%'` directly.
 
 **Output formatting** uses `rich` throughout — `rich.Table` and `rich.Panel` for all tabular output, `rich.progress.Progress` for download and query progress bars (thread-safe with `ThreadPoolExecutor`).
 

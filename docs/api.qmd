@@ -251,6 +251,7 @@ db.get_metakernel(
     yes: bool = False,
     force: bool = False,
     verbose: bool = False,
+    dry_run: bool = False,
 ) -> dict
 ```
 
@@ -269,7 +270,9 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 
 `verbose=True` additionally lists each kernel's resolved URL beneath the status table. The table itself is always shown — it precedes the download prompt, so it is what you decide on.
 
-Returns a dict with keys: `found`, `missing`, `downloaded`, `warnings`.
+`dry_run=True` stops after the status table. Nothing is written to disk or to the database and no kernel is downloaded. This is what `skd update` runs without `--execute`.
+
+Returns a dict with keys: `found`, `missing`, `downloaded`, `warnings`. After a dry run the dict also has `dry_run: True`, and `downloaded` is empty.
 
 #### `update_metakernel`
 
@@ -281,6 +284,8 @@ db.update_metakernel(
     yes: bool = False,
     force: bool = False,
     verbose: bool = False,
+    dry_run: bool = False,
+    rescan: bool = True,
 ) -> dict
 ```
 
@@ -288,9 +293,37 @@ Re-fetch a metakernel from its source URL and download new or missing kernels. L
 
 Raises `LookupError` if the metakernel is not found in the registry or was added via scan without a source URL. Raises `MetakernelUnreachableError` (a `LookupError` subclass) when the remote returns 403/404/410 — typically because NAIF rotated the file into `former_versions/`; use `prune_metakernels()` to clean up the stale registry row.
 
-After downloading, automatically rescans the kernel directories referenced by the metakernel so newly downloaded files are immediately indexed. `verbose=True` names each directory as it is re-scanned; otherwise the count is reported in one line.
+After downloading, automatically rescans the kernel directories referenced by the metakernel so newly downloaded files are immediately indexed. `verbose=True` names each directory as it is re-scanned; otherwise the count is reported in one line. `rescan=False` skips that step; `update_all` uses it and scans each distinct directory once at the end.
 
-Returns the same dict as `get_metakernel`.
+`dry_run=True` reports what would change and writes nothing. No rescan happens after a dry run.
+
+Returns the same dict as `get_metakernel`. After a real run the dict also has `scan_dirs`, the set of directories the metakernel points at.
+
+#### `update_all`
+
+```python
+db.update_all(
+    download_dir: str | Path | None = None,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> list[dict]
+```
+
+Re-fetch every tracked metakernel from its source, as `skd update` does. With `dry_run=True` each metakernel's status table is shown and nothing is written. With `dry_run=False` the missing kernels are downloaded without a per-metakernel prompt, and the directories the metakernels point at are re-indexed once at the end. The `skd update` command passes `dry_run=True` unless `--execute` is given.
+
+Alias rows, where a symlink stands next to its target, are skipped. A source that has gone from the server, a source that cannot be reached, and a row with no source URL are reported in the summary table and never raise.
+
+Returns one dict per metakernel walked, with keys `filename`, `mission`, `count` and `error`. `count` is the number of missing kernels in a dry run and the number of downloaded kernels otherwise. `error` is `None` or a one-line reason.
+
+#### `import_metakernel`
+
+```python
+db.import_metakernel(mk_path: str | Path, mission: str | None = None) -> dict
+```
+
+Track a metakernel that is already on disk, without a download, as `skd import` does. Indexes its entries, registers every kernel it resolves to that exists on disk, and adds the registry row with no source URL. `mission` defaults to the mission guessed from the path.
+
+Returns a dict with keys `mk_path`, `filename`, `mission`, `n_entries`, `n_registered` and `missing`, the entries whose file is not on disk. Raises `FileNotFoundError` when `mk_path` is not a file.
 
 #### `verify_metakernel`
 
@@ -319,7 +352,7 @@ db.prune_orphan_symlinks(dry_run: bool = True) -> list[str]
 Walk every mission's download tree (derived from
 `metakernel_registry.mk_path` — the parent of the `mk/` directory) and
 find symlinks whose target no longer exists. These accumulate when an
-underlying kernel store moves or after the default `prune` removes a
+underlying kernel store moves or after `db.prune()` removes a
 `locations` row — the symlinks pointing at that file are not themselves
 tracked in `locations`, so they survive as junk.
 
@@ -340,7 +373,7 @@ db.prune_metakernels(
 
 Find rows in `metakernel_registry` whose remote URL returns a permanent HTTP error (403/404/410) and optionally remove them. Sends a HEAD request to each URL with the given `timeout`.
 
-The probe URL is derived per row: explicit `source_url` if set, otherwise `mission.mk_dir_url + filename` (same fallback as `update_metakernel`). Rows with neither — typically locally-created metakernels with no upstream — are noted in the output and skipped (use `mk --remove <name>` to drop them manually).
+The probe URL is derived per row: explicit `source_url` if set, otherwise `mission.mk_dir_url + filename` (same fallback as `update_metakernel`). Rows with neither — typically locally-created metakernels with no upstream — are noted in the output and skipped (use `skd rm <name>` to drop them manually).
 
 Transient failures (timeouts, DNS errors, 5xx) are deliberately **never** classified as dead — leaving a registry row stale is always safer than deleting on a network blip.
 
@@ -388,12 +421,12 @@ rows = db.metakernels_covering(-121, spiceypy.utc2et("2027-06-01"))   # BepiColo
 #### `info_metakernel`
 
 ```python
-db.info_metakernel(name: str) -> dict | None
+db.info_metakernel(name: str, kernel_type: str | None = None) -> dict
 ```
 
-Show detailed info about a tracked metakernel, looked up by filename. Displays per-kernel status (`in db` / `missing`) with kernel type and size.
+Show detailed info about a tracked metakernel, as `skd show` does. `name` is any form `resolve_metakernel` accepts. Displays per-kernel status (`in db` / `missing`) with kernel type and size. `kernel_type` limits the printed kernel table to one type; the counts stay whole.
 
-Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `kernels`, `n_kernels`, `n_in_db`, `n_missing`. Returns `None` if not found.
+Returns a dict with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `kernels`, `n_kernels`, `n_in_db`, `n_missing`. Raises `MetakernelNotTracked` if nothing matches.
 
 #### `browse_remote_metakernels`
 
@@ -469,7 +502,7 @@ Everything the `check` command reports, as data: `mk_path`, the raw results unde
 db.stale_locations() -> list[tuple[str, str]]
 ```
 
-`(sha256, abs_path)` of every location whose file is gone from disk; the one walk behind `prune` and `doctor`.
+`(sha256, abs_path)` of every location whose file is gone from disk; the one walk behind `clean` and `doctor`.
 
 #### `doctor`
 

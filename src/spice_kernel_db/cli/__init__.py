@@ -92,8 +92,8 @@ def _show_default_summary() -> None:
         console.print(_metakernel_table(rows, index_style="dim"))
         console.print(
             "\n[dim]Use 'spice-kernel-db check <filename>' to verify kernel availability.\n"
-            "Use 'spice-kernel-db resolve <kernel>' to get a kernel's local path.\n"
-            "Use 'spice-kernel-db update <filename>' to fetch the latest version.\n"
+            "Use 'spice-kernel-db which <kernel>' to get a kernel's local path.\n"
+            "Use 'spice-kernel-db get <filename>' to fetch its latest version.\n"
             "Run 'spice-kernel-db --help' for all commands.[/dim]\n"
         )
     else:

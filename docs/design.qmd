@@ -100,10 +100,10 @@ This means `find_by_filename("jup365_19900101_20500101.bsp")` will find all loca
 
 ### Discovering archive-side aliases
 
-Because identity is content-based and recorded at scan/`get` time, the database accumulates — for free, without modifying any files — a map of **which filenames an archive publishes the same bytes under**. The `aliases` command (and `KernelDB.aliases()`) surface it:
+Because identity is content-based and recorded at scan/`get` time, the database accumulates — for free, without modifying any files — a map of **which filenames an archive publishes the same bytes under**. The `which` command (and `KernelDB.aliases()`) surface it:
 
 ```bash
-spice-kernel-db aliases juice_ops_v13.tf
+spice-kernel-db which juice_ops_v13.tf
 ```
 
 reveals that ESA ships `juice_ops_v13.tf` and `juice_ops_v12.tf` with byte-identical content — i.e. `v13` did not actually change anything in `v12` — or that two trajectory scenarios (`crema_5_1` and its `a3_2` variant) reuse exactly the same solar-array, antenna, or frame kernels. That is a genuine insight into how an archive is structured, and it requires **no deduplication step**: physically replacing the duplicates with symlinks (`dedup`) is an optional, separate space-saving operation.

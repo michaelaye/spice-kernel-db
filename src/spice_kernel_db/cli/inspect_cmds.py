@@ -1,4 +1,5 @@
-"""Read-only commands: list, check (verify is its hidden alias), doctor, coverage, metakernels, resolve, aliases, stats, duplicates."""
+"""Inspect panel: ls, show, which, coverage, stats, check, doctor; the old names
+(list, metakernels/mk, resolve, aliases, duplicates, verify) are hidden aliases (#47)."""
 
 from __future__ import annotations
 
@@ -13,12 +14,11 @@ from rich.table import Table
 
 from spice_kernel_db.db import KernelDB, _format_size
 
-from ._app import INSPECT, app, open_db, state
+from ._app import INSPECT, app, open_db, rename_note, renamed, state
 from .prompts import (
     _interactive_pick_deduplicated_kernel,
     _require_metakernel,
     _resolve_body_interactive,
-    _select_local_metakernel,
     console,
 )
 
@@ -30,22 +30,32 @@ MetakernelArg = Annotated[
 ]
 
 
-@app.command("list", rich_help_panel=INSPECT, epilog="See also: check, mk",
-             help="List kernels contained in a metakernel")
-def list_(
+@app.command(rich_help_panel=INSPECT, epilog="See also: show, rm",
+             help="Tracked metakernels")
+def ls(
+    ctx: typer.Context,
+    mission: Annotated[Optional[str], typer.Argument(
+        help="Only this mission (case-insensitive prefix)")] = None,
+) -> None:
+    with open_db(ctx, read_only=True) as db:
+        db.list_metakernels(mission=mission)
+
+
+@app.command(rich_help_panel=INSPECT, epilog="See also: ls, check, which",
+             help="Registry details of a metakernel and the kernels it lists")
+def show(
     ctx: typer.Context,
     metakernel: MetakernelArg = None,
     mission: Annotated[Optional[str], typer.Option(
-        "--mission", help="Filter by mission name")] = None,
+        "--mission", help="Preferred mission for kernel resolution")] = None,
     kernel_type: Annotated[Optional[str], typer.Option(
-        "--type", help="Filter by kernel type (ck, spk, fk, ik, pck, lsk, sclk, dsk)")] = None,
+        "--type", help="Only kernels of this type (ck, spk, fk, ik, pck, lsk, sclk, dsk)")] = None,
 ) -> None:
     with open_db(ctx, read_only=True) as db:
         mk = _require_metakernel(metakernel, db, mission)
         if mk is None:
             return
-        _list_kernels(str(db.resolve_metakernel(mk, mission=mission)), db=db,
-                      kernel_type=kernel_type)
+        db.info_metakernel(mk, kernel_type=kernel_type, mission=mission)
 
 
 def _print_present(present: dict, *, verbose: bool) -> None:
@@ -118,7 +128,7 @@ def _run_check(ctx: typer.Context, metakernel: str | None, *, remote: bool,
                   "and with --remote, matches the server",
              epilog="Exit code: 1 a kernel is missing, 2 the metakernel does not resolve, "
                     "4 differs from the server (--remote); summed, so 5 is missing plus "
-                    "differs. See also: doctor, list, rewrite")
+                    "differs. See also: doctor, show, rewrite")
 def check(
     ctx: typer.Context,
     metakernel: MetakernelArg = None,
@@ -152,8 +162,8 @@ def verify(
     json_: Annotated[bool, typer.Option("--json")] = False,
     mission: Annotated[Optional[str], typer.Option("--mission")] = None,
 ) -> None:
-    print("note: 'verify' is now 'check' (--deep is --hash); exit 2 means the "
-          "metakernel does not resolve", file=sys.stderr)
+    rename_note("verify", "check")
+    print("  --deep is --hash; exit 2 means the metakernel does not resolve", file=sys.stderr)
     if strict:
         print("note: --strict has no equivalent and is ignored", file=sys.stderr)
     _run_check(ctx, metakernel, remote=False, hash_=deep, spice=False,
@@ -163,7 +173,7 @@ def verify(
 @app.command(rich_help_panel=INSPECT,
              help="Database health: poisoned rows, files gone from disk",
              epilog="Exits 1 only on poisoned supersession rows; a file gone from disk is "
-                    "listed with the command that cleans it up. See also: check, prune, stats")
+                    "listed with the command that cleans it up. See also: check, clean, stats")
 def doctor(
     ctx: typer.Context,
     json_: Annotated[bool, typer.Option("--json", help="Emit the report as JSON")] = False,
@@ -185,12 +195,12 @@ def doctor(
                   "    Repair: spice-kernel-db scan <kernel_dir>")
         gone = report["missing_locations"]
         print(f"  Kernel locations whose file is gone: {len(gone)}"
-              + ("  (spice-kernel-db prune --execute)" if gone else ""))
+              + ("  (spice-kernel-db clean --execute)" if gone else ""))
         for path in gone:
             print(f"    {path}")
         gone_mk = report["missing_metakernels"]
         print(f"  Tracked metakernels whose file is gone: {len(gone_mk)}"
-              + ("  (spice-kernel-db mk --remove <name>)" if gone_mk else ""))
+              + ("  (spice-kernel-db rm <name>)" if gone_mk else ""))
         for name in gone_mk:
             print(f"    {name}")
     if report["poisoned"]:
@@ -233,129 +243,101 @@ def _spiceypy_required() -> NoReturn:
     sys.exit(1)
 
 
-_MK_HELP = "List tracked metakernels or show details (alias: mk)"
-_MK_EPILOG = "See also: check, list"
-
-
-@app.command("metakernels", rich_help_panel=INSPECT, help=_MK_HELP, epilog=_MK_EPILOG)
-@app.command("mk", hidden=True, help=_MK_HELP, epilog=_MK_EPILOG)
-def metakernels(
+@app.command(rich_help_panel=INSPECT, epilog="See also: show, stats",
+             help="Local path of a kernel, and every filename its content is known under")
+def which(
     ctx: typer.Context,
-    name: Annotated[Optional[str], typer.Argument(
-        help="Show info for one metakernel (path, registry filename or base name)")] = None,
-    mission: Annotated[Optional[str], typer.Option(
-        "--mission", help="Filter by mission name (prefix match)")] = None,
-    remove: Annotated[bool, typer.Option(
-        "--remove",
-        help="Remove the named metakernel from the registry (does not delete files)")] = False,
-) -> None:
-    # --remove is the one destructive variant of an otherwise read-only command.
-    with open_db(ctx, read_only=not remove) as db:
-        if remove:
-            if not name:
-                print("Usage: spice-kernel-db mk --remove <name>", file=sys.stderr)
-                sys.exit(1)
-            # Matched against the registry directly, not through the file
-            # resolver: removing a row whose file is gone is the point.
-            if db.remove_metakernel(name):
-                print(f"Metakernel '{name}' removed from registry.")
-            else:
-                print(f"Metakernel '{name}' not found.", file=sys.stderr)
-                sys.exit(1)
-        elif name:
-            db.info_metakernel(name)
-        else:
-            db.list_metakernels(mission=mission)
-
-
-@app.command(rich_help_panel=INSPECT, epilog="See also: check, list",
-             help="Find local path for a kernel filename")
-def resolve(
-    ctx: typer.Context,
-    filename: Annotated[Optional[str], typer.Argument(
-        help="Kernel filename to resolve "
-             "(omit to pick a tracked metakernel interactively)")] = None,
+    kernel: Annotated[Optional[str], typer.Argument(
+        help="Kernel filename (canonical or alias) or a SHA-256 prefix (6+ chars). "
+             "Omit to pick from the deduplicated kernels at a terminal.")] = None,
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Preferred mission for resolution")] = None,
-    resolve_mk: Annotated[Optional[str], typer.Option(
+    metakernel: Annotated[Optional[str], typer.Option(
         "--metakernel",
-        help="Resolve all kernels in a metakernel (path, registry filename "
-             "or base name)")] = None,
+        help="Resolve every kernel of a metakernel instead (path, registry "
+             "filename or base name); one 'kernel<TAB>path' line each")] = None,
 ) -> None:
     with open_db(ctx, read_only=True) as db:
-        if resolve_mk:
-            # Batch mode — resolve all kernels in a metakernel
-            from spice_kernel_db import parse_metakernel
-            mk = db.resolve_metakernel(resolve_mk, mission=mission)
-            all_ok = True
-            for kernel in parse_metakernel(mk).kernel_filenames():
-                path, warnings = db.resolve_kernel(kernel, preferred_mission=mission)
-                if path:
-                    print(f"{kernel}\t{path}")
-                else:
-                    print(f"{kernel}\tNOT FOUND", file=sys.stderr)
-                    all_ok = False
-                for w in warnings:
-                    print(f"  ⚠ {w}", file=sys.stderr)
-            if not all_ok:
-                sys.exit(1)
-        elif filename:
-            path, warnings = db.resolve_kernel(filename, preferred_mission=mission)
-            if path:
-                print(path)
-            else:
-                print(f"Not found: {filename}", file=sys.stderr)
-                print(
-                    "  Hint: the kernel may exist on disk but not in the database.\n"
-                    "  Run 'spice-kernel-db scan <directory>' to re-index.",
-                    file=sys.stderr,
-                )
-            for w in warnings:
-                print(f"  ⚠ {w}", file=sys.stderr)
-        else:
-            picked = _select_local_metakernel(db, mission)
-            if picked is None:
-                sys.exit(1)
-            print(picked)
-
-
-@app.command(rich_help_panel=INSPECT, epilog="See also: resolve, duplicates",
-             help="Show every filename a deduplicated kernel is known under")
-def aliases(
-    ctx: typer.Context,
-    name_or_hash: Annotated[Optional[str], typer.Argument(
-        help="A kernel filename (canonical or alias) or a SHA-256 "
-             "(full or >=6-char prefix). Omit to pick from deduplicated "
-             "kernels interactively.")] = None,
-) -> None:
-    with open_db(ctx, read_only=True) as db:
-        target = name_or_hash
-        if target is None:
-            target = _interactive_pick_deduplicated_kernel(db)
-            if target is None:
+        if metakernel:
+            _which_all(db, metakernel, mission)
+            return
+        if kernel is None:
+            kernel = _interactive_pick_deduplicated_kernel(db)
+            if kernel is None:
                 return
-        info = db.aliases(target)
-        if info is None:
-            print(f"Not found: {target}", file=sys.stderr)
+        path, warnings = db.resolve_kernel(kernel, preferred_mission=mission)
+        info = db.aliases(kernel)
+        if path is None and info is None:
+            print(f"Not found: {kernel}", file=sys.stderr)
             print(
-                "  Hint: give a known kernel filename (canonical or alias) "
-                "or a SHA-256 prefix.",
+                "  Hint: the kernel may exist on disk but not in the database.\n"
+                "  Run 'spice-kernel-db scan <directory>' to re-index.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        _print_aliases(info)
+        if path:
+            print(path)
+        for w in warnings:
+            print(f"  ⚠ {w}", file=sys.stderr)
+        if info and (path is None or len(info["aliases"]) > 1):
+            _print_aliases(info)
 
 
-@app.command(rich_help_panel=INSPECT, help="Show database statistics")
+def _which_all(db: KernelDB, metakernel: str, mission: str | None) -> None:
+    """One ``kernel<TAB>path`` line per entry of *metakernel*; exit 1 when any is unresolved."""
+    from spice_kernel_db import parse_metakernel
+
+    mk = db.resolve_metakernel(metakernel, mission=mission)
+    all_ok = True
+    for kernel in parse_metakernel(mk).kernel_filenames():
+        path, warnings = db.resolve_kernel(kernel, preferred_mission=mission)
+        if path:
+            print(f"{kernel}\t{path}")
+        else:
+            print(f"{kernel}\tNOT FOUND", file=sys.stderr)
+            all_ok = False
+        for w in warnings:
+            print(f"  ⚠ {w}", file=sys.stderr)
+    if not all_ok:
+        sys.exit(1)
+
+
+@app.command(rich_help_panel=INSPECT, epilog="See also: doctor, dedup",
+             help="Database statistics, duplicate kernels included")
 def stats(ctx: typer.Context) -> None:
     with open_db(ctx, read_only=True) as db:
         db.stats()
-
-
-@app.command(rich_help_panel=INSPECT, help="Report duplicate kernels")
-def duplicates(ctx: typer.Context) -> None:
-    with open_db(ctx, read_only=True) as db:
         db.report_duplicates()
+
+
+# --- the pre-#47 names, hidden; each prints its rename note -----------------
+
+renamed("list", "show", show)
+renamed("resolve", "which", which)
+renamed("aliases", "which", which)
+renamed("duplicates", "stats", stats)
+
+
+@app.command("metakernels", hidden=True, help="Renamed: use ls, show or rm")
+@app.command("mk", hidden=True, help="Renamed: use ls, show or rm")
+def metakernels(
+    ctx: typer.Context,
+    name: Annotated[Optional[str], typer.Argument()] = None,
+    mission: Annotated[Optional[str], typer.Option("--mission")] = None,
+    remove: Annotated[bool, typer.Option("--remove")] = False,
+) -> None:
+    old = ctx.command.name
+    if remove:
+        from .transform import rm
+
+        rename_note(f"{old} --remove", "rm")
+        rm(ctx, metakernel=name, mission=mission)
+    elif name:
+        rename_note(f"{old} <name>", "show <name>")
+        show(ctx, metakernel=name, mission=mission)
+    else:
+        rename_note(old, "ls")
+        ls(ctx, mission=mission)
 
 
 # --- rendering -----------------------------------------------------------
@@ -394,7 +376,7 @@ def _print_aliases(info: dict) -> None:
 
 def _location_kind(path: str) -> str:
     """Describe an on-disk location: a real file, a symlink (→ target name),
-    or missing. Used to annotate the `aliases` on-disk listing."""
+    or missing. Used to annotate the `which` on-disk listing."""
     p = Path(path)
     if p.is_symlink():
         try:
@@ -431,68 +413,6 @@ def _render_verify_table(result: dict) -> None:
         status = e["status"]
         color = style_for.get(status, "white")
         table.add_row(e["raw"], f"[{color}]{status}[/{color}]", e["detail"])
-    console.print(table)
-
-
-
-_KERNEL_TYPES = ("ck", "spk", "fk", "ik", "pck", "lsk", "sclk", "dsk")
-
-
-def _kernel_type_of(path: str) -> str:
-    """The kernel type named by a directory component of *path*, or ''."""
-    for part in path.replace("\\", "/").split("/"):
-        if part in _KERNEL_TYPES:
-            return part
-    return ""
-
-
-def _list_kernels(metakernel: str, db: KernelDB | None = None,
-                  kernel_type: str | None = None) -> None:
-    """Parse a metakernel and list its kernels in a rich table.
-
-    When ``db`` is given, kernels whose content is deduplicated are
-    annotated with ``(+N aliases)``.
-    """
-    from spice_kernel_db import parse_metakernel
-
-    parsed = parse_metakernel(metakernel)
-
-    kernels = parsed.kernels
-    if kernel_type:
-        kt = kernel_type.lower()
-        kernels = [k for k in kernels if f"/{kt}/" in k.lower()]
-
-    type_counts: dict[str, int] = {}
-    for k in parsed.kernels:
-        ktype = _kernel_type_of(k)
-        if ktype:
-            type_counts[ktype] = type_counts.get(ktype, 0) + 1
-
-    console.print(f"\n[bold]Metakernel:[/bold] {metakernel}")
-    console.print(f"[bold]Kernels:[/bold] {len(parsed.kernels)} total")
-    if type_counts:
-        summary = ", ".join(f"{v} {k}" for k, v in sorted(type_counts.items()))
-        console.print(f"[dim]({summary})[/dim]")
-    console.print()
-
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("#", justify="right", style="dim")
-    table.add_column("Type", style="bold")
-    table.add_column("Kernel")
-
-    display_names = [k.replace("\\", "/").rsplit("/", 1)[-1] for k in kernels]
-    alias_extra = db.alias_counts_by_name(display_names) if db is not None else {}
-
-    for i, (k, filename) in enumerate(zip(kernels, display_names), 1):
-        n_alias = alias_extra.get(filename)
-        label = filename
-        if n_alias:
-            label = (
-                f"{filename} [cyan](+{n_alias} "
-                f"alias{'es' if n_alias > 1 else ''})[/cyan]"
-            )
-        table.add_row(str(i), _kernel_type_of(k), label)
-
     console.print(table)
 
 

@@ -20,6 +20,7 @@ import http.client
 import logging
 import os
 import shutil
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -275,7 +276,7 @@ class MetakernelUnreachableError(LookupError):
     """Raised when the remote metakernel returns a permanent HTTP error
     (403/404/410), typically because NAIF rotated the file into
     ``former_versions/``. The local registry row is now an obsolete
-    pointer; the user should clean it up with ``prune --metakernels``.
+    pointer; the user should clean it up with ``clean --registry``.
     """
 
     def __init__(self, url: str, status: int, filename: str):
@@ -968,11 +969,7 @@ class KernelDB:
         # Index metakernels into the registry
         for mk_path, m in mk_files:
             try:
-                self.index_metakernel(mk_path)
-                self.con.execute("""
-                    INSERT OR REPLACE INTO metakernel_registry
-                    VALUES (?, ?, NULL, ?, current_timestamp)
-                """, [str(mk_path), m, mk_path.name])
+                self._track_metakernel(mk_path, m)
             except (PermissionError, MemoryError, KeyboardInterrupt):
                 raise
             except OSError as e:
@@ -1214,6 +1211,21 @@ class KernelDB:
     # Metakernel operations
     # ------------------------------------------------------------------
 
+    def _track_metakernel(
+        self, mk_path: Path, mission: str, source_url: str | None = None,
+    ) -> None:
+        """Index *mk_path*'s entries and write (or replace) its registry row.
+
+        The one registration sequence behind ``scan``, ``get`` and
+        ``import``; ``source_url`` is None for a file that was never
+        downloaded.
+        """
+        self.index_metakernel(mk_path)
+        self.con.execute("""
+            INSERT OR REPLACE INTO metakernel_registry
+            VALUES (?, ?, ?, ?, current_timestamp)
+        """, [str(mk_path), mission, source_url, mk_path.name])
+
     def index_metakernel(self, mk_path: str | Path):
         """Parse and register a metakernel's entries in the DB.
 
@@ -1257,7 +1269,7 @@ class KernelDB:
         ).fetchall()
         return [RegistryRow(*r) for r in rows]
 
-    def _registry_row(
+    def registry_row(
         self, ref: str | Path, mission: str | None = None,
     ) -> RegistryRow | None:
         """The registry row *ref* names, or None when no row matches.
@@ -1296,16 +1308,16 @@ class KernelDB:
         """The on-disk path of the metakernel *ref* names (#45).
 
         A path that exists is returned as is; anything else goes through
-        ``_registry_row``. Every command that reads a metakernel resolves
-        through here, so a name that works for ``check`` works for ``list``
-        and ``verify`` too (#41). Raises ``MetakernelNotTracked`` when
+        ``registry_row``. Every command that reads a metakernel resolves
+        through here, so a name that works for ``check`` works for ``show``
+        and ``rewrite`` too (#41). Raises ``MetakernelNotTracked`` when
         nothing matches or the matched file is gone, ``AmbiguousMetakernel``
         when several rows match.
         """
         candidate = Path(ref)
         if candidate.is_file():
             return candidate
-        row = self._registry_row(ref, mission=mission)
+        row = self.registry_row(ref, mission=mission)
         if row is None:
             raise MetakernelNotTracked(str(ref))
         path = Path(row.mk_path)
@@ -1313,7 +1325,7 @@ class KernelDB:
             raise MetakernelNotTracked(
                 str(ref),
                 detail=f"'{ref}' is registered at {path} but the file is gone; "
-                       f"run `spice-kernel-db prune --metakernels` or "
+                       f"run `spice-kernel-db clean --registry` or "
                        f"`spice-kernel-db get {ref}`",
             )
         return path
@@ -1661,7 +1673,7 @@ class KernelDB:
                     return (
                         f"Remote update available: server modified {entry.date}"
                         f" (acquired {acq_dt:%Y-%m-%d %H:%M}). "
-                        f"Run 'spice-kernel-db update {mk_filename}' to fetch it."
+                        f"Run 'spice-kernel-db get {mk_filename}' to fetch it."
                     )
                 break
         return None
@@ -2155,6 +2167,7 @@ class KernelDB:
         force: bool = False,
         alias_filename: str | None = None,
         verbose: bool = False,
+        dry_run: bool = False,
     ) -> dict:
         """Fetch a remote metakernel, show status, and download missing kernels.
 
@@ -2174,10 +2187,15 @@ class KernelDB:
                 the actual file is ``juice_crema_5_2_v470_20260415_001.tm``).
                 A symlink is created at ``mk/<alias_filename>`` pointing to
                 the downloaded file, and a second ``metakernel_registry``
-                row is added so ``resolve <alias_filename>`` works.
+                row is added so ``which <alias_filename>`` works.
+            dry_run: If True, stop after the status table: nothing is written
+                to disk or to the database and no kernel is downloaded. This
+                is what ``update`` (all tracked metakernels) runs by default
+                (#47).
 
         Returns:
-            dict with keys: found, missing, downloaded, warnings
+            dict with keys: found, missing, downloaded, warnings (and
+            ``dry_run: True`` when nothing was written)
         """
         # 0. Resolve download_dir early (needed for saving .tm)
         if download_dir is None:
@@ -2210,7 +2228,6 @@ class KernelDB:
         if alias_filename is None and requested_filename != mk_filename:
             alias_filename = requested_filename
         mk_dest = download_dir / mission / "mk" / mk_filename
-        mk_dest.parent.mkdir(parents=True, exist_ok=True)
 
         # Resolve each PATH_VALUE relative to the mk/ directory and make absolute
         # Validate that resolved paths stay within download_dir (Issue 1)
@@ -2222,38 +2239,36 @@ class KernelDB:
         # Snapshot prior state so we can roll back cleanly if the user
         # declines the kernel download. Without this, declining left a
         # registry row + indexed entries + on-disk .tm but no kernels,
-        # which `mk` then listed as if the metakernel were ready.
+        # which `ls` then listed as if the metakernel were ready.
         mk_existed_before = mk_dest.exists()
         prior_mk_content = mk_dest.read_bytes() if mk_existed_before else None
-        write_metakernel(parsed, mk_dest, path_values=abs_path_values)
-        self.index_metakernel(mk_dest)
-        self.con.execute("""
-            INSERT OR REPLACE INTO metakernel_registry
-            VALUES (?, ?, ?, ?, current_timestamp)
-        """, [str(mk_dest), mission, final_url, mk_filename])
+        if not dry_run:
+            mk_dest.parent.mkdir(parents=True, exist_ok=True)
+            write_metakernel(parsed, mk_dest, path_values=abs_path_values)
+            self._track_metakernel(mk_dest, mission, final_url)
 
-        # 1b-alias. Expose the metakernel under a second name via symlink.
-        if alias_filename and alias_filename != mk_filename:
-            alias_path = mk_dir / alias_filename
-            self._create_metakernel_alias(
-                alias_path, mk_dest, mission, url, alias_filename,
+            # 1b-alias. Expose the metakernel under a second name via symlink.
+            if alias_filename and alias_filename != mk_filename:
+                alias_path = mk_dir / alias_filename
+                self._create_metakernel_alias(
+                    alias_path, mk_dest, mission, url, alias_filename,
+                )
+
+            # 1c. Write .spice-server marker for scan auto-detection
+            mk_dir_url = url.rsplit("/", 1)[0] + "/"
+            server_url = ""
+            if m:
+                server_url = m["server_url"]
+            else:
+                for label, surl in SPICE_SERVERS.items():
+                    if url.startswith(surl):
+                        server_url = surl
+                        break
+            marker = download_dir / mission / ".spice-server"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                f"server_url={server_url}\nmk_dir_url={mk_dir_url}\n"
             )
-
-        # 1c. Write .spice-server marker for scan auto-detection
-        mk_dir_url = url.rsplit("/", 1)[0] + "/"
-        server_url = ""
-        if m:
-            server_url = m["server_url"]
-        else:
-            for label, surl in SPICE_SERVERS.items():
-                if url.startswith(surl):
-                    server_url = surl
-                    break
-        marker = download_dir / mission / ".spice-server"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(
-            f"server_url={server_url}\nmk_dir_url={mk_dir_url}\n"
-        )
 
         # 2. Resolve kernel URLs
         kernel_urls = resolve_kernel_urls(url, parsed)
@@ -2356,6 +2371,15 @@ class KernelDB:
             title=mk_name,
         ))
 
+        if dry_run:
+            return {
+                "found": found_indices,
+                "missing": missing_indices,
+                "downloaded": [],
+                "warnings": [],
+                "dry_run": True,
+            }
+
         if n_missing == 0:
             n_linked = 0
             if mission_dedup:
@@ -2382,7 +2406,7 @@ class KernelDB:
             ).strip().lower()
             if answer not in ("y", "yes"):
                 # Roll back the speculative registration. Without this,
-                # the metakernel would appear in `mk` as if it were
+                # the metakernel would appear in `ls` as if it were
                 # ready, even though its required kernels were never
                 # downloaded.
                 if mk_existed_before and prior_mk_content is not None:
@@ -2545,6 +2569,8 @@ class KernelDB:
         yes: bool = False,
         force: bool = False,
         verbose: bool = False,
+        dry_run: bool = False,
+        rescan: bool = True,
     ) -> dict:
         """Re-fetch a metakernel from its source URL and download new kernels.
 
@@ -2558,13 +2584,15 @@ class KernelDB:
                 report the count in one line (#4).
             download_dir: Override kernel download directory.
             yes: Skip confirmation prompt.
+            dry_run: Report what would change and write nothing (#47).
+            rescan: Re-index the directories the metakernel points at after
+                the download (default). ``update_all`` passes False and
+                scans each distinct directory once at the end.
 
         Returns:
-            dict from ``get_metakernel``.
+            dict from ``get_metakernel``, plus ``scan_dirs`` after a real run.
         """
-        import duckdb
-
-        row = self._registry_row(mk_path_or_name, mission=mission)
+        row = self.registry_row(mk_path_or_name, mission=mission)
         if row is None:
             raise MetakernelNotTracked(str(mk_path_or_name))
 
@@ -2580,11 +2608,11 @@ class KernelDB:
                 source_url = m["mk_dir_url"] + mk_filename
             else:
                 raise LookupError(
-                    "This metakernel was added via scan, not downloaded. "
-                    "Use 'get' with a URL."
+                    f"{mk_filename} was added by scan or import and has no source "
+                    f"URL, and its mission has no mk/ URL. Configure the mission "
+                    f"(spice-kernel-db mission add) or pass the URL to get."
                 )
 
-        import urllib.error
         try:
             result = self.get_metakernel(
                 source_url,
@@ -2592,6 +2620,7 @@ class KernelDB:
                 mission=mission,
                 yes=yes,
                 force=force,
+                dry_run=dry_run,
             )
         except urllib.error.HTTPError as e:
             if e.code in (403, 404, 410):
@@ -2607,54 +2636,164 @@ class KernelDB:
         # Re-scan the kernel directories referenced by the metakernel
         # so that new/renamed files on disk get indexed.  Skip if --force
         # was used, since get_metakernel already re-downloaded and
-        # registered everything.
-        if force:
+        # registered everything; a dry run changed nothing to re-scan.
+        if force or dry_run:
             return result
+        result["scan_dirs"] = self._metakernel_dirs(mk_path, mission, mk_filename, download_dir)
+        if rescan:
+            self._rescan(result["scan_dirs"], mission, verbose=verbose)
+        return result
 
-        from spice_kernel_db import parse_metakernel as _parse_mk
+    def _metakernel_dirs(
+        self, mk_path: str, mission: str, mk_filename: str,
+        download_dir: str | Path | None,
+    ) -> set[Path]:
+        """The directories a tracked metakernel's ``PATH_VALUES`` point at.
 
-        # Find the local .tm — either the original mk_path or the one
-        # get_metakernel just wrote.
+        The .tm is either *mk_path* or the file ``get_metakernel`` just wrote
+        under ``download_dir/mission/mk/``.
+        """
         local_mk = Path(mk_path) if Path(mk_path).is_file() else None
         if local_mk is None:
-            # get_metakernel writes to download_dir/mission/mk/filename
             if download_dir is None:
                 from spice_kernel_db.config import DEFAULT_KERNEL_DIR, load_config
                 config = load_config()
                 download_dir = config.kernel_dir if config else DEFAULT_KERNEL_DIR
             candidate = (
-                Path(download_dir).expanduser().resolve()
-                / mission / "mk" / mk_filename
+                Path(download_dir).expanduser().resolve() / mission / "mk" / mk_filename
             )
             if candidate.is_file():
                 local_mk = candidate
+        if local_mk is None:
+            return set()
+        try:
+            parsed_local = parse_metakernel(str(local_mk))
+        except OSError as e:
+            logger.warning("Could not read %s for the rescan: %s", local_mk, e)
+            return set()
+        mk_dir = local_mk.resolve().parent
+        return {
+            (mk_dir / pv).resolve() for pv in parsed_local.path_values
+            if (mk_dir / pv).resolve().is_dir()
+        }
 
-        if local_mk is not None:
+    def _rescan(self, scan_dirs: set[Path], mission: str | None, *, verbose: bool) -> None:
+        """``scan_directory`` over *scan_dirs*, each once (#47: ``update``
+        collects the directories of every tracked metakernel first)."""
+        import duckdb
+
+        for sd in sorted(scan_dirs):
+            if verbose:
+                console.print(f"[dim]Re-scanning {sd} for updated kernels...[/dim]")
             try:
-                parsed_local = _parse_mk(str(local_mk))
-                # Resolve PATH_VALUES relative to the mk directory
-                mk_dir = local_mk.resolve().parent
-                scan_dirs = set()
-                for pv in parsed_local.path_values:
-                    resolved = (mk_dir / pv).resolve()
-                    if resolved.is_dir():
-                        scan_dirs.add(resolved)
-                for sd in sorted(scan_dirs):
-                    if verbose:
-                        console.print(
-                            f"[dim]Re-scanning {sd} for updated kernels...[/dim]"
-                        )
-                    self.scan_directory(str(sd), mission=mission)
-                if scan_dirs and not verbose:
-                    console.print(
-                        f"[dim]Re-scanned {len(scan_dirs)} "
-                        f"director{'y' if len(scan_dirs) == 1 else 'ies'} "
-                        f"for updated kernels.[/dim]"
-                    )
+                self.scan_directory(str(sd), mission=mission)
             except (OSError, duckdb.Error) as e:
-                logger.warning("Post-update rescan failed: %s", e)
+                logger.warning("Post-update rescan of %s failed: %s", sd, e)
+        if scan_dirs and not verbose:
+            console.print(
+                f"[dim]Re-scanned {len(scan_dirs)} "
+                f"director{'y' if len(scan_dirs) == 1 else 'ies'} "
+                f"for updated kernels.[/dim]"
+            )
 
-        return result
+    def update_all(
+        self,
+        download_dir: str | Path | None = None,
+        dry_run: bool = False,
+        verbose: bool = False,
+    ) -> list[dict]:
+        """Re-fetch every tracked metakernel from its source (#47).
+
+        With ``dry_run`` each metakernel's status table is shown and
+        nothing is written. Otherwise the missing kernels are downloaded
+        without a per-metakernel prompt (the CLI's ``--execute`` is the
+        confirmation) and the directories every metakernel points at are
+        re-indexed once at the end. Alias rows (a symlink next to its
+        target) are skipped; a source that has gone from the server, or a
+        row without one, is reported in the table, never fatal.
+
+        Returns one dict per registry row walked: ``filename``, ``mission``,
+        ``count`` (kernels missing in a dry run, downloaded otherwise) and
+        ``error`` (None or one line).
+        """
+        report: list[dict] = []
+        scan_dirs: dict[Path, str] = {}
+        for row in self.registry_rows():
+            if Path(row.mk_path).is_symlink():
+                continue  # the alias of a row walked under its own name
+            entry = {"filename": row.filename, "mission": row.mission,
+                     "count": 0, "error": None}
+            console.print(f"\n[bold]{row.filename}[/bold] ({row.mission})")
+            try:
+                result = self.update_metakernel(
+                    row.mk_path, download_dir=download_dir, yes=True,
+                    verbose=verbose, dry_run=dry_run, rescan=False,
+                )
+                entry["count"] = len(result["missing" if dry_run else "downloaded"])
+                for sd in result.get("scan_dirs", ()):
+                    scan_dirs.setdefault(sd, row.mission)
+            except MetakernelUnreachableError as e:
+                entry["error"] = f"source gone (HTTP {e.status}); spice-kernel-db clean --registry"
+            except LookupError as e:
+                entry["error"] = str(e)
+            except (urllib.error.URLError, OSError) as e:
+                entry["error"] = f"could not reach the source: {e}"
+            report.append(entry)
+
+        for sd, mission in sorted(scan_dirs.items()):
+            self._rescan({sd}, mission, verbose=verbose)
+
+        table = Table(title="update: all tracked metakernels" + (" (dry run)" if dry_run else ""))
+        table.add_column("Mission")
+        table.add_column("Metakernel")
+        table.add_column("Missing" if dry_run else "Downloaded", justify="right")
+        table.add_column("Note")
+        for e in report:
+            table.add_row(e["mission"] or "", e["filename"],
+                          "" if e["error"] else str(e["count"]), e["error"] or "")
+        console.print(table)
+        return report
+
+    def import_metakernel(
+        self, mk_path: str | Path, mission: str | None = None,
+    ) -> dict:
+        """Track a metakernel that is already on disk, without a download (#47).
+
+        Indexes its entries, registers every kernel it resolves to that
+        exists on disk, and adds the registry row with no source URL (as
+        ``scan`` does for the .tm files it meets). *mission* defaults to
+        ``guess_mission`` on the path.
+
+        Returns ``mk_path``, ``filename``, ``mission``, ``n_entries``,
+        ``n_registered`` and ``missing`` (the entries whose file is not on
+        disk). Raises ``FileNotFoundError`` when *mk_path* is not a file.
+        """
+        p = Path(mk_path).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"No such metakernel: {mk_path}")
+        mission = canonicalize_mission(mission or guess_mission(str(p)))
+        m = self.get_mission(mission)
+        if m:
+            mission = m["name"]
+        parsed = parse_metakernel(p)
+        missing: list[str] = []
+        n_registered = 0
+        for raw in parsed.kernels:
+            kernel = Path(parsed.resolve(raw))
+            if kernel.is_file():
+                self.register_file(kernel, mission=mission)
+                n_registered += 1
+            else:
+                missing.append(raw)
+        self._track_metakernel(p, mission)
+        return {
+            "mk_path": str(p),
+            "filename": p.name,
+            "mission": mission,
+            "n_entries": len(parsed.kernels),
+            "n_registered": n_registered,
+            "missing": missing,
+        }
 
     # ------------------------------------------------------------------
     # Metakernel listing / info
@@ -2825,24 +2964,35 @@ class KernelDB:
             matches.append({**row, "intervals": intervals})
         return matches
 
-    def info_metakernel(self, name: str) -> dict:
-        """Show detailed info about a tracked metakernel.
+    def info_metakernel(
+        self, name: str, kernel_type: str | None = None, mission: str | None = None,
+    ) -> dict:
+        """Show a metakernel: its registry row and the kernels it lists (#47).
 
-        *name* is any form ``resolve_metakernel`` accepts.
+        *name* is any form ``resolve_metakernel`` accepts, or the path of a
+        .tm that is not tracked (then the row fields are None and the file
+        is read directly). *kernel_type* limits the printed kernel table to
+        one type; the counts stay whole.
         """
-        row = self._registry_row(name)
+        row = self.registry_row(name, mission=mission)
         if row is None:
-            raise MetakernelNotTracked(str(name))
+            if not Path(name).is_file():
+                raise MetakernelNotTracked(str(name))
+            mk_path, source_url, filename, acquired_at = str(name), None, Path(name).name, None
+        else:
+            mk_path, source_url, filename, mission, acquired_at = row
 
-        mk_path, source_url, filename, mission, acquired_at = row
-
-        # Get kernel entries
         entries = self.con.execute("""
             SELECT entry_index, raw_entry, filename
             FROM metakernel_entries
             WHERE mk_path = ?
             ORDER BY entry_index
         """, [mk_path]).fetchall()
+        if not entries and Path(mk_path).is_file():
+            # Untracked, or a row whose entries were never indexed: read the file.
+            parsed = parse_metakernel(mk_path)
+            entries = list(zip(range(len(parsed.kernels)), parsed.kernels,
+                               parsed.kernel_filenames()))
 
         # For each entry, check availability using resolve_kernel
         kernel_info = []
@@ -2880,19 +3030,25 @@ class KernelDB:
 
         # Print detailed info
         print(f"\nMetakernel: {filename}")
-        print(f"  Mission:      {mission}")
-        if source_url:
-            print(f"  Source:       {source_url}")
-        print(f"  Acquired:     {acquired_at}")
+        if row is None:
+            print(f"  Not tracked; spice-kernel-db import {mk_path} tracks it.")
+        else:
+            print(f"  Mission:      {mission}")
+            if source_url:
+                print(f"  Source:       {source_url}")
+            print(f"  Acquired:     {acquired_at}")
         print(f"  Local path:   {mk_path}")
 
-        if kernel_info:
+        shown = kernel_info
+        if kernel_type:
+            shown = [k for k in kernel_info if k["kernel_type"] == kernel_type.lower()]
+        if shown:
             table = Table()
             table.add_column("Kernel")
             table.add_column("Type")
             table.add_column("Size", justify="right")
             table.add_column("Status")
-            for k in kernel_info:
+            for k in shown:
                 sz_str = _format_size(k["size_bytes"]) if k["size_bytes"] is not None else "—"
                 table.add_row(
                     k["filename"], k["kernel_type"], sz_str, k["status"],
@@ -2922,7 +3078,7 @@ class KernelDB:
 
         Returns True if found and removed, False if not found.
         """
-        row = self._registry_row(name)
+        row = self.registry_row(name)
         if row is None:
             return False
 
@@ -3152,7 +3308,7 @@ class KernelDB:
         """Kernels flagged superseded by content that exists in no live location.
 
         The state #29 made repairable and #31 makes visible: the kernel's own
-        file is on disk, so ``resolve`` should find it, but ``superseded_by``
+        file is on disk, so ``which`` should find it, but ``superseded_by``
         points at a hash with no file anywhere, so ``find_by_filename``
         skips the row and every ``update`` downloads the kernel again.
         ``scan`` over the kernel directory repairs every row listed here;
@@ -3184,7 +3340,7 @@ class KernelDB:
 
     def stale_locations(self) -> list[tuple[str, str]]:
         """``(sha256, abs_path)`` of every location whose file is gone from
-        disk. The one walk behind ``prune`` and ``doctor``."""
+        disk. The one walk behind ``clean`` and ``doctor``."""
         rows = self.con.execute(
             "SELECT sha256, abs_path FROM locations ORDER BY abs_path"
         ).fetchall()
@@ -3196,7 +3352,7 @@ class KernelDB:
         ``poisoned`` is ``poisoned_superseded()``: the one state that is
         corruption, since every ``update`` re-downloads those kernels.
         ``missing_locations`` and ``missing_metakernels`` list rows whose
-        file is gone from disk; ``prune`` and ``mk --remove`` clean them up.
+        file is gone from disk; ``clean`` and ``rm`` clean them up.
         """
         registry = self.registry_rows()
         return {
@@ -3403,7 +3559,7 @@ class KernelDB:
         Walks every distinct mission's download directory (derived from
         ``metakernel_registry.mk_path``) recursively and reports
         dangling symlinks. These accumulate when the underlying kernel
-        store moves or when the default ``prune`` removes a stale
+        store moves or when ``clean --locations`` removes a stale
         ``locations`` row — the symlinks pointing at that file are not
         themselves tracked in ``locations``, so they stay on the FS as
         junk.
@@ -3488,7 +3644,6 @@ class KernelDB:
             ``{'mk_path', 'filename', 'mission', 'source_url',
               'status_code'}``.
         """
-        import urllib.error
         import urllib.request
 
         # Walk every registry row. We deliberately do NOT filter on
@@ -3576,7 +3731,7 @@ class KernelDB:
             console.print(
                 f"[dim]{len(no_url)} row(s) had no probeable URL "
                 f"(no source_url and no mission mk_dir_url). "
-                f"Use `mk --remove <name>` to drop them manually.[/dim]"
+                f"Use `spice-kernel-db rm <name>` to drop them manually.[/dim]"
             )
 
         if not dead:

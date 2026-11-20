@@ -242,7 +242,7 @@ def _interactive_pick_deduplicated_kernel(db: KernelDB) -> str | None:
     """Show a picker over deduplicated kernels and return the chosen name.
 
     Lists kernels whose content is shared under more than one filename
-    (the only ones for which `aliases` shows a non-trivial trail), with an
+    (the only ones for which `which` shows a non-trivial trail), with an
     alias count, sorted most-aliased first. Returns the canonical filename
     of the selection, or ``None`` if there are none or the user cancels.
     """
@@ -266,7 +266,7 @@ def _interactive_pick_deduplicated_kernel(db: KernelDB) -> str | None:
         err_console.print(
             "[yellow]No deduplicated kernels in the database — every kernel "
             "has a unique name.\nPass a name or hash explicitly: "
-            "spice-kernel-db aliases <name|hash>[/yellow]"
+            "spice-kernel-db which <name|hash>[/yellow]"
         )
         return None
 

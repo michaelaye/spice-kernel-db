@@ -1,4 +1,4 @@
-"""Remote commands: browse, get, update."""
+"""Acquire panel: browse, get, update (all tracked metakernels)."""
 
 from __future__ import annotations
 
@@ -14,13 +14,12 @@ from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
 from spice_kernel_db.hashing import guess_mission
 from spice_kernel_db.remote import Probe, ProbeResult, probe_url
 
-from ._app import BROWSE, app, open_db, state
+from ._app import ACQUIRE, app, open_db, rename_note, state
 from .prompts import (
     INVALID,
     _interactive_select_metakernel,
     _mission_table,
     _pick_index,
-    _require_metakernel,
     _resolve_mission_mk_dir,
     _menu,
     console,
@@ -40,7 +39,7 @@ class SortBy(str, Enum):
     date = "date"
 
 
-@app.command(rich_help_panel=BROWSE, epilog="See also: get, mission add",
+@app.command(rich_help_panel=ACQUIRE, epilog="See also: get, mission add",
              help="Browse remote metakernels in a NAIF mk/ directory")
 def browse(
     ctx: typer.Context,
@@ -171,13 +170,14 @@ def _locate_remote_metakernel(mk_dir_url: str, filename: str) -> str:
     sys.exit(1)
 
 
-@app.command(rich_help_panel=BROWSE, epilog="See also: browse, update",
-             help="Download missing kernels for a remote metakernel")
+@app.command(rich_help_panel=ACQUIRE, epilog="See also: browse, update, import",
+             help="Download a metakernel and the kernels it needs that are missing")
 def get(
     ctx: typer.Context,
     url: Annotated[Optional[str], typer.Argument(
-        help="Full URL, or .tm filename (requires a configured mission). "
-             "Omit to select interactively.")] = None,
+        help="Full URL, a tracked metakernel (re-fetched from its source), or a "
+             ".tm filename on the configured mission's server. "
+             "Omit to pick from the server listing at a terminal.")] = None,
     download_dir: DownloadDir = None,
     mission: MissionOverride = None,
     yes: Yes = False,
@@ -196,7 +196,13 @@ def get(
             url, alias_filename = selection
             mission = mission or guess_mission(url)
         elif not url.startswith("http"):
-            # Treat as a filename — resolve mission mk_dir_url
+            if db.registry_row(url, mission=mission) is not None:
+                # Tracked already: re-fetch from the stored source, download
+                # what is missing, re-index (what `update <name>` did, #47).
+                _refetch(db, url, mission=mission, download_dir=download_dir,
+                         yes=yes, force=force, verbose=st.verbose)
+                return
+            # A filename on the mission's server
             mk_dir_url, mission_name = _resolve_mission_mk_dir(db, mission)
             if not mk_dir_url:
                 return
@@ -213,47 +219,56 @@ def get(
         )
 
 
-@app.command(rich_help_panel=BROWSE, epilog="See also: get, browse",
-             help="Re-fetch a metakernel from its source and download new kernels")
+def _refetch(db: KernelDB, name: str, **kwargs) -> None:
+    """``update_metakernel`` with the no-source and unreachable-source messages."""
+    try:
+        db.update_metakernel(name, **kwargs)
+    except LookupError as e:
+        # Tracked by scan or import: no source URL and no mission mk/ URL.
+        print(f"{e}", file=sys.stderr)
+        sys.exit(1)
+    except MetakernelUnreachableError as e:
+        console.print(Panel(
+            f"[red]The remote metakernel is no longer available.[/red]\n\n"
+            f"  URL:      {e.url}\n"
+            f"  Status:   HTTP {e.status}\n"
+            f"  Filename: {e.filename}\n\n"
+            f"NAIF (and ESA) routinely rotate old versioned snapshots "
+            f"into a [italic]former_versions/[/italic] subdirectory, "
+            f"which makes the original URL 404.\n\n"
+            f"To drop every registry row whose source is gone, run:\n"
+            f"  [bold]spice-kernel-db clean --registry[/bold]\n"
+            f"or remove just this one:\n"
+            f"  [bold]spice-kernel-db rm {e.filename}[/bold]",
+            title="Metakernel unreachable",
+            border_style="red",
+        ))
+        sys.exit(2)
+
+
+@app.command(rich_help_panel=ACQUIRE, epilog="See also: get, check",
+             help="Re-fetch every tracked metakernel from its source and report "
+                  "what would change; downloads only with --execute")
 def update(
     ctx: typer.Context,
-    metakernel: Annotated[Optional[str], typer.Argument(
-        help="Metakernel filename or path (omit to select interactively)")] = None,
-    mission: MissionOverride = None,
+    metakernel: Annotated[Optional[str], typer.Argument(hidden=True)] = None,
+    execute: Annotated[bool, typer.Option(
+        "--execute", help="Download the missing kernels (default: report only)")] = False,
     download_dir: DownloadDir = None,
-    yes: Yes = False,
-    force: Force = False,
+    # The three below serve only the pre-#47 form `update <name>`.
+    mission: Annotated[Optional[str], typer.Option("--mission", hidden=True)] = None,
+    yes: Annotated[bool, typer.Option("-y", "--yes", hidden=True)] = False,
+    force: Annotated[bool, typer.Option("--force", hidden=True)] = False,
 ) -> None:
+    if metakernel is not None:
+        rename_note(f"update {metakernel}", f"get {metakernel}")
+        get(ctx, url=metakernel, download_dir=download_dir, mission=mission,
+            yes=yes, force=force)
+        return
     st = state(ctx)
     if download_dir is None:
         download_dir = st.config.kernel_dir
-    with open_db(ctx) as db:
-        mk = _require_metakernel(metakernel, db, mission)
-        if mk is None:
-            return
-        try:
-            db.update_metakernel(
-                mk,
-                mission=mission,
-                download_dir=download_dir,
-                yes=yes,
-                force=force,
-                verbose=st.verbose,
-            )
-        except MetakernelUnreachableError as e:
-            console.print(Panel(
-                f"[red]The remote metakernel is no longer available.[/red]\n\n"
-                f"  URL:      {e.url}\n"
-                f"  Status:   HTTP {e.status}\n"
-                f"  Filename: {e.filename}\n\n"
-                f"NAIF (and ESA) routinely rotate old versioned snapshots "
-                f"into a [italic]former_versions/[/italic] subdirectory, "
-                f"which makes the original URL 404.\n\n"
-                f"To clean up the stale registry row, run:\n"
-                f"  [bold]spice-kernel-db prune --metakernels[/bold]\n"
-                f"or remove just this one:\n"
-                f"  [bold]spice-kernel-db mk --remove {e.filename}[/bold]",
-                title="Metakernel unreachable",
-                border_style="red",
-            ))
-            sys.exit(2)
+    with open_db(ctx, read_only=not execute) as db:
+        db.update_all(download_dir=download_dir, dry_run=not execute, verbose=st.verbose)
+    if not execute:
+        console.print("[dim]Dry run: pass --execute to download.[/dim]")

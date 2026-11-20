@@ -11,8 +11,9 @@ Browse, get, and manage SPICE kernels and metakernels across NASA and ESA missio
 > who used `spice-kernel-db get` or `spice-kernel-db update` are affected**,
 > regardless of the dedup setting — the symlink creation code did not honor the
 > per-mission dedup flag (also fixed in 0.10.0). Users who only used `scan` and
-> `resolve` are not affected. After updating, remove all symlinks in your kernel
-> directories and re-run `spice-kernel-db update`. See [CHANGELOG.md](CHANGELOG.md)
+> single-kernel lookup (`which` today) are not affected. After updating,
+> remove all symlinks in your kernel directories and re-run
+> `spice-kernel-db update --execute`. See [CHANGELOG.md](CHANGELOG.md)
 > for recovery steps.
 
 ## What this tool does

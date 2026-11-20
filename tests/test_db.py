@@ -931,17 +931,19 @@ class TestPruneOrphanSymlinks:
         assert "No download trees" in captured
         db.close()
 
-    def test_mutually_exclusive_with_metakernels_in_cli(self, tmp_path):
+    def test_clean_runs_every_named_class(self, tmp_path, capsys):
+        """#47: clean replaced prune; its classes combine instead of excluding
+        each other, and an empty registry means nothing to probe."""
         from spice_kernel_db.cli import main
         db = KernelDB(tmp_path / "test.duckdb")
         db.close()
         with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
-            with pytest.raises(SystemExit) as exc:
-                main([
-                    "--db", str(tmp_path / "test.duckdb"),
-                    "prune", "--metakernels", "--orphan-symlinks",
-                ])
-        assert exc.value.code == 1
+            main([
+                "--db", str(tmp_path / "test.duckdb"),
+                "clean", "--registry", "--symlinks",
+            ])
+        out = capsys.readouterr().out
+        assert "No download trees to walk" in out and "No metakernels in the registry" in out
 
 
 class TestRegistry:

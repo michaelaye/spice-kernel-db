@@ -22,7 +22,7 @@ from spice_kernel_db.remote import (
     server_label_for,
 )
 
-from ._app import CONFIGURE, app, open_db, state
+from ._app import CONFIGURE, MAINTAIN, app, open_db, state
 from .prompts import _ask, _confirm, _require_interactive, console
 
 mission_app = typer.Typer()
@@ -128,7 +128,7 @@ def _require_config_key(cfg, key: str) -> None:
         sys.exit(1)
 
 
-@app.command(rich_help_panel=CONFIGURE, help="Delete the database and start fresh")
+@app.command(rich_help_panel=MAINTAIN, help="Delete the database and start fresh")
 def reset(
     ctx: typer.Context,
     yes: Annotated[bool, typer.Option(

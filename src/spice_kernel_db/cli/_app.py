@@ -8,6 +8,8 @@ Keeping ``app`` in its own module avoids a circular import.
 
 from __future__ import annotations
 
+import functools
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -17,10 +19,10 @@ import typer
 from spice_kernel_db.config import Config
 from spice_kernel_db.db import KernelDB
 
-# Help panels, in the order they appear in ``--help``.
-BROWSE = "browse & acquire"
+# Help panels, in the order they appear in ``--help`` (#47).
+ACQUIRE = "acquire"
 INSPECT = "inspect"
-TRANSFORM = "transform"
+MAINTAIN = "maintain"
 CONFIGURE = "configure"
 
 app = typer.Typer(
@@ -31,6 +33,27 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
+
+
+def rename_note(old: str, new: str) -> None:
+    """The one line every old verb prints before running its new form (#47)."""
+    print(f"note: '{old}' is now '{new}'", file=sys.stderr)
+
+
+def renamed(old: str, new: str, target: Callable) -> None:
+    """Register *target* a second time under its old name, hidden.
+
+    The alias runs the new command unchanged after ``rename_note``. Typer
+    reads the parameters through ``__wrapped__``, so the alias accepts
+    exactly the new command's options. Aliases go away in 1.0 (#47).
+    """
+
+    @functools.wraps(target)
+    def alias(*args, **kwargs):
+        rename_note(old, new)
+        return target(*args, **kwargs)
+
+    app.command(old, hidden=True, help=f"Renamed: use {new}")(alias)
 
 
 @dataclass

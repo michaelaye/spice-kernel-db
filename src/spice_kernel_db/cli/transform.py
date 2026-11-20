@@ -1,4 +1,4 @@
-"""Commands that change the database or the files on disk: scan, rewrite, dedup, prune."""
+"""Maintain panel: scan, import, rewrite, rm, clean, dedup (reset lives in configure.py)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,15 @@ from typing import Annotated, Optional
 
 import typer
 
-from spice_kernel_db.db import KernelDB
+from spice_kernel_db.db import KernelDB, MetakernelNotTracked
 from spice_kernel_db.remote import SPICE_SERVERS, server_label_for
 
-from ._app import TRANSFORM, app, open_db, state
-from .prompts import _ask, _confirm, _require_metakernel
+from ._app import MAINTAIN, app, open_db, rename_note, state
+from .prompts import _confirm, _require_metakernel
 
-@app.command(rich_help_panel=TRANSFORM, help="Scan a directory for kernel files")
+
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: import, mission add",
+             help="Index every kernel file under a directory")
 def scan(
     ctx: typer.Context,
     directory: Annotated[str, typer.Argument(help="Root directory to scan recursively")],
@@ -32,13 +34,33 @@ def scan(
             verbose=st.verbose,
             archive_dir=st.config.kernel_dir if archive else None,
         )
-        _configure_new_missions(
+        _note_new_missions(
             db, missions_found, Path(directory).expanduser().resolve(),
         )
         db.stats()
 
 
-@app.command(rich_help_panel=TRANSFORM, help="Rewrite a metakernel with a local symlink tree")
+@app.command("import", rich_help_panel=MAINTAIN, epilog="See also: scan, get, check",
+             help="Track a metakernel that is already on disk, without downloading")
+def import_(
+    ctx: typer.Context,
+    metakernel: Annotated[str, typer.Argument(help="Path to the .tm file")],
+    mission: Annotated[Optional[str], typer.Option(
+        "--mission", help="Override auto-detected mission name")] = None,
+) -> None:
+    with open_db(ctx) as db:
+        info = db.import_metakernel(metakernel, mission=mission)
+    print(f"Tracked {info['filename']} ({info['mission']}): "
+          f"{info['n_registered']}/{info['n_entries']} kernels on disk and registered.")
+    if info["missing"]:
+        print(f"  Not on disk ({len(info['missing'])}):")
+        for raw in info["missing"]:
+            print(f"    {raw}")
+        print(f"  spice-kernel-db get {info['filename']} downloads them once the "
+              f"mission's server is configured.")
+
+
+@app.command(rich_help_panel=MAINTAIN, help="Rewrite a metakernel with a local symlink tree")
 def rewrite(
     ctx: typer.Context,
     metakernel: Annotated[Optional[str], typer.Argument(
@@ -61,7 +83,77 @@ def rewrite(
         db.rewrite_metakernel(mk_path, output, mission=mission, link_root=link_root)
 
 
-@app.command(rich_help_panel=TRANSFORM, help="Deduplicate kernel files using symlinks")
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: ls, clean",
+             help="Stop tracking a metakernel (the file stays on disk)")
+def rm(
+    ctx: typer.Context,
+    metakernel: Annotated[Optional[str], typer.Argument(
+        help="Registry filename, base name or path "
+             "(omit to pick from the tracked metakernels at a terminal)")] = None,
+    mission: Annotated[Optional[str], typer.Option(
+        "--mission", help="Mission the name belongs to")] = None,
+) -> None:
+    with open_db(ctx) as db:
+        mk = _require_metakernel(metakernel, db, mission)
+        if mk is None:
+            return
+        # Matched against the registry, not through the file resolver:
+        # removing a row whose file is gone is the point.
+        if not db.remove_metakernel(mk):
+            raise MetakernelNotTracked(mk)
+    print(f"Metakernel '{mk}' removed from registry.")
+
+
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: doctor, rm",
+             help="Drop database rows and symlinks that point at nothing "
+                  "(dry run unless --execute)")
+def clean(
+    ctx: typer.Context,
+    execute: Annotated[bool, typer.Option(
+        "--execute", help="Actually remove (default: report only)")] = False,
+    locations: Annotated[bool, typer.Option(
+        "--locations",
+        help="Kernel locations whose file is gone, and kernel rows left with "
+             "no location")] = False,
+    symlinks: Annotated[bool, typer.Option(
+        "--symlinks",
+        help="Dangling symlinks under each mission's download tree")] = False,
+    registry: Annotated[bool, typer.Option(
+        "--registry",
+        help="Tracked metakernels whose source URL answers 403/404/410 "
+             "(the only class that contacts the server)")] = False,
+    delete_files: Annotated[bool, typer.Option(
+        "--delete-files",
+        help="With --registry --execute: also unlink the on-disk .tm files")] = False,
+) -> None:
+    if not (locations or symlinks or registry):
+        locations = symlinks = True  # the two local classes
+    with open_db(ctx) as db:
+        if locations:
+            db.prune(dry_run=not execute)
+        if symlinks:
+            db.prune_orphan_symlinks(dry_run=not execute)
+        if registry:
+            db.prune_metakernels(dry_run=not execute, delete_files=delete_files)
+
+
+@app.command(hidden=True, help="Renamed: use clean")
+def prune(
+    ctx: typer.Context,
+    execute: Annotated[bool, typer.Option("--execute")] = False,
+    prune_metakernels: Annotated[bool, typer.Option("--metakernels", "--mk")] = False,
+    prune_orphan_symlinks: Annotated[bool, typer.Option("--orphan-symlinks")] = False,
+    delete_files: Annotated[bool, typer.Option("--delete-files")] = False,
+) -> None:
+    rename_note("prune", "clean")
+    print("  --metakernels is --registry, --orphan-symlinks is --symlinks", file=sys.stderr)
+    clean(ctx, execute=execute,
+          locations=not (prune_metakernels or prune_orphan_symlinks),
+          symlinks=prune_orphan_symlinks, registry=prune_metakernels,
+          delete_files=delete_files)
+
+
+@app.command(rich_help_panel=MAINTAIN, help="Deduplicate kernel files using symlinks")
 def dedup(
     ctx: typer.Context,
     execute: Annotated[bool, typer.Option(
@@ -77,39 +169,6 @@ def dedup(
                 print("Aborted.")
                 return
         db.deduplicate_with_symlinks(dry_run=not execute)
-
-
-@app.command(rich_help_panel=TRANSFORM,
-             help="Remove stale DB entries for files no longer on disk "
-                  "(or, with --metakernels, registry rows whose source URL is dead)")
-def prune(
-    ctx: typer.Context,
-    execute: Annotated[bool, typer.Option(
-        "--execute", help="Actually remove entries (default: dry run)")] = False,
-    prune_metakernels: Annotated[bool, typer.Option(
-        "--metakernels", "--mk",
-        help="Prune metakernel_registry rows whose remote URL "
-             "returns 403/404/410 (NAIF often rotates old snapshots into "
-             "former_versions/)")] = False,
-    prune_orphan_symlinks: Annotated[bool, typer.Option(
-        "--orphan-symlinks",
-        help="Find and remove dangling symlinks under each mission's "
-             "download tree (left behind when a kernel store moves or "
-             "after default prune removes the location row)")] = False,
-    delete_files: Annotated[bool, typer.Option(
-        "--delete-files",
-        help="With --metakernels --execute: also unlink the on-disk .tm files")] = False,
-) -> None:
-    if prune_metakernels and prune_orphan_symlinks:
-        print("--metakernels and --orphan-symlinks are mutually exclusive.", file=sys.stderr)
-        sys.exit(1)
-    with open_db(ctx) as db:
-        if prune_metakernels:
-            db.prune_metakernels(dry_run=not execute, delete_files=delete_files)
-        elif prune_orphan_symlinks:
-            db.prune_orphan_symlinks(dry_run=not execute)
-        else:
-            db.prune(dry_run=not execute)
 
 
 def _read_spice_server_marker(directory: Path) -> dict[str, str] | None:
@@ -130,23 +189,22 @@ def _read_spice_server_marker(directory: Path) -> dict[str, str] | None:
     return None
 
 
-def _configure_new_missions(
+def _note_new_missions(
     db: KernelDB, missions_found: set[str], scan_root: Path,
 ) -> None:
-    """Configure missions found during scan that aren't in the DB yet.
+    """Configure missions found during scan that are not in the DB yet.
 
-    Checks for .spice-server marker files first, prompts user as fallback.
+    A ``.spice-server`` marker (written by ``get``) configures the mission
+    on the spot. Without one the command to run is printed; ``scan`` never
+    prompts, so it is safe in a script (#47).
     """
     skip_names = {"generic", "unknown"}
-    server_names = list(SPICE_SERVERS.keys())
+    servers = "|".join(SPICE_SERVERS.values())
 
     for name in sorted(missions_found):
-        if name.lower() in skip_names:
-            continue
-        if db.get_mission(name):
+        if name.lower() in skip_names or db.get_mission(name):
             continue
 
-        # Look for .spice-server marker in <root>/<mission>/ and <root>/<mission>/kernels/
         marker = None
         for candidate in [scan_root / name, scan_root / name / "kernels"]:
             marker = _read_spice_server_marker(candidate)
@@ -154,28 +212,11 @@ def _configure_new_missions(
                 break
 
         if marker:
-            mk_dir_url = marker["mk_dir_url"]
-            server_url = marker["server_url"]
-            db.add_mission(name, server_url, mk_dir_url)
-            print(f"  Configured {name} from .spice-server ({server_label_for(server_url)}).")
+            db.add_mission(name, marker["server_url"], marker["mk_dir_url"])
+            print(f"  Configured {name} from .spice-server "
+                  f"({server_label_for(marker['server_url'])}).")
             continue
 
-        # No marker — prompt user
-        print(f"\n  {name} is not yet configured for remote access.")
-        for i, sname in enumerate(server_names, 1):
-            print(f"    [{i}] {sname}  ({SPICE_SERVERS[sname]})")
-        print(f"    [{len(server_names) + 1}] Skip")
-        while True:
-            choice = _ask(f"  Select [1-{len(server_names) + 1}]: ").strip()
-            if choice.isdigit():
-                idx = int(choice)
-                if 1 <= idx <= len(server_names):
-                    server_label = server_names[idx - 1]
-                    server_url = SPICE_SERVERS[server_label]
-                    mk_dir_url = f"{server_url}{name}/kernels/mk/"
-                    db.add_mission(name, server_url, mk_dir_url)
-                    print(f"  Configured {name} ({server_label}).")
-                    break
-                elif idx == len(server_names) + 1:
-                    break
-            print("  Invalid choice.")
+        print(f"  {name} is not configured for remote access. To browse and get "
+              f"its metakernels:\n"
+              f"    spice-kernel-db mission add {name} --server-url <{servers}>")

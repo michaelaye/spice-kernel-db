@@ -1043,9 +1043,17 @@ class TestVerboseReachesGetAndUpdate:
             seen.update(kwargs)
             return {"found": [], "missing": [], "downloaded": [], "warnings": []}
 
+        # #47: a tracked name given to get is re-fetched through update_metakernel
+        db = KernelDB(tmp_path / "t.duckdb")
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, 'JUICE', 'https://example.com/mk/x.tm', 'x.tm', now())",
+            [str(tmp_path / "x.tm")],
+        )
+        db.close()
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
              patch.object(KernelDB, "update_metakernel", fake_update):
-            main(["-v", "update", "x.tm"])
+            main(["-v", "get", "x.tm"])
         assert seen.get("verbose") is True
 
     def test_without_v_the_flag_is_false(self, tmp_path):
@@ -1073,7 +1081,7 @@ class TestMissionHelpTextIsConsistent:
         from spice_kernel_db.cli import main
 
         expected = "Override auto-detected mission name"
-        for verb in ("scan", "get", "update", "browse"):
+        for verb in ("scan", "get", "import", "browse"):
             with pytest.raises(SystemExit):
                 main([verb, "--help"])
             out = capsys.readouterr().out
@@ -1088,8 +1096,7 @@ class TestOneResolver:
     SOURCE = "https://example.com/mk/juice_crema_5_2_v473_20260819_001.tm"
     FORMS = ["absolute path", "registry filename", "base name",
              "base name without .tm", "source url"]
-    COMMANDS = [("list",), ("check",), ("verify",), ("metakernels",),
-                ("resolve", "--metakernel")]
+    COMMANDS = [("show",), ("check",), ("verify",), ("which", "--metakernel")]
 
     @pytest.fixture
     def tracked(self, tmp_path):
@@ -1195,8 +1202,9 @@ class TestOneResolver:
         assert "Traceback" not in capsys.readouterr().err
 
     def test_remove_accepts_base_name(self, tracked):
-        assert tracked.run("metakernels", "--remove", "juice_crema_5_2.tm") == 0
-        assert tracked.run("metakernels", "juice_crema_5_2.tm") == 1
+        assert tracked.run("rm", "juice_crema_5_2.tm") == 0
+        assert tracked.run("show", "juice_crema_5_2.tm") == 1
+        assert tracked.path.is_file()
 
     # C4
     @pytest.mark.parametrize("command", COMMANDS, ids=" ".join)
@@ -1210,7 +1218,7 @@ class TestOneResolver:
         assert "v470" in err and "v471" in err and "Traceback" not in err
 
     # C5
-    @pytest.mark.parametrize("command", [("list",), ("check",), ("verify",), ("rewrite",)],
+    @pytest.mark.parametrize("command", [("show",), ("check",), ("rm",), ("rewrite",)],
                              ids=" ".join)
     def test_missing_argument_without_tty_exits_2(self, tracked, capsys, command):
         assert tracked.run(*command) == 2
@@ -1221,9 +1229,293 @@ class TestOneResolver:
     # C6
     def test_missing_argument_at_tty_shows_picker(self, tracked, capsys, tty, monkeypatch):
         monkeypatch.setattr("builtins.input", lambda *a, **k: "1")
-        assert tracked.run("list") == 0
+        assert tracked.run("show") == 0
         out = capsys.readouterr().out
         assert "Local metakernels" in out and "pck00011.tpc" in out
+
+
+class TestVerbTree:
+    """#47: one verb per job in four help panels; every old name is a hidden
+    alias that prints its rename note; scan never prompts."""
+
+    NEW_VERBS = {"browse", "get", "update", "ls", "show", "which", "coverage", "stats",
+                 "check", "doctor", "scan", "import", "rewrite", "rm", "clean", "dedup",
+                 "reset", "mission", "config"}
+    OLD_VERBS = {"list", "metakernels", "mk", "resolve", "aliases", "duplicates",
+                 "prune", "verify"}
+
+    @pytest.fixture
+    def tracked(self, tmp_path):
+        """One tracked JUICE metakernel over one registered kernel, a second
+        untracked .tm, and a ``run`` helper returning the exit code."""
+        from types import SimpleNamespace
+
+        from spice_kernel_db.cli import main
+
+        kdir = tmp_path / "kernels" / "pck"
+        kdir.mkdir(parents=True)
+        (kdir / "pck00011.tpc").write_text("REAL PCK CONTENT")
+        db_path = tmp_path / "t.duckdb"
+        db = KernelDB(db_path)
+        db.add_mission("JUICE", "https://example.com/", "https://example.com/mk/", True)
+        db.scan_directory(str(tmp_path / "kernels"), mission="JUICE")
+
+        def write_mk(name: str) -> Path:
+            mk = tmp_path / name
+            mk.write_text(
+                "\\begindata\n"
+                f"PATH_VALUES = ( '{tmp_path / 'kernels'}' )\n"
+                "PATH_SYMBOLS = ( 'K' )\n"
+                "KERNELS_TO_LOAD = ( '$K/pck/pck00011.tpc' )\n"
+                "\\begintext\n"
+            )
+            return mk
+
+        mk = write_mk("juice_crema_5_2_v473_20260819_001.tm")
+        db.index_metakernel(mk)
+        db.con.execute(
+            "INSERT INTO metakernel_registry "
+            "(mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, 'JUICE', 'https://example.com/mk/juice_crema_5_2_v473_20260819_001.tm', ?, now())",
+            [str(mk), mk.name],
+        )
+        untracked = write_mk("on_disk.tm")
+        db.close()
+
+        def run(*argv: str) -> int:
+            with patch("spice_kernel_db.cli.ensure_config",
+                       return_value=Config(db_path=str(db_path), kernel_dir=str(tmp_path / "kernels"))), \
+                 patch.object(KernelDB, "newer_remote_version", lambda *a, **k: None):
+                try:
+                    main(["--db", str(db_path), *argv])
+                except SystemExit as exc:
+                    return exc.code or 0
+            return 0
+
+        return SimpleNamespace(mk=mk, untracked=untracked, db_path=db_path,
+                               tmp=tmp_path, kdir=kdir, run=run)
+
+    # C16
+    def test_help_lists_the_new_verbs_only(self, tracked, capsys):
+        assert tracked.run("--help") == 0
+        out = capsys.readouterr().out
+        listed = {line[2:].split()[0] for line in out.splitlines()
+                  if line.startswith("│ ") and line[2] not in " -"}
+        assert listed == self.NEW_VERBS
+        for panel in ("acquire", "inspect", "maintain", "configure"):
+            assert f"─ {panel} ─" in out
+        assert "browse & acquire" not in out and "transform" not in out
+
+    # C17
+    @pytest.mark.parametrize("old, new", [
+        (("list", "juice_crema_5_2.tm"), ("show", "juice_crema_5_2.tm")),
+        (("metakernels",), ("ls",)),
+        (("mk", "--mission", "JUICE"), ("ls", "JUICE")),
+        (("metakernels", "juice_crema_5_2.tm"), ("show", "juice_crema_5_2.tm")),
+        (("resolve", "pck00011.tpc"), ("which", "pck00011.tpc")),
+        (("aliases", "pck00011.tpc"), ("which", "pck00011.tpc")),
+        (("resolve", "--metakernel", "juice_crema_5_2.tm"),
+         ("which", "--metakernel", "juice_crema_5_2.tm")),
+        (("duplicates",), ("stats",)),
+        (("prune",), ("clean", "--locations")),
+        (("prune", "--orphan-symlinks"), ("clean", "--symlinks")),
+        (("verify", "juice_crema_5_2.tm"), ("check", "juice_crema_5_2.tm")),
+    ], ids=lambda p: " ".join(p))
+    def test_old_names_run_with_a_note(self, tracked, capsys, old, new):
+        new_rc = tracked.run(*new)
+        new_out = capsys.readouterr()
+        assert "note:" not in new_out.err
+        old_rc = tracked.run(*old)
+        old_out = capsys.readouterr()
+        assert old_rc == new_rc == 0
+        assert f"note: '{old[0]}" in old_out.err and f"is now '{new[0]}" in old_out.err
+        assert old_out.out == new_out.out
+
+    def test_old_remove_and_update_forms(self, tracked, capsys):
+        seen = {}
+
+        def fake_update(self, name, **kwargs):
+            seen["name"] = name
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+
+        with patch.object(KernelDB, "update_metakernel", fake_update):
+            assert tracked.run("update", "juice_crema_5_2.tm") == 0
+        assert seen["name"] == "juice_crema_5_2.tm"
+        assert "note: 'update juice_crema_5_2.tm' is now 'get juice_crema_5_2.tm'" in capsys.readouterr().err
+
+        assert tracked.run("mk", "--remove", "juice_crema_5_2.tm") == 0
+        assert "note: 'mk --remove' is now 'rm'" in capsys.readouterr().err
+        assert tracked.run("show", "juice_crema_5_2.tm") == 1
+
+    def test_old_names_are_hidden(self, tracked, capsys):
+        tracked.run("--help")
+        out = capsys.readouterr().out
+        for old in self.OLD_VERBS:
+            assert f"│ {old} " not in out
+
+    # C18
+    def test_get_on_a_tracked_name_uses_its_source(self, tracked, capsys):
+        seen = {}
+
+        def fake_get(self, url, **kwargs):
+            seen["url"] = url
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+
+        with patch.object(KernelDB, "get_metakernel", fake_get), \
+             patch("spice_kernel_db.cli.browse._locate_remote_metakernel",
+                   side_effect=AssertionError("get consulted the mk/ listing for a tracked name")):
+            assert tracked.run("get", "juice_crema_5_2") == 0
+        assert seen["url"] == "https://example.com/mk/juice_crema_5_2_v473_20260819_001.tm"
+        assert "note:" not in capsys.readouterr().err
+
+    def test_get_on_an_imported_metakernel_without_a_source_exits_1(self, tracked, capsys):
+        # #47, found while documenting: a LookupError traceback before this.
+        db = KernelDB(tracked.db_path)
+        db.remove_mission("JUICE")
+        db.close()
+        assert tracked.run("import", str(tracked.untracked), "--mission", "JUICE") == 0
+        assert tracked.run("get", "on_disk.tm") == 1
+        err = capsys.readouterr().err
+        assert "no source" in err and "Traceback" not in err
+
+    # C19
+    def test_update_all_is_dry_run_by_default(self, tracked, capsys, remote_sizes):
+        remote_mk = (
+            "\\begindata\nPATH_VALUES = ( '..' )\nPATH_SYMBOLS = ( 'K' )\n"
+            "KERNELS_TO_LOAD = ( '$K/pck/pck00011.tpc' '$K/pck/new.tpc' )\n\\begintext\n"
+        )
+        # a second tracked metakernel whose source is gone
+        db = KernelDB(tracked.db_path)
+        db.con.execute(
+            "INSERT INTO metakernel_registry VALUES "
+            "(?, 'JUICE', 'https://example.com/mk/gone.tm', 'gone.tm', now())",
+            [str(tracked.tmp / "gone.tm")],
+        )
+        db.close()
+
+        def fetch(url, *a, **k):
+            if url.endswith("gone.tm"):
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return remote_mk, url
+
+        sizes = {"https://example.com/pck/pck00011.tpc": 16,
+                 "https://example.com/pck/new.tpc": 5}
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
+             remote_sizes(sizes), \
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   side_effect=AssertionError("update downloaded without --execute")) as dl:
+            assert tracked.run("update") == 0
+        out = capsys.readouterr().out
+        assert "dry run" in out and "gone.tm" in out and "source gone (HTTP 404)" in out
+        assert not (tracked.tmp / "kernels" / "JUICE").exists()
+        db = KernelDB(tracked.db_path, read_only=True)
+        try:
+            assert db.con.execute("SELECT count(*) FROM metakernel_registry").fetchone()[0] == 2
+        finally:
+            db.close()
+
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
+             remote_sizes(sizes), \
+             patch("spice_kernel_db.db.download_kernels_parallel",
+                   return_value=([], [])) as dl:
+            assert tracked.run("update", "--execute") == 0
+        assert dl.call_count == 1
+        assert [t[2] for t in dl.call_args.args[0]] == ["new.tpc"]
+
+    # C20
+    def test_inspect_verbs(self, tracked, capsys):
+        assert tracked.run("ls", "juice") == 0
+        out = capsys.readouterr().out
+        assert "Tracked metakernels" in out and "juice_crema_5_2_v473" in out
+
+        assert tracked.run("show", "juice_crema_5_2") == 0
+        out = capsys.readouterr().out
+        assert "Source:" in out and "pck00011.tpc" in out and "in db" in out
+        assert tracked.run("show", "juice_crema_5_2", "--type", "spk") == 0
+        assert "pck00011.tpc" not in capsys.readouterr().out
+
+        assert tracked.run("show", str(tracked.untracked)) == 0
+        out = capsys.readouterr().out
+        assert "pck00011.tpc" in out and "Not tracked" in out
+
+        alias = tracked.kdir / "pck_alias.tpc"
+        alias.write_text("REAL PCK CONTENT")
+        db = KernelDB(tracked.db_path)
+        db.register_file(alias, mission="JUICE")
+        db.close()
+        assert tracked.run("which", "pck00011.tpc") == 0
+        out = capsys.readouterr().out
+        assert out.splitlines()[0] == str(tracked.kdir / "pck00011.tpc")
+        assert "pck_alias.tpc" in out and "Known under 2 name(s)" in out
+        assert tracked.run("which", "nope.tpc") == 1
+
+        assert tracked.run("stats") == 0
+        out = capsys.readouterr().out
+        assert "Unique kernels" in out and "Duplicate kernels" in out
+
+    # C21
+    def test_scan_never_prompts(self, tracked, capsys, monkeypatch):
+        monkeypatch.setattr("builtins.input",
+                            lambda *a, **k: pytest.fail("scan read stdin"))
+        tree = tracked.tmp / "other" / "MEX" / "kernels" / "lsk"
+        tree.mkdir(parents=True)
+        (tree / "naif0012.tls").write_text("LSK")
+        assert tracked.run("scan", str(tracked.tmp / "other")) == 0
+        out = capsys.readouterr().out
+        assert "MEX is not configured" in out and "mission add MEX --server-url" in out
+        db = KernelDB(tracked.db_path, read_only=True)
+        try:
+            assert db.get_mission("MEX") is None
+        finally:
+            db.close()
+
+    # C22
+    def test_import(self, tracked, capsys):
+        with patch("spice_kernel_db.db._fetch_metakernel",
+                   side_effect=AssertionError("import fetched a URL")):
+            assert tracked.run("import", str(tracked.untracked), "--mission", "JUICE") == 0
+        out = capsys.readouterr().out
+        assert "Tracked on_disk.tm (JUICE): 1/1 kernels" in out
+        assert tracked.run("check", "on_disk.tm") == 0
+        assert tracked.run("ls") == 0
+        assert "on_disk.tm" in capsys.readouterr().out
+
+    # C23
+    def test_rm_and_clean(self, tracked, capsys):
+        gone = tracked.kdir / "gone.tpc"
+        gone.write_text("GONE")
+        link = tracked.kdir / "dangling.tpc"
+        db = KernelDB(tracked.db_path)
+        db.register_file(gone, mission="JUICE")
+        db.close()
+        gone.unlink()
+        link.symlink_to(gone)
+        # orphan-symlink walk roots at <mk_path>/../.. of registry rows; put
+        # a tracked metakernel under <tmp>/kernels/mk so the tree is walked
+        mk_dir = tracked.tmp / "kernels" / "mk"
+        mk_dir.mkdir()
+        shutil.copy(tracked.mk, mk_dir / "walk.tm")
+        assert tracked.run("import", str(mk_dir / "walk.tm")) == 0
+        capsys.readouterr()
+
+        for target in ("urllib.request.urlopen",):
+            with patch(target, side_effect=AssertionError("clean contacted the server")):
+                assert tracked.run("clean") == 0
+        out = capsys.readouterr().out
+        assert "Would remove" in out and str(gone) in out and "dangling.tpc" in out
+        assert link.is_symlink()
+
+        assert tracked.run("clean", "--locations", "--execute") == 0
+        out = capsys.readouterr().out
+        assert "Removed" in out and "dangling.tpc" not in out
+        assert link.is_symlink()
+        assert tracked.run("clean", "--symlinks", "--execute") == 0
+        assert not link.is_symlink()
+
+        assert tracked.run("rm", "walk.tm") == 0
+        assert (mk_dir / "walk.tm").is_file()
+        assert tracked.run("rm", "walk.tm") == 1
+        assert "not tracked" in capsys.readouterr().err
 
 
 class TestCheckVerdicts:

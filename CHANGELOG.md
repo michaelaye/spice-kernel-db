@@ -42,6 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stats` shows the count, highlighted when non-zero. Both point at
   `scan <kernel_dir>` as the repair.
 
+- **`import <mk-file>` tracks a metakernel that is already on disk** (#47).
+  It indexes the entries, registers the kernels the file resolves to that
+  exist on disk, and adds the registry row with no source URL. It makes no
+  network request. `--mission` overrides the mission guessed from the path.
+  The Python entry point is `KernelDB.import_metakernel()`.
+- **`update` walks every tracked metakernel** (#47). It re-fetches each one
+  from its source and shows what is missing. It is a dry run by default;
+  `--execute` downloads and is the confirmation, so there is no
+  per-metakernel prompt. Alias rows (symlinks) are skipped. A source that
+  answers 403, 404 or 410, or one that cannot be reached, is noted in the
+  summary table and the walk goes on. The Python entry point is
+  `KernelDB.update_all()`; `get_metakernel()` and `update_metakernel()` gained
+  a `dry_run` parameter for it.
+- **`clean` removes what points at nothing, in three named classes** (#47):
+  `--locations` (kernel locations whose file is gone, then kernel rows left
+  with no location), `--symlinks` (dangling symlinks under each mission's
+  download tree) and `--registry` (tracked metakernels whose source URL
+  answers 403, 404 or 410, the only class that contacts the server;
+  `--delete-files` also unlinks the `.tm`). Dry run by default, `--execute`
+  removes. With no class flag the two local classes run, so a plain `clean`
+  now also sweeps dangling symlinks.
+- **`get <name>` re-fetches a tracked metakernel** (#47). When the argument
+  names a tracked metakernel, `get` fetches it from its stored source URL,
+  downloads what is missing and re-indexes, which is what `update <name>` did.
+  A filename that is not tracked is still looked up on the configured mission's
+  server.
+
 ### Changed
 
 - **`verify` folded into `check`** (#46). `verify` stays as a hidden alias
@@ -69,6 +96,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference machine `--version` went from 184 ms to 123 ms and `--help`
   from 187 ms to 141 ms. `spice_kernel_db.__version__` is resolved on
   first access; everything else in the public API is unchanged.
+
+- **The verbs were renamed and regrouped** (#47). `--help` now shows four
+  panels in order: acquire (`browse`, `get`, `update`), inspect (`ls`, `show`,
+  `which`, `coverage`, `stats`, `check`, `doctor`), maintain (`scan`,
+  `import`, `rewrite`, `rm`, `clean`, `dedup`, `reset`) and configure
+  (`mission`, `config`). `browse`, `coverage`, `rewrite`, `dedup`, `mission`
+  and `config` keep their names.
+  - **`metakernels` and `mk` became `ls [mission]`**, the listing of tracked
+    metakernels. The `--mission` option is now the optional argument.
+  - **`list` and `metakernels <name>` became `show <mk>`**: the registry row
+    (mission, source, acquired, local path) plus the kernels with type, size
+    and status. `--type` filters the table. On a `.tm` that is not tracked it
+    lists the kernels and says `skd import` tracks it.
+  - **`resolve` and `aliases` became `which <kernel>`**. The first line is the
+    local path. When the content is known under several filenames, the alias
+    table and the on-disk locations follow. It accepts a filename or a SHA-256
+    prefix. `--metakernel <mk>` resolves every kernel of a metakernel. With no
+    argument at a terminal it offers a picker over the deduplicated kernels.
+  - **`duplicates` was folded into `stats`**: the database statistics come
+    first, then the duplicate kernels section.
+  - **`metakernels --remove` became `rm <mk>`**. It removes the registry row
+    and its entries; the file stays. With no argument at a terminal it offers
+    a picker.
+  - **`prune` became `clean`** with the classes named `--locations`,
+    `--symlinks` (was `--orphan-symlinks`) and `--registry` (was
+    `--metakernels`). The three classes can now be combined in one run.
+  - **`update <name>` became `get <name>`**, and `update` with no argument
+    became the walk over all tracked metakernels, a dry run unless
+    `--execute` is given. `update` with an argument prints
+    `note: 'update <name>' is now 'get <name>'` and runs `get`.
+  - **`reset` moved from the configure panel to the maintain panel.** The
+    command is unchanged.
+  - **`scan` never prompts** (#47). A mission that is not configured and has
+    no `.spice-server` marker no longer starts a setup dialog. `scan` prints
+    the `skd mission add <NAME> --server-url <URL>` command instead, so it is
+    safe in a script.
+  - **`KernelDB.info_metakernel()` takes `kernel_type=None`** to limit the
+    printed kernel table to one type (#47).
+
+### Deprecated
+
+- **The old verb names remain as hidden aliases and are removed in 1.0**
+  (#47). Each prints `note: 'old' is now 'new'` on stderr, then runs the new
+  command with the new command's options: `list` is `show`; `metakernels`
+  and `mk` are `ls`, and with a name `show`, and with `--remove` `rm`;
+  `resolve` and `aliases` are `which`; `duplicates` is `stats`; `prune` is
+  `clean` (`--metakernels` and `--mk` are `--registry`, `--orphan-symlinks`
+  is `--symlinks`, and a plain `prune` keeps its old meaning of locations
+  only); `verify` is `check` (`--deep` is `--hash`); `update <name>` is
+  `get <name>`.
 
 ### Fixed
 

@@ -12,7 +12,7 @@ DuckDB uses file-level locking. Only one process can write at a time.
 **Solutions:**
 
 - Wait for the other process to finish (e.g., a running `get` or `scan`).
-- Read-only commands (`check`, `list`, `resolve`, `stats`, `mk`, `coverage`, `duplicates`) open the database in read-only mode and can run concurrently with a writer.
+- Read-only commands (`check`, `show`, `which`, `stats`, `ls`, `coverage`, `doctor`) open the database in read-only mode and can run concurrently with a writer.
 - If no other process is running, the lock file may be stale. Delete `<db_path>.wal` (the write-ahead log) and retry.
 
 
@@ -38,7 +38,7 @@ juice_crema_5_1.tm matches several tracked metakernels:
 Pass one of them.
 ```
 
-Pass the full registry filename, or remove the snapshot you no longer want with `spice-kernel-db mk --remove <filename>`. The same answer comes from every command, so a script can test for exit code 2.
+Pass the full registry filename, or stop tracking the snapshot you no longer want with `spice-kernel-db rm <filename>`. The same answer comes from every command, so a script can test for exit code 2.
 
 
 ## "needs a terminal for its menu" (exit 2)
@@ -60,7 +60,7 @@ spice-kernel-db scan /path/to/kernels
 
 By default, the tool skips files that match both the expected size and SHA-256 hash. If files were corrupted or partially downloaded, they'll be re-downloaded. Use `--force` to bypass all skip checks.
 
-If the *same* kernels re-download on every `update` although they are byte-correct on disk, run `spice-kernel-db check <metakernel>` or `spice-kernel-db stats`. A non-zero **poisoned rows** count means those kernels are flagged as superseded by content that no longer exists anywhere (typically a pre-0.17.0 interrupted download or a Dropbox conflict copy that was later cleaned up), so resolution skips them. `spice-kernel-db scan <kernel_dir>` re-registers the files and clears the flag.
+If the *same* kernels re-download on every `get` or `update --execute` although they are byte-correct on disk, run `spice-kernel-db check <metakernel>` or `spice-kernel-db stats`. A non-zero **poisoned rows** count means those kernels are flagged as superseded by content that no longer exists anywhere (typically a pre-0.17.0 interrupted download or a Dropbox conflict copy that was later cleaned up), so resolution skips them. `spice-kernel-db scan <kernel_dir>` re-registers the files and clears the flag.
 
 Before 0.20.0 this could also happen to intact files. The skip check needs the remote size, and a HEAD request that failed was silently recorded as "size unknown" — which the check reads as "cannot confirm", so the file was fetched again. Such kernels show as `unknown` in the size column. Size queries now retry and reuse connections, so a transient failure no longer costs you a download.
 
@@ -147,20 +147,22 @@ kernel_dir = "~/.local/share/spice-kernel-db/kernels"
 
 ## Stale entries after deleting files
 
-If you've deleted kernel files from disk, the database still references them. Use `prune` to clean up:
+If you've deleted kernel files from disk, the database still references them. Use `clean` to clear them out:
 
 ```bash
 # Preview what would be removed
-spice-kernel-db prune
+spice-kernel-db clean
 
 # Actually remove stale entries
-spice-kernel-db prune --execute
+spice-kernel-db clean --execute
 ```
 
+Without a class flag, `clean` drops the locations whose file is gone and the dangling symlinks left in each mission's download tree. Neither needs the network.
 
-## `update` fails with "Metakernel unreachable" / HTTP 404
 
-NAIF (and ESA) routinely rotate older versioned metakernel snapshots into a `former_versions/` subdirectory. Once that happens, the original URL stored in your local `metakernel_registry` returns 404, and `spice-kernel-db update <mk>` aborts with a red panel like:
+## `get` fails with "Metakernel unreachable" / HTTP 404
+
+NAIF (and ESA) routinely rotate older versioned metakernel snapshots into a `former_versions/` subdirectory. Once that happens, the original URL stored in your local `metakernel_registry` returns 404, and `spice-kernel-db get <mk>` on that tracked metakernel aborts with a red panel like:
 
 ```
 ╭─── Metakernel unreachable ───╮
@@ -174,26 +176,28 @@ NAIF (and ESA) routinely rotate older versioned metakernel snapshots into a `for
 
 The exit code is `2` (distinct from generic LookupError's `1`), so scripts can detect this case specifically.
 
-**Fix it with `prune --metakernels`:**
+`spice-kernel-db update` (the walk over every tracked metakernel) does not abort on such a row. It lists the row in its summary table with the note `source gone (HTTP 404)` and goes on to the next one.
+
+**Fix it with `clean --registry`:**
 
 ```bash
 # Preview every dead registry row (HEAD-probes each source_url)
-spice-kernel-db prune --metakernels
+spice-kernel-db clean --registry
 
 # Actually remove the dead rows
-spice-kernel-db prune --metakernels --execute
+spice-kernel-db clean --registry --execute
 
 # Also delete the on-disk .tm files (symlink trees are shared across
 # metakernels in a mission and are never auto-deleted)
-spice-kernel-db prune --metakernels --execute --delete-files
+spice-kernel-db clean --registry --execute --delete-files
 ```
 
-The pruner treats `403`, `404`, and `410` as permanently dead; transient errors (timeouts, DNS failures, `5xx`) deliberately don't classify a row as dead, so going offline never causes accidental deletion.
+`clean --registry` treats `403`, `404`, and `410` as permanently dead; transient errors (timeouts, DNS failures, `5xx`) deliberately don't classify a row as dead, so going offline never causes accidental deletion.
 
 If you just want to remove the one offending entry:
 
 ```bash
-spice-kernel-db mk --remove juice_crema_5_1_…_v462_20260223_001.tm
+spice-kernel-db rm juice_crema_5_1_…_v462_20260223_001.tm
 ```
 
 Then re-acquire the current version with `browse` → `get`.
@@ -209,13 +213,13 @@ spice-kernel-db get juice_crema_5_1_…_v462_20260223_001.tm --mission JUICE
 
 ## `check` says the metakernel does not resolve (exit 2)
 
-After a `get` or `rewrite`, `spice-kernel-db check <mk>` walks every entry through `PATH_VALUES` and compares it with the database (the *resolves* verdict; `verify` is its old name). Common findings:
+After a `get` or `rewrite`, `spice-kernel-db check <mk>` walks every entry through `PATH_VALUES` and compares it with the database (the *resolves* verdict). Common findings:
 
 | Status | What it means | What to do |
 |--------|---------------|------------|
-| `DANGLING` | Symlink target moved or was deleted | Re-run `get`/`update` on this metakernel — the fixed `_link_existing_kernels` now repairs dangling links. |
-| `HASH_MISMATCH` (deep mode) | File was modified after registration | `prune --execute` to drop the location, then re-`get` to fetch a clean copy. |
-| `AMBIGUOUS` | Two non-superseded `kernels` rows share this filename | Indicates the DB has two distinct files with the same name. Use `find_by_filename` in the Python API to see them, decide which to keep, and `prune` the other. |
+| `DANGLING` | Symlink target moved or was deleted | Re-run `get` on this metakernel — the fixed `_link_existing_kernels` now repairs dangling links. |
+| `HASH_MISMATCH` (deep mode) | File was modified after registration | `clean --execute` to drop the location, then re-`get` to fetch a clean copy. |
+| `AMBIGUOUS` | Two non-superseded `kernels` rows share this filename | Indicates the DB has two distinct files with the same name. Use `find_by_filename` in the Python API to see them, decide which to keep, and `clean` the other. |
 | `UNREGISTERED` | File on disk but no `kernels` row | Run `scan <dir>` on the directory containing it. |
 | `BAD_PATH_VALUE` | `PATH_VALUES` not absolute | Use `get` (which writes absolute paths) instead of editing `.tm` files by hand. |
 | `TRAVERSAL` | A `KERNELS_TO_LOAD` entry escapes `PATH_VALUES` | The metakernel is malformed or hostile — don't `furnsh` it. |
