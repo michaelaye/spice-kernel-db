@@ -256,7 +256,6 @@ def update(
     metakernel: Annotated[Optional[str], typer.Argument(hidden=True)] = None,
     execute: Annotated[bool, typer.Option(
         "--execute", help="Download the missing kernels (default: report only)")] = False,
-    download_dir: DownloadDir = None,
     # The three below serve only the pre-#47 form `update <name>`.
     mission: Annotated[Optional[str], typer.Option("--mission", hidden=True)] = None,
     yes: Annotated[bool, typer.Option("-y", "--yes", hidden=True)] = False,
@@ -264,10 +263,11 @@ def update(
 ) -> None:
     if metakernel is not None:
         rename_note(f"update {metakernel}", f"get {metakernel}")
-        get(ctx, url=metakernel, download_dir=download_dir, mission=mission,
-            yes=yes, force=force)
+        get(ctx, url=metakernel, mission=mission, yes=yes, force=force)
         return
+    # No --download-dir here: each metakernel re-fetches into its own root
+    # (root_for), and one directory for every root's metakernels would undo that.
     with open_db(ctx, read_only=not execute) as db:
-        db.update_all(download_dir=download_dir, dry_run=not execute, verbose=state(ctx).verbose)
+        db.update_all(dry_run=not execute, verbose=state(ctx).verbose)
     if not execute:
         console.print("[dim]Dry run: pass --execute to download.[/dim]")

@@ -86,7 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that root. Only when several roots could take a new mission does it list
   them and ask at a terminal (exit 2 in a script); `--download-dir` names
   the root explicitly. `scan --archive` moves each file into its own root or
-  its mission's root, settling every file before anything moves.
+  its mission's root, settling every file before anything moves. `update`
+  (the all-metakernels walk) and `update_all()` lose `--download-dir`, which
+  would have forced metakernels from every root into one directory.
   `KernelDB.root_for(mission, mk_path)` is the one resolver and
   `AmbiguousKernelRoot` the exception. Before this, the first configured
   root was a "download target", which would have written a re-fetched

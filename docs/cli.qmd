@@ -225,13 +225,14 @@ If both the live and `former_versions/` URLs 404, the error names both attempted
 Re-fetch every tracked metakernel from its source and report what is missing. Nothing is written unless you pass `--execute`.
 
 ```bash
-skd update [--execute] [--download-dir DIR]
+skd update [--execute]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--execute` | Download the missing kernels. Default: report only. `--execute` is the confirmation; there is no per-metakernel prompt. |
-| `--download-dir` | The kernel root to download into (default: derived, see [Several kernel roots](#several-kernel-roots)) |
+
+Each metakernel re-fetches into the root that holds it (see [Several kernel roots](#several-kernel-roots)), so there is no `--download-dir`; one directory for metakernels from several roots would undo that. `get <name>` takes it for a single metakernel.
 
 `--mission`, `-y` and `--force` are hidden from `--help` and have no effect on the walk. They exist for the deprecated one-argument form described under [Renamed commands](#renamed-commands).
 

@@ -321,14 +321,10 @@ Returns the same dict as `get_metakernel`. After a real run the dict also has `s
 #### `update_all`
 
 ```python
-db.update_all(
-    download_dir: str | Path | None = None,
-    dry_run: bool = False,
-    verbose: bool = False,
-) -> list[dict]
+db.update_all(dry_run: bool = False, verbose: bool = False) -> list[dict]
 ```
 
-Re-fetch every tracked metakernel from its source, as `skd update` does. With `dry_run=True` each metakernel's status table is shown and nothing is written. With `dry_run=False` the missing kernels are downloaded without a per-metakernel prompt, and the directories the metakernels point at are re-indexed once at the end. The `skd update` command passes `dry_run=True` unless `--execute` is given.
+Re-fetch every tracked metakernel from its source, as `skd update` does. Each one lands in the root that holds it (`root_for`); there is no directory argument. With `dry_run=True` each metakernel's status table is shown and nothing is written. With `dry_run=False` the missing kernels are downloaded without a per-metakernel prompt, and the directories the metakernels point at are re-indexed once at the end. The `skd update` command passes `dry_run=True` unless `--execute` is given.
 
 Alias rows, where a symlink stands next to its target, are skipped. A source that has gone from the server, a source that cannot be reached, and a row with no source URL are reported in the summary table and never raise.
 

@@ -2902,19 +2902,16 @@ class KernelDB:
                 f"for updated kernels.[/dim]"
             )
 
-    def update_all(
-        self,
-        download_dir: str | Path | None = None,
-        dry_run: bool = False,
-        verbose: bool = False,
-    ) -> list[dict]:
+    def update_all(self, dry_run: bool = False, verbose: bool = False) -> list[dict]:
         """Re-fetch every tracked metakernel from its source (#47).
 
         With ``dry_run`` each metakernel's status table is shown and
         nothing is written. Otherwise the missing kernels are downloaded
         without a per-metakernel prompt (the CLI's ``--execute`` is the
         confirmation) and the directories every metakernel points at are
-        re-indexed once at the end. Alias rows (a symlink next to its
+        re-indexed once at the end. Each metakernel re-fetches into its own
+        root (``root_for``); there is no directory argument, since one
+        directory for metakernels from several roots would undo that. Alias rows (a symlink next to its
         target) are skipped; a source that has gone from the server, or a
         row without one, is reported in the table, never fatal.
 
@@ -2932,8 +2929,7 @@ class KernelDB:
             console.print(f"\n[bold]{row.filename}[/bold] ({row.mission})")
             try:
                 result = self.update_metakernel(
-                    row.mk_path, download_dir=download_dir, yes=True,
-                    verbose=verbose, dry_run=dry_run, rescan=False,
+                    row.mk_path, yes=True, verbose=verbose, dry_run=dry_run, rescan=False,
                 )
                 entry["count"] = len(result["missing" if dry_run else "downloaded"])
                 for sd in result.get("scan_dirs", ()):
