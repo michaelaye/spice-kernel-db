@@ -70,18 +70,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server.
 
 - **Several kernel roots** (#48). `[storage]` in `config.toml` now holds
-  `kernel_dirs`, an ordered list. The first root is where `get` downloads and
-  where `scan --archive` moves files. Every root is scanned, resolved against
-  (`which`, `check`) and deduplicated across, so `dedup` links a kernel in one
-  root to its identical twin in another. A file with only `kernel_dir` loads as
+  `kernel_dirs`, a list in which no root is special. Every root is scanned,
+  resolved against (`which`, `check`) and deduplicated across, so `dedup`
+  links a kernel in one root to its identical twin in another. A file with only `kernel_dir` loads as
   a one-root list and is rewritten as `kernel_dirs` on the next save.
 - **`config add-root <dir>` and `config remove-root <dir>`** edit the list
   (#48). `add-root` creates the directory and does not add a root twice;
   `remove-root` refuses the last root and leaves files and database rows alone.
-  `skd config` lists the roots, marking the first `(download target)` when there
-  are several.
+  `skd config` lists the roots.
 - **`scan` takes an optional directory** (#48). With none it scans every
   configured kernel root.
+- **Where a download lands is derived, never configured.** `get` re-fetches
+  a tracked metakernel into the root that holds it, puts a new metakernel
+  into the one root that already holds its mission, and with one root uses
+  that root. Only when several roots could take a new mission does it list
+  them and ask at a terminal (exit 2 in a script); `--download-dir` names
+  the root explicitly. `scan --archive` moves each file into its own root or
+  its mission's root, settling every file before anything moves.
+  `KernelDB.root_for(mission, mk_path)` is the one resolver and
+  `AmbiguousKernelRoot` the exception. Before this, the first configured
+  root was a "download target", which would have written a re-fetched
+  second-root metakernel into the first root.
 - **`import --unofficial` and the `official` column** (#48). A metakernel
   assembled locally, such as a subsetter's output or planetarypy's
   `archived_kernels.py`, can be marked as not published by an archive.
@@ -95,9 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add_kernel_root(dir)` and `remove_kernel_root(dir)`, exported from the
   package, and `ensure_config(seed_root=...)`, which writes a first
   configuration with that root instead of prompting. An existing configuration
-  is never changed by the seed. `Config(db_path, kernel_dir=None,
-  kernel_dirs=None)` holds the list, and `Config.kernel_dir` stays a settable
-  property over the first root.
+  is never changed by the seed. `Config(db_path, kernel_dirs)` holds the
+  list; the single-root `kernel_dir` parameter and property are gone.
   `KernelDB(kernel_roots=...)` and `db.kernel_roots` carry the roots used to
   guess a mission, and `db.scan_roots()` scans every one.
 
@@ -181,6 +189,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A re-scan of a directory holding a metakernel that `get` had fetched
+  replaced its registry row, dropping the source URL and the acquisition
+  time, so a later `update` reported it as added by scan with no source. A
+  scan now writes a registry row only for a metakernel it sees for the first
+  time; `get` and `import` still replace the row (found while removing the
+  download target, 2026-11-21).
 - **A tracked metakernel's mission comes from the registry, and `guess_mission`
   knows the kernel roots** (#43, #48). A metakernel in the default store
   (`~/.local/share/spice-kernel-db/kernels/JUICE/mk/x.tm`) got the mission

@@ -25,7 +25,7 @@ def _home(tmp_path_factory) -> Path:
 
 def test_unpatched_save_config_writes_under_a_temporary_home(tmp_path_factory):
     home = _home(tmp_path_factory)
-    save_config(Config(db_path="/x/test.duckdb", kernel_dir="/y/kernels"))
+    save_config(Config(db_path="/x/test.duckdb", kernel_dirs=["/y/kernels"]))
     written = home / ".config" / "spice-kernel-db" / "config.toml"
     assert config.CONFIG_FILE == written
     assert written.is_file()

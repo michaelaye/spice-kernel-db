@@ -37,8 +37,8 @@ The configuration holds an ordered list of kernel roots: `kernel_dirs` in the `[
 
 | Command | What the roots change |
 |:---|:---|
-| `get` | Downloads into the **first** root only, the download target. |
-| `scan` | With no directory, scans every root in turn and skips a root that does not exist, saying so. With a directory, scans just that one. `--archive` moves files into the first root. |
+| `get` | Downloads into the root that already holds the metakernel (a re-fetch) or its mission; with one root, that root. When several roots could take a new mission, it lists them and asks at a terminal, and exits 2 in a script; `--download-dir` names the root explicitly. |
+| `scan` | With no directory, scans every root in turn and skips a root that does not exist, saying so. With a directory, scans just that one. `--archive` moves files into the root that holds their mission, asking the same way when none does. |
 | `which`, `check` | Resolve against every file the database knows, so a kernel that lives in any scanned root is found. |
 | `dedup` | Plans over every location in the database, so a kernel in one root and its identical twin in another are linked. |
 
@@ -171,7 +171,7 @@ skd get [url-or-name] [--download-dir DIR] [--mission NAME] [-y] [--force]
 | Option | Description |
 |--------|-------------|
 | `url-or-name` | A URL, a tracked metakernel, or a `.tm` filename on the configured mission's server. See the table below. **Omit to pick from the server listing** at a terminal. |
-| `--download-dir` | Override default kernel storage directory |
+| `--download-dir` | The kernel root to download into (default: derived, see [Several kernel roots](#several-kernel-roots)) |
 | `--mission` | Override auto-detected mission name (use it to disambiguate when several missions are known and you pass a filename) |
 | `-y, --yes` | Skip confirmation prompt |
 | `--force` | Re-download all kernels even if already on disk (skips DB lookups and remote size queries) |
@@ -231,7 +231,7 @@ skd update [--execute] [--download-dir DIR]
 | Option | Description |
 |--------|-------------|
 | `--execute` | Download the missing kernels. Default: report only. `--execute` is the confirmation; there is no per-metakernel prompt. |
-| `--download-dir` | Override default kernel storage directory |
+| `--download-dir` | The kernel root to download into (default: derived, see [Several kernel roots](#several-kernel-roots)) |
 
 `--mission`, `-y` and `--force` are hidden from `--help` and have no effect on the walk. They exist for the deprecated one-argument form described under [Renamed commands](#renamed-commands).
 
@@ -497,7 +497,7 @@ skd [-v] scan [directory] [--mission NAME] [--archive]
 |--------|-------------|
 | `directory` | Directory to scan recursively. Default: each kernel root in the configuration. |
 | `--mission` | Override auto-detected mission name |
-| `--archive` | Move files to the first kernel root and leave symlinks at the original locations |
+| `--archive` | Move files into the kernel root that holds their mission (or the only root) and leave symlinks at the original locations |
 
 With the root option `-v`, `scan` prints each registered file. After the scan it prints the database statistics.
 
@@ -518,7 +518,7 @@ skd -v scan /data/spice/MRO/kernels
 skd scan /tmp/downloaded_kernels --mission JUICE --archive
 ```
 
-With `--archive`, each kernel file is moved into the first kernel root (organized as `{first_root}/{mission}/{type}/{filename}`) and a symlink is left at the original location. This lets you import kernels from anywhere while keeping the original paths functional.
+With `--archive`, each kernel file is moved into a kernel root (organized as `{root}/{mission}/{type}/{filename}`) and a symlink is left at the original location. A file already inside a configured root stays in that root; any other file goes to the root that already holds its mission, or to the only root. When a mission is held by no root, or by several, the command lists the roots and asks at a terminal, once per such mission, and exits 2 in a script; nothing moves until every file has its root (`--mission NAME` makes every scanned file that mission). This lets you import kernels from anywhere while keeping the original paths functional.
 
 A `.tm` file that `scan` meets is tracked as well. When it is already tracked, `scan` keeps the mission and the `official` flag of its registry row, because a scan only guesses them. `get` and `import` state them and replace the row.
 
@@ -797,8 +797,8 @@ skd config remove-root <dir>
 | Option | Description |
 |--------|-------------|
 | `--setup` | Re-run the interactive first-time setup |
-| `get <key>` | Print one setting. The keys are `db_path` and `kernel_dir`; `kernel_dir` is the first kernel root. Any other key, `kernel_dirs` included, is refused with a pointer to `add-root` and `remove-root`. |
-| `set <key> <value>` | Change one setting and save it. `set kernel_dir` replaces the first kernel root. |
+| `get <key>` | Print one setting. The only key is `db_path`. Any other key, `kernel_dirs` included, is refused with a pointer to `add-root` and `remove-root`. |
+| `set <key> <value>` | Change one setting and save it. |
 | `add-root <dir>` | Append a directory to the kernel roots and save. The directory is created when missing. A directory that is already a root is not added twice. |
 | `remove-root <dir>` | Remove a directory from the kernel roots and save. The last root cannot be removed. Files on disk and database rows stay as they are; `clean` drops rows whose file is gone. |
 
@@ -810,8 +810,8 @@ skd config
 skd config --setup
 
 # Read or change one setting
-skd config get kernel_dir
-skd config set kernel_dir ~/Dropbox/spice-kernels
+skd config get db_path
+skd config set db_path ~/Dropbox/spice-kernels.duckdb
 
 # Add a second store, then index it
 skd config add-root ~/planetarypy_data/spice_kernels
@@ -821,7 +821,7 @@ skd scan
 skd config remove-root ~/planetarypy_data/spice_kernels
 ```
 
-Without arguments, prints the current configuration: config file location, database path and the kernel roots, one per line. With more than one root, the first is marked `(download target)`. `add-root` and `remove-root` print the same listing afterwards, and `add-root` reminds you to scan the new root.
+Without arguments, prints the current configuration: config file location, database path and the kernel roots, one per line. `add-root` and `remove-root` print the same listing afterwards, and `add-root` reminds you to scan the new root.
 
 
 ## Renamed commands

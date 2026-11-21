@@ -333,9 +333,9 @@ class TestGetMetakernel:
         assert mk_file.is_file()
         assert "KERNELS_TO_LOAD" in mk_file.read_text()
 
-    def test_get_defaults_to_configured_kernel_dir(self, populated_db, tmp_path):
-        """Without download_dir, get_metakernel uses config.kernel_dir, as the CLI does."""
-        from spice_kernel_db.config import Config
+    def test_get_defaults_to_the_only_root(self, populated_db, tmp_path):
+        """Without download_dir, get_metakernel uses the one configured root."""
+        from unittest.mock import PropertyMock
 
         mk_url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
         kernel_dir = tmp_path / "configured_kernels"
@@ -343,8 +343,8 @@ class TestGetMetakernel:
         with patch("spice_kernel_db.remote.urllib.request.urlopen", side_effect=self._mock_urlopen), \
              patch("spice_kernel_db.db.download_kernels_parallel",
                    side_effect=self._mock_download_kernels_parallel), \
-             patch("spice_kernel_db.config.load_config",
-                   return_value=Config(kernel_dir=str(kernel_dir))):
+             patch.object(KernelDB, "kernel_roots", new_callable=PropertyMock,
+                          return_value=[kernel_dir]):
             populated_db.get_metakernel(mk_url, mission="JUICE", yes=True)
 
         assert (kernel_dir / "JUICE" / "mk" / "test.tm").is_file()
@@ -789,7 +789,7 @@ class TestRemoveMetakernel:
 
         cfg = Config(
             db_path=str(db_path),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )
         with patch("spice_kernel_db.config.load_config", return_value=cfg):
             main(["rm", "stale.tm"])
@@ -1578,7 +1578,7 @@ class TestCheckUntrackedMetakernel:
 
         KernelDB(tmp_path / "t.duckdb").close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "k"))
+                     kernel_dirs=[str(tmp_path / "k")])
         with patch("spice_kernel_db.config.load_config", return_value=cfg):
             with pytest.raises(SystemExit) as exc:
                 main(["check", "never_downloaded.tm"])
@@ -1719,7 +1719,7 @@ class TestVerifyAgainstServer:
         db, mk = self._setup(tmp_path, {"pck00011.tpc": 133802})
         db.close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "kernels"))
+                     kernel_dirs=[str(tmp_path / "kernels")])
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
              patch("spice_kernel_db.remote.fetch_metakernel",
                    return_value=self._remote_mk(["pck00011.tpc"])), \
@@ -1738,7 +1738,7 @@ class TestVerifyAgainstServer:
         db, mk = self._setup(tmp_path, {"pck00011.tpc": 133802})
         db.close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "kernels"))
+                     kernel_dirs=[str(tmp_path / "kernels")])
         with patch("spice_kernel_db.config.load_config", return_value=cfg):
             main(["check", str(mk)])
         out = capsys.readouterr().out
@@ -1751,7 +1751,7 @@ class TestVerifyAgainstServer:
         db, mk = self._setup(tmp_path, {"naif0012.tls": 10})
         db.close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "kernels"))
+                     kernel_dirs=[str(tmp_path / "kernels")])
         with patch("spice_kernel_db.config.load_config", return_value=cfg):
             with pytest.raises(SystemExit) as exc:
                 main(["check", str(mk), "--spice"])

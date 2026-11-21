@@ -34,7 +34,7 @@ path = "~/.local/share/spice-kernel-db/kernels.duckdb"
 kernel_dirs = ["~/.local/share/spice-kernel-db/kernels"]
 ```
 
-`kernel_dirs` is the ordered list of kernel roots. The first is where `get` downloads. A file written by an older version, with a single `kernel_dir` line, still loads: it becomes a one-root list, and the next save rewrites it as `kernel_dirs`.
+`kernel_dirs` is the list of kernel roots; none is special. A download lands in the root that already holds its metakernel or its mission, and with one root there is nothing to decide. A file written by an older version, with a single `kernel_dir` line, still loads: it becomes a one-root list, and the next save rewrites it as `kernel_dirs`.
 
 You can edit this file directly at any time. The `--db` CLI flag overrides the configured database path for a single command.
 
@@ -64,7 +64,7 @@ skd config add-root ~/planetarypy_data/spice_kernels
 skd scan
 ```
 
-`config add-root` appends the directory to `kernel_dirs`. The first root stays the download target. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](cli.qmd#several-kernel-roots) for the details.
+`config add-root` appends the directory to `kernel_dirs`. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](cli.qmd#several-kernel-roots) for the details.
 
 From Python, `add_kernel_root(dir)` does the same without a prompt, and `ensure_config(seed_root=dir)` writes a first configuration with `dir` as its root when none exists yet.
 
@@ -590,7 +590,7 @@ Under a configured kernel root the mission is the first directory below the root
 
 ### Archiving while scanning
 
-The `--archive` flag moves scanned files into the first kernel root and leaves symlinks in place:
+The `--archive` flag moves scanned files into the kernel root that holds their mission (the only root, when there is one) and leaves symlinks in place:
 
 ```bash
 spice-kernel-db scan /data/downloads/kernels --archive --mission JUICE

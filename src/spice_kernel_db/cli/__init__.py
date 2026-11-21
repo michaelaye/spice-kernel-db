@@ -13,7 +13,12 @@ from typing import Annotated, Optional
 import typer
 
 from spice_kernel_db.config import ensure_config
-from spice_kernel_db.db import AmbiguousMetakernel, KernelDB, MetakernelNotTracked
+from spice_kernel_db.db import (
+    AmbiguousKernelRoot,
+    AmbiguousMetakernel,
+    KernelDB,
+    MetakernelNotTracked,
+)
 
 from ._app import State, app
 from .prompts import _metakernel_table, console
@@ -114,8 +119,8 @@ def main(argv: list[str] | None = None) -> None:
     """
     try:
         rc = app(args=argv, prog_name="spice-kernel-db", standalone_mode=False)
-    except AmbiguousMetakernel as exc:
-        # The one mapping for every command (#45): list the matches, exit 2.
+    except (AmbiguousMetakernel, AmbiguousKernelRoot) as exc:
+        # The one mapping for every command (#45): list the candidates, exit 2.
         print(str(exc), file=sys.stderr)
         sys.exit(2)
     except MetakernelNotTracked as exc:

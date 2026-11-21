@@ -8,6 +8,7 @@ from spice_kernel_db.config import (
     remove_kernel_root,
 )
 from spice_kernel_db.db import (
+    AmbiguousKernelRoot,
     AmbiguousMetakernel,
     ConcurrentModificationError,
     KernelDB,
@@ -23,6 +24,7 @@ from spice_kernel_db.remote import (
 )
 
 __all__ = [
+    "AmbiguousKernelRoot",
     "AmbiguousMetakernel",
     "ConcurrentModificationError",
     "Config",

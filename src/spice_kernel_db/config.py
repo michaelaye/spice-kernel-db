@@ -3,16 +3,17 @@
 Stores user preferences in ~/.config/spice-kernel-db/config.toml.
 On first use, prompts interactively for database and kernel storage paths.
 
-Since #48 the storage section holds a *list* of kernel roots. The first is
-where ``get`` downloads; every root is scanned, resolved against and
-deduplicated across. A config file written before that holds one
-``kernel_dir`` and loads as a one-root list.
+Since #48 the storage section holds a *list* of kernel roots. Every root is
+scanned, resolved against and deduplicated across, and a download lands in
+the root that already holds its metakernel or its mission
+(``KernelDB.root_for``); no root is special. A config file written before
+that holds one ``kernel_dir`` and loads as a one-root list.
 """
 
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_DB_PATH = "~/.local/share/spice-kernel-db/kernels.duckdb"
@@ -28,35 +29,20 @@ CONFIG_DIR = Path("~/.config/spice-kernel-db").expanduser()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 
-@dataclass(init=False)
+@dataclass
 class Config:
     """User configuration for spice-kernel-db.
 
-    ``kernel_dirs`` is the ordered list of kernel roots; ``kernel_dir`` is
-    the first of them (the download target) and stays settable, so code
-    written for one root keeps working.
+    ``kernel_dirs`` is the list of kernel roots and is never empty. No root
+    is special: where a download lands is derived from what is already on
+    disk (``KernelDB.root_for``).
     """
 
-    db_path: str
-    kernel_dirs: list[str]
+    db_path: str = DEFAULT_DB_PATH
+    kernel_dirs: list[str] = field(default_factory=lambda: [DEFAULT_KERNEL_DIR])
 
-    def __init__(
-        self,
-        db_path: str = DEFAULT_DB_PATH,
-        kernel_dir: str | None = None,
-        kernel_dirs: list[str] | None = None,
-    ) -> None:
-        self.db_path = db_path
-        self.kernel_dirs = list(kernel_dirs) if kernel_dirs else [kernel_dir or DEFAULT_KERNEL_DIR]
-
-    @property
-    def kernel_dir(self) -> str:
-        """The first root: where ``get`` downloads."""
-        return self.kernel_dirs[0]
-
-    @kernel_dir.setter
-    def kernel_dir(self, value: str) -> None:
-        self.kernel_dirs[0] = value
+    def __post_init__(self) -> None:
+        self.kernel_dirs = list(self.kernel_dirs) or [DEFAULT_KERNEL_DIR]
 
 
 class LegacyDatabaseFound(RuntimeError):
@@ -146,7 +132,7 @@ def add_kernel_root(directory: str | Path, config: Config | None = None) -> Conf
     """Append *directory* to the kernel roots and save (#48).
 
     The directory is created when missing. A root already present is not
-    added twice; the first root (the download target) never moves. Runs no
+    added twice; the order of the others is kept. Runs no
     prompt, so planetarypy can call it; without a config file one is
     written with the default database path.
     """
@@ -205,7 +191,7 @@ def _write_first_config(db_path: str, kernel_dir: str) -> Config:
     """Create both directories and write the first config file."""
     Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     Path(kernel_dir).expanduser().mkdir(parents=True, exist_ok=True)
-    config = Config(db_path=db_path, kernel_dir=kernel_dir)
+    config = Config(db_path=db_path, kernel_dirs=[kernel_dir])
     save_config(config)
     return config
 
@@ -217,8 +203,7 @@ def show_config(config: Config) -> None:
     print(f"  Database:      {config.db_path}")
     for i, root in enumerate(config.kernel_dirs):
         label = "Kernel roots:  " if i == 0 else "               "
-        note = "  (download target)" if i == 0 and len(config.kernel_dirs) > 1 else ""
-        print(f"  {label}{root}{note}")
+        print(f"  {label}{root}")
     print()
 
 

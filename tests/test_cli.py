@@ -61,7 +61,7 @@ class TestReset:
 
 class TestShowConfig:
     def test_show_config_prints_paths(self, capsys):
-        cfg = Config(db_path="/tmp/test.duckdb", kernel_dir="/tmp/kernels")
+        cfg = Config(db_path="/tmp/test.duckdb", kernel_dirs=["/tmp/kernels"])
         show_config(cfg)
         captured = capsys.readouterr()
         assert "/tmp/test.duckdb" in captured.out
@@ -148,7 +148,7 @@ class TestCLINoArgs:
 
         with patch("spice_kernel_db.config.load_config", return_value=Config(
             db_path=str(tmp_path / "test.duckdb"),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )):
             main([])
 
@@ -190,7 +190,7 @@ class TestConfigSetGet:
 
         with patch("spice_kernel_db.cli.ensure_config", return_value=Config(
             db_path=str(tmp_path / "test.duckdb"),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )):
             main(["config", "get", "db_path"])
 
@@ -202,14 +202,19 @@ class TestConfigSetGet:
 
         config = Config(
             db_path=str(tmp_path / "test.duckdb"),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )
         with patch("spice_kernel_db.cli.ensure_config", return_value=config), \
              patch("spice_kernel_db.config.save_config") as mock_save:
-            main(["config", "set", "kernel_dir", "/new/path"])
+            main(["config", "set", "db_path", "/new/path.duckdb"])
 
         mock_save.assert_called_once()
-        assert config.kernel_dir == "/new/path"
+        assert config.db_path == "/new/path.duckdb"
+        # the roots are a list and have their own verbs; no single-root key (2026-11-21)
+        with patch("spice_kernel_db.cli.ensure_config", return_value=config), \
+             pytest.raises(SystemExit) as exc:
+            main(["config", "set", "kernel_dir", "/new/path"])
+        assert exc.value.code == 1 and "add-root" in capsys.readouterr().err
 
     def test_config_get_unknown_key(self, tmp_path):
         from spice_kernel_db.cli import main
@@ -491,7 +496,7 @@ class TestGetArchiveFallback:
         db.close()
         return Config(
             db_path=str(tmp_path / "test.duckdb"),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )
 
     def test_archive_fallback_when_live_404s(self, tmp_path):
@@ -588,7 +593,7 @@ class TestBrowseArchivedFlag:
         db.close()
         return Config(
             db_path=str(tmp_path / "test.duckdb"),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )
 
     def test_archived_flag_appends_former_versions(self, tmp_path):
@@ -849,7 +854,7 @@ class TestGetDistinguishesMissingFromUnreachable:
         db.close()
         return Config(
             db_path=str(tmp_path / "test.duckdb"),
-            kernel_dir=str(tmp_path / "kernels"),
+            kernel_dirs=[str(tmp_path / "kernels")],
         )
 
     def _run(self, tmp_path, probe, capsys):
@@ -936,7 +941,7 @@ class TestMissionAddAmbiguousServer:
         from spice_kernel_db.cli import main
 
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "k"))
+                     kernel_dirs=[str(tmp_path / "k")])
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
              patch("spice_kernel_db.cli.configure.list_remote_missions",
                    return_value=["JUICE"]):
@@ -956,7 +961,7 @@ class TestPromptsWithoutATerminal:
         from spice_kernel_db.cli import main
 
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "k"))
+                     kernel_dirs=[str(tmp_path / "k")])
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
              patch("sys.stdin.isatty", return_value=False):
             with pytest.raises(SystemExit) as exc:
@@ -1019,7 +1024,7 @@ class TestVerboseReachesGetAndUpdate:
 
         KernelDB(tmp_path / "t.duckdb").close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "k"))
+                     kernel_dirs=[str(tmp_path / "k")])
         seen = {}
 
         def fake_get(self, url, **kwargs):
@@ -1036,7 +1041,7 @@ class TestVerboseReachesGetAndUpdate:
 
         KernelDB(tmp_path / "t.duckdb").close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "k"))
+                     kernel_dirs=[str(tmp_path / "k")])
         seen = {}
 
         def fake_update(self, name, **kwargs):
@@ -1061,7 +1066,7 @@ class TestVerboseReachesGetAndUpdate:
 
         KernelDB(tmp_path / "t.duckdb").close()
         cfg = Config(db_path=str(tmp_path / "t.duckdb"),
-                     kernel_dir=str(tmp_path / "k"))
+                     kernel_dirs=[str(tmp_path / "k")])
         seen = {}
 
         def fake_get(self, url, **kwargs):
@@ -1284,7 +1289,7 @@ class TestVerbTree:
 
         def run(*argv: str) -> int:
             with patch("spice_kernel_db.cli.ensure_config",
-                       return_value=Config(db_path=str(db_path), kernel_dir=str(tmp_path / "kernels"))), \
+                       return_value=Config(db_path=str(db_path), kernel_dirs=[str(tmp_path / "kernels")])), \
                  patch.object(KernelDB, "newer_remote_version", lambda *a, **k: None):
                 try:
                     main(["--db", str(db_path), *argv])

@@ -37,6 +37,7 @@ from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
     guess_mission,
+    root_containing,
     sha256_file,
     strip_version_tag,
 )
@@ -212,6 +213,29 @@ class AmbiguousMetakernel(LookupError):
             f"'{name}' matches {len(candidates)} tracked metakernels: {listed}. "
             f"Pass one of them."
         )
+
+
+class AmbiguousKernelRoot(LookupError):
+    """Raised when nothing says which configured root a download belongs in.
+
+    ``KernelDB.root_for`` derives the root from the metakernel's own path,
+    then from where the mission's kernels already are, then from the one
+    configured root. With several roots and none of those facts it never
+    picks the first (Michael, 2026-11-21): the CLI lists ``roots`` and asks
+    at a terminal, exits 2 in a script, and ``--download-dir`` names one.
+    """
+
+    def __init__(self, mission: str | None, roots: list[Path], stored: bool = False):
+        self.mission = mission
+        self.roots = roots
+        self.what = f"mission {mission}" if mission else "this download"
+        listed = "\n  ".join(str(r) for r in roots)
+        lead = (
+            f"{self.what[0].upper()}{self.what[1:]} is stored in {len(roots)} kernel roots:"
+            if stored else
+            f"No configured kernel root holds {self.what} yet, and {len(roots)} roots are configured:"
+        )
+        super().__init__(f"{lead}\n  {listed}\nName the root.")
 
 
 class RegistryRow(NamedTuple):
@@ -429,6 +453,30 @@ class KernelDB:
     def _guess_mission(self, path: str | Path) -> str:
         """``guess_mission`` with this database's roots, for every file path."""
         return guess_mission(str(path), self.kernel_roots)
+
+    def root_for(self, mission: str | None, mk_path: str | Path | None = None) -> Path:
+        """The kernel root a download belongs in (Michael, 2026-11-21).
+
+        In order: the root holding *mk_path* (a tracked metakernel is
+        re-fetched into its own store); the only configured root; the one
+        root that already holds kernels of *mission*. Raises
+        ``AmbiguousKernelRoot`` when several roots remain, so the caller
+        asks instead of guessing. There is no configured download target.
+        """
+        roots = self.kernel_roots
+        if mk_path is not None and (root := root_containing(mk_path, roots)) is not None:
+            return root
+        if len(roots) == 1:
+            return roots[0]
+        holding = [
+            r for r in roots if mission and self.con.execute(
+                "SELECT 1 FROM locations WHERE LOWER(mission) = LOWER(?) "
+                "AND starts_with(abs_path, ?) LIMIT 1", [mission, f"{r}/"],
+            ).fetchone()
+        ]
+        if len(holding) == 1:
+            return holding[0]
+        raise AmbiguousKernelRoot(mission, holding or roots, stored=bool(holding))
 
     def _init_schema(self):
         self.con.execute("""
@@ -968,12 +1016,18 @@ class KernelDB:
         mission: str | None = None,
         extensions: set[str] | None = None,
         verbose: bool = False,
-        archive_dir: str | Path | None = None,
+        archive: bool = False,
+        archive_roots: dict[str, Path] | None = None,
     ) -> tuple[int, set[str]]:
         """Recursively scan a directory tree and register all kernel files.
 
-        If ``archive_dir`` is set, files are moved into the archive and
-        symlinks are left at the original locations.
+        With ``archive`` each file is moved into a kernel root, laid out as
+        ``<root>/<mission>/<type>/<file>``, and a symlink is left behind.
+        The root is the file's own when it already sits in one, else
+        ``root_for`` of its mission (2026-11-21). Every file's root is
+        settled before anything moves, so an ``AmbiguousKernelRoot`` leaves
+        the tree untouched; *archive_roots* (``{mission: root}``) is how the
+        CLI answers it and calls again.
 
         Returns ``(count, missions_found)`` — the number of files registered
         and the set of mission names detected during the scan.
@@ -989,12 +1043,23 @@ class KernelDB:
         # H4: canonicalise user-supplied mission once up-front
         if mission is not None:
             mission = canonicalize_mission(mission)
-        for p in sorted(root.rglob("*")):
-            if p.is_file() and p.suffix.lower() in extensions:
+        files = [p for p in sorted(root.rglob("*"))
+                 if p.is_file() and p.suffix.lower() in extensions]
+        missions = {p: mission or self._guess_mission(p) for p in files}
+        archive_for: dict[Path, Path] = {}
+        if archive:
+            chosen = dict(archive_roots or {})
+            for p in files:
+                own = root_containing(p, self.kernel_roots)
+                if own is None:
+                    m = missions[p]
+                    own = chosen.get(m) or chosen.setdefault(m, self.root_for(m))
+                archive_for[p] = own
+        for p in files:
                 try:
-                    m = mission or self._guess_mission(p)
+                    m = missions[p]
                     self.register_file(
-                        p, mission=m, archive_dir=archive_dir,
+                        p, mission=m, archive_dir=archive_for.get(p),
                     )
                     count += 1
                     missions_found.add(m)
@@ -1028,7 +1093,8 @@ class KernelDB:
         return count, missions_found
 
     def scan_roots(
-        self, verbose: bool = False, archive_dir: str | Path | None = None,
+        self, verbose: bool = False, archive: bool = False,
+        archive_roots: dict[str, Path] | None = None,
     ) -> tuple[int, set[str]]:
         """``scan_directory`` over every configured kernel root (#48).
 
@@ -1039,7 +1105,8 @@ class KernelDB:
             if not root.is_dir():
                 print(f"Kernel root {root} does not exist; skipped.")
                 continue
-            n, found = self.scan_directory(root, verbose=verbose, archive_dir=archive_dir)
+            n, found = self.scan_directory(
+                root, verbose=verbose, archive=archive, archive_roots=archive_roots)
             count += n
             missions |= found
         return count, missions
@@ -1319,20 +1386,19 @@ class KernelDB:
         """Index *mk_path*'s entries and write (or replace) its registry row.
 
         The one registration sequence behind ``scan``, ``get`` and
-        ``import``. ``source_url`` is None for a file that was never
-        downloaded. The registry row is the authority for ``mission`` and
-        ``official`` (#43, #48): with ``official=None`` (a scan, which only
-        guessed) an existing row keeps both; ``get`` and ``import`` state
-        them.
+        ``import``. The registry row is the authority for everything it
+        holds (#43, #48): ``get`` and ``import`` state mission and
+        ``official`` and replace the row; a scan (``official=None``) only
+        guessed, so it writes a row for a file seen for the first time and
+        otherwise leaves the row alone. The re-scan that follows every
+        ``get`` used to rewrite it, wiping the source URL and the
+        acquisition time (2026-11-21).
         """
         self.index_metakernel(mk_path)
-        if official is None:
-            existing = self.con.execute(
-                "SELECT mission, official FROM metakernel_registry WHERE mk_path = ?",
-                [str(mk_path)],
-            ).fetchone()
-            if existing:
-                mission, official = existing[0] or mission, existing[1]
+        if official is None and self.con.execute(
+            "SELECT 1 FROM metakernel_registry WHERE mk_path = ?", [str(mk_path)],
+        ).fetchone():
+            return
         self.con.execute("""
             INSERT OR REPLACE INTO metakernel_registry
             (mk_path, mission, source_url, filename, acquired_at, official)
@@ -2301,9 +2367,11 @@ class KernelDB:
 
         Args:
             url: URL to a remote .tm metakernel file.
-            download_dir: Where to store downloaded kernels (default: the
-                configured ``kernel_dir``). Preserves the
-                remote subdirectory structure (lsk/, spk/, etc.).
+            download_dir: The kernel root to download into (default:
+                ``root_for(mission)``: the root that already holds the
+                mission, or the only one; ``AmbiguousKernelRoot`` when
+                several could). Preserves the remote subdirectory structure
+                (lsk/, spk/, etc.).
             mission: Override auto-detected mission name.
             yes: If True, skip the confirmation prompt.
             verbose: If True, list each kernel's resolved URL under the status
@@ -2325,17 +2393,6 @@ class KernelDB:
             dict with keys: found, missing, downloaded, warnings (and
             ``dry_run: True`` when nothing was written)
         """
-        # 0. Resolve download_dir early (needed for saving .tm)
-        if download_dir is None:
-            from spice_kernel_db.config import DEFAULT_KERNEL_DIR, load_config
-            config = load_config()
-            download_dir = config.kernel_dir if config else DEFAULT_KERNEL_DIR
-        download_dir = Path(download_dir).expanduser().resolve()
-
-        # 1. Fetch and parse
-        console.print(f"Fetching [bold]{url}[/bold] ...")
-        text, final_url = _fetch_metakernel(url)
-        parsed = parse_metakernel_text(text, final_url)
         if mission is None:
             mission = guess_mission(url)
         # H4: canonicalise before any filesystem path or DB row uses it
@@ -2344,6 +2401,24 @@ class KernelDB:
         m = self.get_mission(mission)
         if m:
             mission = m["name"]
+
+        # Where it lands, decided before any network I/O: the root holding
+        # the file this URL fetched before, else the root that holds the
+        # mission, else the only root. Several roots and no such fact raise
+        # AmbiguousKernelRoot; there is no configured download target
+        # (Michael, 2026-11-21).
+        if download_dir is None:
+            try:
+                tracked = self.registry_row(url)
+            except LookupError:  # the URL names several rows
+                tracked = None
+            download_dir = self.root_for(mission, tracked.mk_path if tracked else None)
+        download_dir = Path(download_dir).expanduser().resolve()
+
+        # 1. Fetch and parse
+        console.print(f"Fetching [bold]{url}[/bold] ...")
+        text, final_url = _fetch_metakernel(url)
+        parsed = parse_metakernel_text(text, final_url)
 
         # 1b. Save .tm file to disk with absolute PATH_VALUES so it works
         # from any working directory (SPICE resolves paths relative to CWD,
@@ -2715,7 +2790,8 @@ class KernelDB:
             mission: Override auto-detected mission name.
             verbose: If True, name each directory as it is re-scanned; otherwise
                 report the count in one line (#4).
-            download_dir: Override kernel download directory.
+            download_dir: Override the kernel root; by default the one that
+                holds the metakernel (``root_for``).
             yes: Skip confirmation prompt.
             dry_run: Report what would change and write nothing (#47).
             rescan: Re-index the directories the metakernel points at after
@@ -2746,6 +2822,7 @@ class KernelDB:
                     f"(spice-kernel-db mission add) or pass the URL to get."
                 )
 
+        download_dir = download_dir or self.root_for(mission, mk_path)
         try:
             result = self.get_metakernel(
                 source_url,
@@ -2779,7 +2856,7 @@ class KernelDB:
 
     def _metakernel_dirs(
         self, mk_path: str, mission: str, mk_filename: str,
-        download_dir: str | Path | None,
+        download_dir: str | Path,
     ) -> set[Path]:
         """The directories a tracked metakernel's ``PATH_VALUES`` point at.
 
@@ -2788,10 +2865,6 @@ class KernelDB:
         """
         local_mk = Path(mk_path) if Path(mk_path).is_file() else None
         if local_mk is None:
-            if download_dir is None:
-                from spice_kernel_db.config import DEFAULT_KERNEL_DIR, load_config
-                config = load_config()
-                download_dir = config.kernel_dir if config else DEFAULT_KERNEL_DIR
             candidate = (
                 Path(download_dir).expanduser().resolve() / mission / "mk" / mk_filename
             )

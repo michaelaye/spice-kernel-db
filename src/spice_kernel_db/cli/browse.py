@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 import typer
 from rich.panel import Panel
 
-from spice_kernel_db.db import KernelDB, MetakernelUnreachableError
+from spice_kernel_db.db import AmbiguousKernelRoot, KernelDB, MetakernelUnreachableError
 from spice_kernel_db.hashing import guess_mission
 from spice_kernel_db.remote import Probe, ProbeResult, probe_url
 
@@ -20,6 +20,7 @@ from .prompts import (
     _interactive_select_metakernel,
     _mission_table,
     _pick_index,
+    _pick_root,
     _resolve_mission_mk_dir,
     _menu,
     console,
@@ -28,7 +29,8 @@ from .prompts import (
 MissionOverride = Annotated[Optional[str], typer.Option(
     "--mission", help="Override auto-detected mission name")]
 DownloadDir = Annotated[Optional[str], typer.Option(
-    "--download-dir", help="Directory for downloaded kernels (default: from config)")]
+    "--download-dir", help="Kernel root to download into (default: the root that "
+                           "already holds the metakernel or its mission)")]
 Yes = Annotated[bool, typer.Option("-y", "--yes", help="Skip confirmation prompt")]
 Force = Annotated[bool, typer.Option(
     "--force", help="Re-download all kernels even if already on disk")]
@@ -184,8 +186,6 @@ def get(
     force: Force = False,
 ) -> None:
     st = state(ctx)
-    if download_dir is None:
-        download_dir = st.config.kernel_dir
     with open_db(ctx) as db:
         alias_filename: str | None = None
         if url is None:
@@ -208,21 +208,23 @@ def get(
                 return
             url = _locate_remote_metakernel(mk_dir_url, url)
             mission = mission or mission_name
-        db.get_metakernel(
-            url,
-            download_dir=download_dir,
-            mission=mission,
-            yes=yes,
-            force=force,
-            alias_filename=alias_filename,
-            verbose=st.verbose,
-        )
+        kwargs = {"mission": mission, "yes": yes, "force": force,
+                  "alias_filename": alias_filename, "verbose": st.verbose}
+        try:
+            db.get_metakernel(url, download_dir=download_dir, **kwargs)
+        except AmbiguousKernelRoot as e:
+            # Several roots and none holds this mission yet: ask (exit 2 in
+            # a script), then fetch again into the chosen root.
+            chosen = _pick_root(e, hint=f"spice-kernel-db get {url} --download-dir <root>")
+            db.get_metakernel(url, download_dir=chosen, **kwargs)
 
 
 def _refetch(db: KernelDB, name: str, **kwargs) -> None:
     """``update_metakernel`` with the no-source and unreachable-source messages."""
     try:
         db.update_metakernel(name, **kwargs)
+    except AmbiguousKernelRoot:
+        raise  # main() maps it to exit 2; it is a LookupError too
     except LookupError as e:
         # Tracked by scan or import: no source URL and no mission mk/ URL.
         print(f"{e}", file=sys.stderr)
@@ -265,10 +267,7 @@ def update(
         get(ctx, url=metakernel, download_dir=download_dir, mission=mission,
             yes=yes, force=force)
         return
-    st = state(ctx)
-    if download_dir is None:
-        download_dir = st.config.kernel_dir
     with open_db(ctx, read_only=not execute) as db:
-        db.update_all(download_dir=download_dir, dry_run=not execute, verbose=st.verbose)
+        db.update_all(download_dir=download_dir, dry_run=not execute, verbose=state(ctx).verbose)
     if not execute:
         console.print("[dim]Dry run: pass --execute to download.[/dim]")

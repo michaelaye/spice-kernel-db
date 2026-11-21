@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sys
 import urllib.error
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from spice_kernel_db.db import KernelDB, RegistryRow, _format_size
+from spice_kernel_db.db import AmbiguousKernelRoot, KernelDB, RegistryRow, _format_size
 from spice_kernel_db.remote import list_remote_metakernels
 
 console = Console()
@@ -97,6 +98,26 @@ def _pick_index(
     if invalid:
         err_console.print(invalid)
     return None
+
+
+def _pick_root(exc: AmbiguousKernelRoot, hint: str) -> Path:
+    """Let the user choose the root for a download no fact places (2026-11-21).
+
+    Without a terminal: the roots and *hint* (how to name the root on the
+    command line) go to stderr and the command exits 2, like every picker.
+    """
+    _require_interactive(f"Choosing a kernel root for {exc.what}", hint=f"{exc}\n  {hint}")
+    table = Table(title=f"Which kernel root should {exc.what} go into?")
+    table.add_column("#", style="bold", justify="right")
+    table.add_column("Kernel root")
+    for i, root in enumerate(exc.roots, 1):
+        table.add_row(str(i), str(root))
+    _menu().print(table)
+    idx = _pick_index(f"Select root [1-{len(exc.roots)}]: ", len(exc.roots), invalid=INVALID)
+    if idx is None:
+        print("Aborted.", file=sys.stderr)
+        sys.exit(1)
+    return exc.roots[idx]
 
 
 def _metakernel_table(rows: list[RegistryRow], *, index_style: str = "bold") -> Table:

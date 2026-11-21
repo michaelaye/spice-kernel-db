@@ -82,13 +82,14 @@ db.scan_directory(
     mission: str | None = None,
     extensions: set[str] | None = None,
     verbose: bool = False,
-    archive_dir: str | Path | None = None,
+    archive: bool = False,
+    archive_roots: dict[str, Path] | None = None,
 ) -> tuple[int, set[str]]
 ```
 
 Recursively scan a directory tree and register all kernel files. Returns `(count, missions_found)` — the number of files registered and a set of detected mission names.
 
-If `archive_dir` is provided, files are moved into `{archive_dir}/{mission}/{type}/{filename}` and symlinks are left at the original locations.
+With `archive=True`, each file is moved into a kernel root, laid out as `{root}/{mission}/{type}/{filename}`, and a symlink is left at the original location. The root is the file's own when it already sits in a configured root, else `root_for` of its mission. Every file's root is settled before anything moves, so an `AmbiguousKernelRoot` leaves the tree untouched; `archive_roots` (`{mission: root}`) answers it on the next call. `scan_roots` takes the same two arguments.
 
 If `mission` is not provided, it is detected from the path with [`guess_mission`](#guess_mission) and the database's kernel roots: under a root, the first directory below the root; elsewhere, the path structure (`.../<MISSION>/kernels/...`). `register_file` guesses the same way when it is given no mission.
 
@@ -99,7 +100,8 @@ If `mission` is not provided, it is detected from the path with [`guess_mission`
 ```python
 db.scan_roots(
     verbose: bool = False,
-    archive_dir: str | Path | None = None,
+    archive: bool = False,
+    archive_roots: dict[str, Path] | None = None,
 ) -> tuple[int, set[str]]
 ```
 
@@ -283,7 +285,7 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 7. Downloads missing kernels, preserving subdirectory structure, and registers them
 8. Creates symlinks for kernels already in the database so the metakernel works immediately
 
-`download_dir` defaults to the first kernel root (`Config.kernel_dir`) from `~/.config/spice-kernel-db/config.toml`. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
+`download_dir` defaults to `root_for(mission)`: the configured root that already holds kernels of the mission, or the only configured root. With several roots and no such fact it raises `AmbiguousKernelRoot` rather than guess; pass `download_dir` then. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
 
 `verbose=True` additionally lists each kernel's resolved URL beneath the status table. The table itself is always shown — it precedes the download prompt, so it is what you decide on.
 
@@ -621,7 +623,7 @@ With `seed_root` and no config file yet, it prompts for nothing: it writes a con
 ### `Config`
 
 ```python
-Config(db_path=DEFAULT_DB_PATH, kernel_dir=None, kernel_dirs=None)
+Config(db_path=DEFAULT_DB_PATH, kernel_dirs=[DEFAULT_KERNEL_DIR])
 ```
 
 Configuration object with these attributes:
@@ -629,10 +631,7 @@ Configuration object with these attributes:
 | Attribute | Type | Default | Description |
 |:---|:---|:---|:---|
 | `db_path` | `str` | `~/.local/share/spice-kernel-db/kernels.duckdb` | Path to the DuckDB database |
-| `kernel_dirs` | `list[str]` | `["~/.local/share/spice-kernel-db/kernels"]` | The kernel roots, in order. The first is where `get` downloads. Never empty. |
-| `kernel_dir` | `str` | first of `kernel_dirs` | A property over the first root: reading it returns that root, and assigning to it replaces it. Code written for a single root keeps working. |
-
-Pass either `kernel_dirs` or, for a single root, `kernel_dir`; when both are given, `kernel_dirs` wins. With neither, the list holds the default store.
+| `kernel_dirs` | `list[str]` | `["~/.local/share/spice-kernel-db/kernels"]` | The kernel roots. No root is special; see `root_for` below. Never empty: an empty list becomes the default store. |
 
 The `[storage]` section of the file holds `kernel_dirs`, and `save_config` writes only that key. A file written before the list existed has only `kernel_dir`; it loads as a one-root list and is rewritten as `kernel_dirs` on the next save.
 
@@ -646,7 +645,7 @@ remove_kernel_root(directory: str | Path, config: Config | None = None) -> Confi
 
 `kernel_roots` returns the configured roots as expanded, resolved paths. Without a config file it returns the one default root. Pass `config` to avoid reading the file a second time. `add_kernel_root` and `remove_kernel_root` take the same `config` argument and edit that object instead of loading the file.
 
-`add_kernel_root` appends `directory` to the roots and saves. It creates the directory when missing and does not add a root twice. The first root, the download target, never moves. It runs no prompt, and without a config file it writes one with the default database path. It returns the updated `Config`.
+`add_kernel_root` appends `directory` to the roots and saves. It creates the directory when missing and does not add a root twice; the order of the others is kept. It runs no prompt, and without a config file it writes one with the default database path. It returns the updated `Config`.
 
 `remove_kernel_root` removes `directory` from the roots and saves. It raises `ValueError` when the directory is not a root or is the last one. Files on disk and database rows are untouched; `clean` drops rows whose file is gone. It returns the updated `Config`.
 
@@ -660,6 +659,14 @@ kernel_roots()
 ```
 
 The CLI equivalents are `skd config add-root` and `skd config remove-root`; see [Several kernel roots](cli.qmd#several-kernel-roots).
+
+### `KernelDB.root_for`
+
+```python
+db.root_for(mission: str | None, mk_path: str | Path | None = None) -> Path
+```
+
+The one answer to "which kernel root does this download belong in". In order: the root that contains `mk_path` (a tracked metakernel is re-fetched into its own store), the only configured root, and the one root that already holds kernels of `mission`. When several roots remain it raises `AmbiguousKernelRoot` (a `LookupError` carrying `mission` and `roots`) instead of picking the first; the CLI turns that into a picker at a terminal and exit 2 in a script. `get_metakernel` and `update_metakernel` call it when `download_dir` is not given (a URL that is already tracked uses that row's root), and `scan_directory(archive=True)` calls it for every file outside the roots.
 
 ### `guess_mission`
 

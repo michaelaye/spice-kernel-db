@@ -8,11 +8,11 @@ from typing import Annotated, Optional
 
 import typer
 
-from spice_kernel_db.db import KernelDB, MetakernelNotTracked
+from spice_kernel_db.db import AmbiguousKernelRoot, KernelDB, MetakernelNotTracked
 from spice_kernel_db.remote import SPICE_SERVERS, server_label_for
 
 from ._app import MAINTAIN, app, open_db, rename_note, state
-from .prompts import _confirm, _require_metakernel
+from .prompts import _confirm, _pick_root, _require_metakernel
 
 
 @app.command(rich_help_panel=MAINTAIN, epilog="See also: import, config add-root, mission add",
@@ -26,18 +26,31 @@ def scan(
         "--mission", help="Override auto-detected mission name")] = None,
     archive: Annotated[bool, typer.Option(
         "--archive",
-        help="Move files to the first kernel root and leave symlinks")] = False,
+        help="Move files into the kernel root that holds their mission "
+             "(or the only root) and leave symlinks")] = False,
 ) -> None:
     st = state(ctx)
-    archive_dir = st.config.kernel_dir if archive else None
     with open_db(ctx) as db:
-        if directory:
-            _, missions_found = db.scan_directory(
-                directory, mission=mission, verbose=st.verbose, archive_dir=archive_dir)
-            _note_new_missions(db, missions_found, [Path(directory).expanduser().resolve()])
-        else:
-            _, missions_found = db.scan_roots(verbose=st.verbose, archive_dir=archive_dir)
-            _note_new_missions(db, missions_found, db.kernel_roots)
+        chosen: dict[str, Path] = {}
+        while True:
+            try:
+                if directory:
+                    _, missions_found = db.scan_directory(
+                        directory, mission=mission, verbose=st.verbose,
+                        archive=archive, archive_roots=chosen)
+                    scanned = [Path(directory).expanduser().resolve()]
+                else:
+                    _, missions_found = db.scan_roots(
+                        verbose=st.verbose, archive=archive, archive_roots=chosen)
+                    scanned = db.kernel_roots
+                break
+            except AmbiguousKernelRoot as e:
+                # --archive, several roots, a mission none of them holds: ask
+                # once per such mission (exit 2 in a script). Nothing has
+                # moved yet; the scan starts over with the answer.
+                chosen[e.mission] = _pick_root(
+                    e, hint="--mission NAME makes every file that mission.")
+        _note_new_missions(db, missions_found, scanned)
         db.stats()
 
 

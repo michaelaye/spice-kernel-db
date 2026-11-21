@@ -77,6 +77,12 @@ def canonicalize_mission(name: str | None) -> str:
 _KERNEL_TYPE_DIRS = frozenset({"ck", "spk", "pck", "fk", "ik", "lsk", "sclk", "dsk", "mk"})
 
 
+def root_containing(path: str | Path, roots: list[Path]) -> Path | None:
+    """The one of *roots* (resolved kernel roots) that contains *path*, or None."""
+    resolved = Path(path).expanduser().resolve()
+    return next((r for r in roots if resolved.is_relative_to(r)), None)
+
+
 def guess_mission(filepath: str, roots: list[Path] | None = None) -> str:
     """Best-effort mission name from path components.
 
@@ -89,17 +95,13 @@ def guess_mission(filepath: str, roots: list[Path] | None = None) -> str:
     through :func:`canonicalize_mission` for consistent casing.
     """
     path = Path(filepath)
-    if roots:
-        resolved = path.expanduser().resolve()
-        for r in roots:
-            try:
-                rel = resolved.relative_to(r)
-            except ValueError:
-                continue
-            if len(rel.parts) > 1 and rel.parts[0].lower() not in _KERNEL_TYPE_DIRS:
-                return canonicalize_mission(rel.parts[0])
-            # Under a root but in no mission directory: only the filename can say.
-            return _guess_from_filename(path)
+    root = root_containing(path, roots) if roots else None
+    if root is not None:
+        rel = path.expanduser().resolve().relative_to(root)
+        if len(rel.parts) > 1 and rel.parts[0].lower() not in _KERNEL_TYPE_DIRS:
+            return canonicalize_mission(rel.parts[0])
+        # Under a root but in no mission directory: only the filename can say.
+        return _guess_from_filename(path)
     parts = path.parts
     # Pattern: .../MISSION/kernels/...
     for i, part in enumerate(parts):

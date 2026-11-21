@@ -334,14 +334,14 @@ class TestConfig:
         monkeypatch.setattr("spice_kernel_db.config.CONFIG_DIR", config_dir)
         monkeypatch.setattr("spice_kernel_db.config.CONFIG_FILE", config_file)
 
-        cfg = Config(db_path="/tmp/test.duckdb", kernel_dir="/tmp/kernels")
+        cfg = Config(db_path="/tmp/test.duckdb", kernel_dirs=["/tmp/kernels"])
         save_config(cfg)
         assert config_file.is_file()
 
         loaded = load_config()
         assert loaded is not None
         assert loaded.db_path == "/tmp/test.duckdb"
-        assert loaded.kernel_dir == "/tmp/kernels"
+        assert loaded.kernel_dirs == ["/tmp/kernels"]
 
     def test_load_missing_returns_none(self, tmp_path, monkeypatch):
         config_file = tmp_path / "nonexistent" / "config.toml"
@@ -375,24 +375,22 @@ class TestKernelRoots:
         from spice_kernel_db.config import CONFIG_FILE
 
         cfg = Config(db_path="/tmp/t.duckdb", kernel_dirs=["/a", "/b"])
-        assert cfg.kernel_dir == "/a"
         save_config(cfg)
         loaded = load_config()
-        assert loaded.kernel_dirs == ["/a", "/b"] and loaded.kernel_dir == "/a"
+        assert loaded.kernel_dirs == ["/a", "/b"]
         # a config written before #48: one kernel_dir key
         CONFIG_FILE.write_text('[database]\npath = "/tmp/t.duckdb"\n\n'
                                '[storage]\nkernel_dir = "/old"\n')
-        old = load_config()
-        assert old.kernel_dirs == ["/old"] and old.kernel_dir == "/old"
-        old.kernel_dir = "/new"
-        assert old.kernel_dirs == ["/new"]
+        assert load_config().kernel_dirs == ["/old"]
+        assert Config(kernel_dirs=[]).kernel_dirs  # never empty
+        assert not hasattr(Config(), "kernel_dir")  # C37: no single-root API, no download target
 
     # C27
     def test_add_and_remove_root(self, tmp_path, capsys):
         from spice_kernel_db import add_kernel_root, kernel_roots, remove_kernel_root
         from spice_kernel_db.cli import main
 
-        save_config(Config(db_path=str(tmp_path / "t.duckdb"), kernel_dir=str(tmp_path / "one")))
+        save_config(Config(db_path=str(tmp_path / "t.duckdb"), kernel_dirs=[str(tmp_path / "one")]))
         two = tmp_path / "two"
         cfg = add_kernel_root(two)
         assert cfg.kernel_dirs == [str(tmp_path / "one"), str(two)] and two.is_dir()
@@ -406,7 +404,7 @@ class TestKernelRoots:
 
         main(["config", "add-root", str(two)])
         out = capsys.readouterr().out
-        assert "(download target)" in out and str(two) in out and "scan" in out
+        assert str(two) in out and "scan" in out
         with pytest.raises(SystemExit) as exc:
             main(["config", "remove-root", str(tmp_path / "nope")])
         assert exc.value.code == 1
@@ -420,7 +418,7 @@ class TestKernelRoots:
         seed = tmp_path / "planetarypy_data" / "spice_kernels"
         cfg = ensure_config(seed_root=seed)
         assert cfg.kernel_dirs == [str(seed)] and seed.is_dir()
-        assert load_config().kernel_dir == str(seed)
+        assert load_config().kernel_dirs == [str(seed)]
         # an existing config is never changed by the seed
         assert ensure_config(seed_root=tmp_path / "other").kernel_dirs == [str(seed)]
 
@@ -515,6 +513,102 @@ class TestKernelRoots:
         finally:
             db.close()
 
+    # C35
+    def test_refetch_writes_into_the_metakernels_root(self, two_roots):
+        """Michael, 2026-11-21: a root-2 metakernel re-fetched by get or
+        update went into root 1, the configured "download target"."""
+        assert two_roots.run("scan", str(two_roots.two)) == 0
+        db = KernelDB(two_roots.db_path)
+        for mk in (two_roots.mk1, two_roots.mk2):
+            db.con.execute("UPDATE metakernel_registry SET source_url = ? WHERE mk_path = ?",
+                           [f"https://example.com/mk/{mk.name}", str(mk)])
+        db.close()
+        seen = {}
+
+        def fake_get(self, url, download_dir=None, **kwargs):
+            seen[url.rsplit("/", 1)[-1]] = Path(download_dir)
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+
+        with patch.object(KernelDB, "get_metakernel", fake_get):
+            assert two_roots.run("get", "mro_ops.tm") == 0
+            assert seen == {"mro_ops.tm": two_roots.two.resolve()}
+            seen.clear()
+            # C39: the re-scan after get left the row alone (it used to rewrite it)
+            db = KernelDB(two_roots.db_path, read_only=True)
+            assert db.registry_row("mro_ops.tm").source_url == "https://example.com/mk/mro_ops.tm"
+            db.close()
+            assert two_roots.run("update") == 0
+        assert seen == {"juice_ops.tm": two_roots.one.resolve(),
+                        "mro_ops.tm": two_roots.two.resolve()}
+
+    # C36
+    def test_destination_root_is_derived(self, two_roots, capsys):
+        from spice_kernel_db import AmbiguousKernelRoot
+        from spice_kernel_db.cli.prompts import _pick_root
+
+        one, two = two_roots.one.resolve(), two_roots.two.resolve()
+        db = KernelDB(two_roots.db_path)  # root one scanned (JUICE), root two not yet
+        assert db.root_for("JUICE") == one                   # the root holding the mission
+        assert db.root_for("juice") == one
+        assert db.root_for("JUICE", two_roots.mk2) == two    # the metakernel's own root wins
+        with pytest.raises(AmbiguousKernelRoot) as exc:
+            db.root_for("CASSINI")                          # nothing places it: never the first
+        assert exc.value.roots == [one, two] and "CASSINI" in str(exc.value)
+        db.scan_directory(two_roots.two)
+        assert db.root_for("MRO") == two
+        # the same bytes in both roots: the mission is in two, and the message says so
+        db.con.execute("INSERT INTO locations (sha256, abs_path, mission) SELECT sha256, ?, 'MRO' "
+                       "FROM locations WHERE mission = 'MRO' LIMIT 1", [str(one / "MRO" / "lsk" / "x.tls")])
+        with pytest.raises(AmbiguousKernelRoot, match="stored in 2 kernel roots"):
+            db.root_for("MRO")
+        db.close()
+        single = KernelDB(two_roots.db_path, kernel_roots=[two_roots.two])
+        assert single.root_for("CASSINI") == two             # the only root
+        single.close()
+
+        # The CLI: exit 2 in a script with the roots and the option named ...
+        remote_mk = "\\begindata\nPATH_VALUES = ( '.' )\nPATH_SYMBOLS = ( 'K' )\n" \
+                    "KERNELS_TO_LOAD = ( '$K/lsk/naif0012.tls' )\n\\begintext\n"
+        url = "https://example.com/mk/cas.tm"
+        with patch("spice_kernel_db.db._fetch_metakernel", return_value=(remote_mk, url)), \
+             patch("sys.stdin.isatty", return_value=False):
+            assert two_roots.run("get", url, "--mission", "CASSINI") == 2
+        err = capsys.readouterr().err
+        assert "CASSINI" in err and str(one) in err and "--download-dir" in err
+        # ... and a picker at a terminal.
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", return_value="2"):
+            assert _pick_root(AmbiguousKernelRoot("CASSINI", [one, two]), hint="h") == two
+
+    # C37
+    def test_scan_archive_moves_each_file_into_its_missions_root(self, two_roots, tmp_path, capsys):
+        """--archive with two roots: a file goes to the root that holds its
+        mission; a mission no root holds asks (exit 2 in a script) before
+        anything moves."""
+        assert two_roots.run("scan", str(two_roots.two)) == 0  # MRO lives in root two now
+        ext = tmp_path / "downloads"
+        juice, mro = ext / "JUICE" / "lsk" / "extra_j.tls", ext / "MRO" / "lsk" / "extra_m.tls"
+        for f in (juice, mro):
+            f.parent.mkdir(parents=True)
+            f.write_text(f.name)
+        assert two_roots.run("scan", str(ext), "--archive") == 0
+        assert (two_roots.one / "JUICE" / "lsk" / "extra_j.tls").read_text() == "extra_j.tls"
+        assert (two_roots.two / "MRO" / "lsk" / "extra_m.tls").read_text() == "extra_m.tls"
+        assert juice.is_symlink() and mro.is_symlink()
+        capsys.readouterr()
+
+        cas = ext / "CASSINI" / "lsk" / "cas.tls"
+        cas.parent.mkdir(parents=True)
+        cas.write_text("cas")
+        with patch("sys.stdin.isatty", return_value=False):
+            assert two_roots.run("scan", str(ext), "--archive") == 2
+        err = capsys.readouterr().err
+        assert "CASSINI" in err and "--mission" in err
+        assert cas.is_file() and not cas.is_symlink()  # nothing moved
+        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="2"):
+            assert two_roots.run("scan", str(ext), "--archive") == 0
+        assert (two_roots.two / "CASSINI" / "lsk" / "cas.tls").is_file() and cas.is_symlink()
+
     # C32
     def test_official_flag(self, two_roots, capsys, tmp_path):
         import duckdb
@@ -580,7 +674,7 @@ class TestArchiveOnScan:
 
         db = KernelDB(tmp_path / "test.duckdb")
         db.scan_directory(
-            src_dir, mission="JUICE", archive_dir=archive_dir,
+            src_dir, mission="JUICE", archive=True, archive_roots={"JUICE": archive_dir},
         )
 
         # File should now be in the archive
@@ -608,7 +702,7 @@ class TestArchiveOnScan:
 
         db = KernelDB(tmp_path / "test.duckdb")
         db.scan_directory(
-            archive_dir, mission="JUICE", archive_dir=archive_dir,
+            archive_dir, mission="JUICE", archive=True, archive_roots={"JUICE": archive_dir},
         )
 
         # File should still be a regular file, not a symlink
@@ -630,7 +724,7 @@ class TestArchiveOnScan:
         archive_dir = tmp_path / "archive"
 
         db = KernelDB(tmp_path / "test.duckdb")
-        db.scan_directory(src_dir, mission="TEST", archive_dir=archive_dir)
+        db.scan_directory(src_dir, mission="TEST", archive=True, archive_roots={"TEST": archive_dir})
 
         assert (archive_dir / "TEST" / "lsk" / "naif0012.tls").is_file()
         assert (archive_dir / "TEST" / "spk" / "de432s.bsp").is_file()

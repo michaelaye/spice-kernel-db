@@ -101,9 +101,8 @@ def config(
     setup: Annotated[bool, typer.Option(
         "--setup", help="Re-run interactive setup")] = False,
     config_args: Annotated[Optional[list[str]], typer.Argument(
-        help="'set <key> <value>', 'get <key>' (keys: db_path, kernel_dir), "
-             "'add-root <dir>' or 'remove-root <dir>' (the kernel roots; the "
-             "first is the download target)")] = None,
+        help="'set <key> <value>', 'get <key>' (key: db_path), "
+             "'add-root <dir>' or 'remove-root <dir>' (the kernel roots)")] = None,
 ) -> None:
     cfg = state(ctx).config
     if setup:
@@ -139,7 +138,7 @@ def config(
         sys.exit(1)
 
 
-_CONFIG_KEYS = ("db_path", "kernel_dir")
+_CONFIG_KEYS = ("db_path",)
 
 
 def _require_config_key(cfg, key: str) -> None:
@@ -164,11 +163,11 @@ def reset(
         print("Aborted.")
         return
     db_path.unlink()
-    kernel_dir = Path(st.config.kernel_dir).expanduser()
     print(f"Database deleted: {db_path}")
-    print(f"Kernel files in {kernel_dir} are untouched.\n")
-    print("To re-index existing kernels:")
-    print(f"  spice-kernel-db scan {kernel_dir}")
+    print("Kernel files are untouched, in:")
+    for kernel_root in st.config.kernel_dirs:
+        print(f"  {kernel_root}")
+    print("\nTo re-index them:\n  spice-kernel-db scan")
 
 
 # --- mission add: the wizard and its non-interactive twin -----------------
