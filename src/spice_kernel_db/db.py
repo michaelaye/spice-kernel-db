@@ -29,8 +29,6 @@ from rich.panel import Panel
 from rich.progress import Progress
 from rich.table import Table
 
-console = Console()
-
 from spice_kernel_db.config import kernel_roots
 from spice_kernel_db.hashing import (
     KERNEL_EXTENSIONS,
@@ -372,10 +370,22 @@ class KernelDB:
         db_path: str | Path | None = None,
         read_only: bool = False,
         kernel_roots: list[str | Path] | None = None,
+        console: Console | None = None,
     ):
+        """Open the database.
+
+        ``console`` is the one place this class writes to (#49, #6): tables,
+        notes and the download question all go to it. Without one (the
+        default, for library use) nothing is printed, progress bars are off
+        and every question is answered no, so a script passes ``yes=True``
+        where it wants a download. Warnings go through the
+        ``spice_kernel_db`` logger either way.
+        """
         # Imported here, not at module level: ``duckdb`` costs ~30 ms to
         # import and ``skd --version`` never opens a database (#26).
         import duckdb
+
+        self.console = console
 
         if db_path is None:
             from spice_kernel_db.config import default_db_path, load_config
@@ -438,6 +448,26 @@ class KernelDB:
 
     def _columns(self, table: str) -> set[str]:
         return {r[1] for r in self.con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def _show(self, *renderables) -> None:
+        """Print rich renderables or markup to the caller's console, if any."""
+        if self.console is not None:
+            self.console.print(*renderables)
+
+    def _say(self, text: str = "") -> None:
+        """Print plain text to the caller's console, if any: no markup, no wrapping."""
+        if self.console is not None:
+            self.console.print(text, markup=False, highlight=False, emoji=False, soft_wrap=True)
+
+    def _confirm(self, question: str) -> bool:
+        """Ask a yes/no question on the caller's console; no console, or a closed stdin, means no."""
+        if self.console is None:
+            return False
+        try:
+            answer = self.console.input(question, markup=False, emoji=False)
+        except EOFError:
+            return False
+        return answer.strip().lower() in ("y", "yes")
 
     def _official(self, prefix: str = "") -> str:
         """The ``official`` column to select, or TRUE on a read-only pre-#48 database."""
@@ -1064,7 +1094,7 @@ class KernelDB:
                     count += 1
                     missions_found.add(m)
                     if verbose:
-                        print(f"  registered: {p.name}")
+                        self._say(f"  registered: {p.name}")
                     if p.suffix.lower() == ".tm":
                         mk_files.append((p, m))
                 except (PermissionError, MemoryError, KeyboardInterrupt):
@@ -1085,11 +1115,11 @@ class KernelDB:
                 error_count += 1
                 logger.warning("Could not index metakernel %s: %s", mk_path, e)
 
-        print(f"Scanned {root}: {count} kernel files registered.")
+        self._say(f"Scanned {root}: {count} kernel files registered.")
         if mk_files:
-            print(f"  Indexed {len(mk_files)} metakernels.")
+            self._say(f"  Indexed {len(mk_files)} metakernels.")
         if error_count:
-            print(f"  Errors: {error_count} files could not be registered.")
+            self._say(f"  Errors: {error_count} files could not be registered.")
         return count, missions_found
 
     def scan_roots(
@@ -1103,7 +1133,7 @@ class KernelDB:
         count, missions = 0, set()
         for root in self.kernel_roots:
             if not root.is_dir():
-                print(f"Kernel root {root} does not exist; skipped.")
+                logger.warning("Kernel root %s does not exist; skipped.", root)
                 continue
             n, found = self.scan_directory(
                 root, verbose=verbose, archive=archive, archive_roots=archive_roots)
@@ -1358,20 +1388,20 @@ class KernelDB:
             })
 
         if results:
-            console.print(Panel(
+            self._show(Panel(
                 f"[bold]{len(results)}[/bold] files with {min_copies}+ copies\n"
                 f"Total wasted space: [bold]{total_waste / 1e6:.1f} MB[/bold]",
                 title="Duplicate kernels",
             ))
             for d in results[:30]:
-                console.print(
+                self._show(
                     f"\n  [bold]{d['filename']}[/bold]  "
                     f"({d['size_bytes'] / 1e6:.1f} MB × {d['count']} copies)"
                 )
                 for p, m in zip(d["paths"], d["missions"]):
-                    console.print(f"    [{m}] {p}")
+                    self._say(f"    [{m}] {p}")
         else:
-            console.print("No duplicates found.")
+            self._show("No duplicates found.")
 
         return results
 
@@ -1609,7 +1639,7 @@ class KernelDB:
             local, _ = self.resolve_kernel(fname, preferred_mission=mission)
             locals_[fname] = local
 
-        sizes = query_remote_sizes(sorted(urls_by_name.values()))
+        sizes = query_remote_sizes(sorted(urls_by_name.values()), console=self.console)
         entries: list[dict] = []
         ok = bad = unchecked = 0
         size_matched: list[tuple[str, str, str]] = []
@@ -1950,18 +1980,18 @@ class KernelDB:
             path_values=new_path_values,
         )
 
-        print(f"Wrote metakernel to {out_path}")
-        print(f"  Symlink tree at {link_root}")
-        print(f"  Resolved: {len(parsed.kernels) - len(unresolved)}"
+        self._say(f"Wrote metakernel to {out_path}")
+        self._say(f"  Symlink tree at {link_root}")
+        self._say(f"  Resolved: {len(parsed.kernels) - len(unresolved)}"
               f"/{len(parsed.kernels)}")
         if unresolved:
-            print(f"  Unresolved ({len(unresolved)}):")
+            self._say(f"  Unresolved ({len(unresolved)}):")
             for u in unresolved:
-                print(f"    {u}")
+                self._say(f"    {u}")
         if all_warnings:
-            print(f"  Warnings:")
+            self._say(f"  Warnings:")
             for w in all_warnings:
-                print(f"    ⚠ {w}")
+                self._say(f"    ⚠ {w}")
 
         return out_path, all_warnings
 
@@ -2329,7 +2359,7 @@ class KernelDB:
         If it exists as a symlink, replace it to point at the new target.
         """
         if alias_path.exists() and not alias_path.is_symlink():
-            console.print(
+            self._show(
                 f"[yellow]Alias {alias_filename} already exists as a regular "
                 f"file in {alias_path.parent} — not overwriting.[/yellow]"
             )
@@ -2338,7 +2368,7 @@ class KernelDB:
             # C7: atomic symlink replace
             _atomic_symlink(target.name, alias_path)
         except OSError as e:
-            console.print(
+            self._show(
                 f"[yellow]Could not create alias symlink "
                 f"{alias_path}: {e}[/yellow]"
             )
@@ -2348,7 +2378,7 @@ class KernelDB:
             (mk_path, mission, source_url, filename, acquired_at)
             VALUES (?, ?, ?, ?, current_timestamp)
         """, [str(alias_path), mission, source_url, alias_filename])
-        console.print(
+        self._show(
             f"  Created alias [bold]{alias_filename}[/bold] → {target.name}"
         )
 
@@ -2373,7 +2403,9 @@ class KernelDB:
                 several could). Preserves the remote subdirectory structure
                 (lsk/, spk/, etc.).
             mission: Override auto-detected mission name.
-            yes: If True, skip the confirmation prompt.
+            yes: If True, skip the confirmation prompt. Without it the
+                question is asked on the instance's console; with no console
+                nothing is written and the result carries ``aborted: True``.
             verbose: If True, list each kernel's resolved URL under the status
                 table. The table itself is always shown: it precedes the
                 download prompt, so it is what the user decides on (#4).
@@ -2402,6 +2434,12 @@ class KernelDB:
         if m:
             mission = m["name"]
 
+        # With no console there is nobody to ask, so without ``yes`` the answer
+        # is no before anything is written: the dry-run path, reported as aborted.
+        unasked = not yes and not dry_run and self.console is None
+        if unasked:
+            dry_run = True
+
         # Where it lands, decided before any network I/O: the root holding
         # the file this URL fetched before, else the root that holds the
         # mission, else the only root. Several roots and no such fact raise
@@ -2416,7 +2454,7 @@ class KernelDB:
         download_dir = Path(download_dir).expanduser().resolve()
 
         # 1. Fetch and parse
-        console.print(f"Fetching [bold]{url}[/bold] ...")
+        self._show(f"Fetching [bold]{url}[/bold] ...")
         text, final_url = _fetch_metakernel(url)
         parsed = parse_metakernel_text(text, final_url)
 
@@ -2521,7 +2559,7 @@ class KernelDB:
             # Release lock during network I/O so other processes aren't blocked.
             self.release()
             try:
-                sizes = query_remote_sizes(kernel_urls)
+                sizes = query_remote_sizes(kernel_urls, console=self.console)
             finally:
                 self.reacquire()
             # Issue 5: Check if state changed during lock release
@@ -2540,7 +2578,7 @@ class KernelDB:
         # other filenames, pointing the user at `aliases <name>`.
         alias_extra = self.alias_counts_by_name(
             [filenames[i] for i in found_indices]
-        )
+        ) if self.console is not None else {}
         table = Table(title=f"Metakernel: {mk_name} ({total} kernels)")
         table.add_column("Kernel")
         table.add_column("Size", justify="right")
@@ -2559,14 +2597,14 @@ class KernelDB:
                     f"alias{'es' if n_alias > 1 else ''})[/cyan]"
                 )
             table.add_row(label, sz_str, f"[{style}]{status}[/{style}]")
-        console.print(table)
+        self._show(table)
 
         if verbose:
-            console.print("[dim]Resolved URLs:[/dim]")
+            self._show("[dim]Resolved URLs:[/dim]")
             for relpath, kurl in zip(relpaths, kernel_urls):
-                console.print(f"  [dim]{relpath} -> {kurl}[/dim]")
+                self._show(f"  [dim]{relpath} -> {kurl}[/dim]")
 
-        console.print(Panel(
+        self._show(Panel(
             f"Total: [bold]{total}[/bold] | "
             f"In DB: [green]{n_found}[/green] | "
             f"Missing: [red]{n_missing}[/red] | "
@@ -2581,6 +2619,7 @@ class KernelDB:
                 "downloaded": [],
                 "warnings": [],
                 "dry_run": True,
+                **({"aborted": True} if unasked else {}),
             }
 
         if n_missing == 0:
@@ -2593,7 +2632,7 @@ class KernelDB:
             if n_linked:
                 lines.append(f"Linked {n_linked} existing kernels into download tree.")
             lines.append(f"\nMetakernel ready: [bold]{mk_dest}[/bold]")
-            console.print(Panel("\n".join(lines), title="Result"))
+            self._show(Panel("\n".join(lines), title="Result"))
             return {
                 "found": found_indices,
                 "missing": [],
@@ -2602,66 +2641,64 @@ class KernelDB:
             }
 
         # 6. Prompt
-        if not yes:
-            answer = input(
-                f"\nDownload {n_missing} missing kernels "
-                f"({_format_size(download_bytes)})? [y/N]: "
-            ).strip().lower()
-            if answer not in ("y", "yes"):
-                # Roll back the speculative registration. Without this,
-                # the metakernel would appear in `ls` as if it were
-                # ready, even though its required kernels were never
-                # downloaded.
-                if mk_existed_before and prior_mk_content is not None:
-                    # Update flow: restore the previous .tm content and
-                    # re-index its entries. The registry row was
-                    # REPLACEd in place; values are essentially the
-                    # same modulo the acquired_at timestamp, which we
-                    # accept as harmless drift.
-                    mk_dest.write_bytes(prior_mk_content)
-                    self.index_metakernel(mk_dest)
-                else:
-                    # First-time get: full rollback.
+        if not yes and not self._confirm(
+            f"\nDownload {n_missing} missing kernels "
+            f"({_format_size(download_bytes)})? [y/N]: "
+        ):
+            # Roll back the speculative registration. Without this,
+            # the metakernel would appear in `ls` as if it were
+            # ready, even though its required kernels were never
+            # downloaded.
+            if mk_existed_before and prior_mk_content is not None:
+                # Update flow: restore the previous .tm content and
+                # re-index its entries. The registry row was
+                # REPLACEd in place; values are essentially the
+                # same modulo the acquired_at timestamp, which we
+                # accept as harmless drift.
+                mk_dest.write_bytes(prior_mk_content)
+                self.index_metakernel(mk_dest)
+            else:
+                # First-time get: full rollback.
+                self.con.execute(
+                    "DELETE FROM metakernel_entries WHERE mk_path = ?",
+                    [str(mk_dest)],
+                )
+                self.con.execute(
+                    "DELETE FROM metakernel_registry WHERE mk_path = ?",
+                    [str(mk_dest)],
+                )
+                if alias_filename and alias_filename != mk_filename:
+                    alias_path = mk_dir / alias_filename
+                    if alias_path.is_symlink():
+                        try:
+                            alias_path.unlink()
+                        except OSError:
+                            pass
                     self.con.execute(
-                        "DELETE FROM metakernel_entries WHERE mk_path = ?",
-                        [str(mk_dest)],
+                        "DELETE FROM metakernel_registry "
+                        "WHERE mk_path = ?",
+                        [str(alias_path)],
                     )
-                    self.con.execute(
-                        "DELETE FROM metakernel_registry WHERE mk_path = ?",
-                        [str(mk_dest)],
-                    )
-                    if alias_filename and alias_filename != mk_filename:
-                        alias_path = mk_dir / alias_filename
-                        if alias_path.is_symlink():
-                            try:
-                                alias_path.unlink()
-                            except OSError:
-                                pass
-                        self.con.execute(
-                            "DELETE FROM metakernel_registry "
-                            "WHERE mk_path = ?",
-                            [str(alias_path)],
-                        )
-                    try:
-                        mk_dest.unlink()
-                    except OSError:
-                        pass
-                console.print(Panel(
-                    f"Acquisition aborted — [bold]{n_missing}[/bold] "
-                    f"kernel(s) would have been downloaded.\n"
-                    f"Nothing was added to the database.\n\n"
-                    f"Re-run [bold]spice-kernel-db get[/bold] when "
-                    f"you're ready to download.",
-                    title="Aborted",
-                    border_style="yellow",
-                ))
-                return {
-                    "found": found_indices,
-                    "missing": missing_indices,
-                    "downloaded": [],
-                    "warnings": [],
-                    "aborted": True,
-                }
+                try:
+                    mk_dest.unlink()
+                except OSError:
+                    pass
+            self._show(Panel(
+                f"Acquisition aborted — [bold]{n_missing}[/bold] "
+                f"kernel(s) would have been downloaded.\n"
+                f"Nothing was added to the database.\n\n"
+                f"Re-run [bold]spice-kernel-db get[/bold] when "
+                f"you're ready to download.",
+                title="Aborted",
+                border_style="yellow",
+            ))
+            return {
+                "found": found_indices,
+                "missing": missing_indices,
+                "downloaded": [],
+                "warnings": [],
+                "aborted": True,
+            }
 
         # 7. Build download list, skipping files with correct size AND hash (Issue 2)
         tasks = []
@@ -2704,7 +2741,7 @@ class KernelDB:
             task_info[dest] = kurl
 
         if already_on_disk:
-            console.print(f"  [dim]Skipped: {len(already_on_disk)} already downloaded[/dim]")
+            self._show(f"  [dim]Skipped: {len(already_on_disk)} already downloaded[/dim]")
             download_bytes -= sum(f.stat().st_size for f in already_on_disk)
 
         # Issue 5: Snapshot before releasing for download
@@ -2714,7 +2751,7 @@ class KernelDB:
         self.release()
         try:
             dl_results, warnings = download_kernels_parallel(
-                tasks, total_bytes=download_bytes,
+                tasks, total_bytes=download_bytes, console=self.console,
             )
         finally:
             self.reacquire()
@@ -2756,7 +2793,7 @@ class KernelDB:
             for w in warnings:
                 lines.append(f"[yellow]⚠ {w}[/yellow]")
         lines.append(f"\nMetakernel ready: [bold]{mk_dest}[/bold]")
-        console.print(Panel("\n".join(lines), title="Result"))
+        self._show(Panel("\n".join(lines), title="Result"))
 
         return {
             "found": found_indices,
@@ -2890,13 +2927,13 @@ class KernelDB:
 
         for sd in sorted(scan_dirs):
             if verbose:
-                console.print(f"[dim]Re-scanning {sd} for updated kernels...[/dim]")
+                self._show(f"[dim]Re-scanning {sd} for updated kernels...[/dim]")
             try:
                 self.scan_directory(str(sd), mission=mission)
             except (OSError, duckdb.Error) as e:
                 logger.warning("Post-update rescan of %s failed: %s", sd, e)
         if scan_dirs and not verbose:
-            console.print(
+            self._show(
                 f"[dim]Re-scanned {len(scan_dirs)} "
                 f"director{'y' if len(scan_dirs) == 1 else 'ies'} "
                 f"for updated kernels.[/dim]"
@@ -2926,7 +2963,7 @@ class KernelDB:
                 continue  # the alias of a row walked under its own name
             entry = {"filename": row.filename, "mission": row.mission,
                      "count": 0, "error": None}
-            console.print(f"\n[bold]{row.filename}[/bold] ({row.mission})")
+            self._show(f"\n[bold]{row.filename}[/bold] ({row.mission})")
             try:
                 result = self.update_metakernel(
                     row.mk_path, yes=True, verbose=verbose, dry_run=dry_run, rescan=False,
@@ -2953,7 +2990,7 @@ class KernelDB:
         for e in report:
             table.add_row(e["mission"] or "", e["filename"],
                           "" if e["error"] else str(e["count"]), e["error"] or "")
-        console.print(table)
+        self._show(table)
         return report
 
     def import_metakernel(
@@ -3011,7 +3048,9 @@ class KernelDB:
         """List all tracked metakernels, optionally filtered by mission.
 
         The *mission* filter is case-insensitive with prefix matching.
-        With ``show=False`` nothing is printed; the rows are only returned.
+        With ``show=False`` nothing is printed even on a console; the rows
+        are only returned. Legacy since #49 (the library is quiet without a
+        console); kept because planetarypy's released code passes it.
         """
         where, params = "", []
         if mission:
@@ -3042,7 +3081,7 @@ class KernelDB:
 
         if not results:
             if show:
-                print("No tracked metakernels.")
+                self._say("No tracked metakernels.")
             return results
 
         # Compute content fingerprints to detect identical metakernels
@@ -3117,7 +3156,7 @@ class KernelDB:
                 r["mission"], name_cell,
                 str(r["n_kernels"]), source_short,
             )
-        console.print(table)
+        self._show(table)
         return results
 
     def metakernels_covering(
@@ -3233,17 +3272,17 @@ class KernelDB:
         n_missing = len(entries) - n_in_db
 
         # Print detailed info
-        print(f"\nMetakernel: {filename}")
+        self._say(f"\nMetakernel: {filename}")
         if row is None:
-            print(f"  Not tracked; spice-kernel-db import {mk_path} tracks it.")
+            self._say(f"  Not tracked; spice-kernel-db import {mk_path} tracks it.")
         else:
-            print(f"  Mission:      {mission}")
+            self._say(f"  Mission:      {mission}")
             if source_url:
-                print(f"  Source:       {source_url}")
-            print(f"  Acquired:     {acquired_at}")
+                self._say(f"  Source:       {source_url}")
+            self._say(f"  Acquired:     {acquired_at}")
             if not official:
-                print("  Official:     no (assembled locally, not an archive metakernel)")
-        print(f"  Local path:   {mk_path}")
+                self._say("  Official:     no (assembled locally, not an archive metakernel)")
+        self._say(f"  Local path:   {mk_path}")
 
         shown = kernel_info
         if kernel_type:
@@ -3259,10 +3298,10 @@ class KernelDB:
                 table.add_row(
                     k["filename"], k["kernel_type"], sz_str, k["status"],
                 )
-            console.print(table)
+            self._show(table)
 
-        print(f"\n  Total: {len(entries)} | In DB: {n_in_db} | Missing: {n_missing}")
-        print()
+        self._say(f"\n  Total: {len(entries)} | In DB: {n_in_db} | Missing: {n_missing}")
+        self._say()
 
         return {
             "filename": filename,
@@ -3427,11 +3466,11 @@ class KernelDB:
         n_files = len(entries)
         n_local = sum(1 for r in results if r["is_local"])
 
-        print(f"\nRemote metakernels: {mission}")
-        print(f"  {mk_dir_url}\n")
+        self._say(f"\nRemote metakernels: {mission}")
+        self._say(f"  {mk_dir_url}\n")
 
         if not results:
-            print("  No .tm files found.")
+            self._say("  No .tm files found.")
             return results
 
         def _local_str(status: str) -> str:
@@ -3452,7 +3491,7 @@ class KernelDB:
                 ls = _local_str(r["local_status"])
                 e = r["current"][0]
                 table.add_row(e.filename, e.date, e.size, ls)
-            console.print(table)
+            self._show(table)
         elif show_versioned:
             # Expanded view: show each file, versioned snapshots indented
             table = Table()
@@ -3473,7 +3512,7 @@ class KernelDB:
                         f"[dim]{e.date}[/dim]",
                         f"[dim]{e.size}[/dim]",
                     )
-            console.print(table)
+            self._show(table)
         else:
             # Compact view: one line per unique metakernel
             table = Table()
@@ -3487,23 +3526,23 @@ class KernelDB:
                     r["base_name"], str(r["n_versions"]),
                     r["latest_date"], ls,
                 )
-            console.print(table)
+            self._show(table)
 
         if archived:
-            print(
+            self._say(
                 f"\n  Total: {n_files} archived files"
                 f" | {n_local} locally acquired"
             )
         else:
-            print(
+            self._say(
                 f"\n  Total: {n_unique} unique | {n_files} files"
                 f" | {n_local} locally acquired"
             )
         if has_outdated:
-            print("  Run 'spice-kernel-db get <name>' to update outdated metakernels.")
+            self._say("  Run 'spice-kernel-db get <name>' to update outdated metakernels.")
         if not archived and not show_versioned and n_files > n_unique:
-            print("  Use --show-versioned to also show the identical but versioned snapshot metakernels.")
-        print()
+            self._say("  Use --show-versioned to also show the identical but versioned snapshot metakernels.")
+        self._say()
 
         return results
 
@@ -3614,7 +3653,7 @@ class KernelDB:
             if n_poisoned else f"Poisoned rows:    {n_poisoned}"
         )
 
-        console.print(Panel(
+        self._show(Panel(
             f"Unique kernels:   [bold]{n_kernels}[/bold]\n"
             f"Total locations:  {n_locs}\n"
             f"Unique content:   {total_size / 1e9:.2f} GB\n"
@@ -3629,7 +3668,7 @@ class KernelDB:
         type_table.add_column("Size", justify="right")
         for ktype, cnt, sz in by_type:
             type_table.add_row(ktype, str(cnt), f"{sz / 1e6:.1f} MB")
-        console.print(type_table)
+        self._show(type_table)
 
         return {
             "n_kernels": n_kernels,
@@ -3710,19 +3749,19 @@ class KernelDB:
             for rm_path in item["remove"]:
                 total_saved += item["size_bytes"]
                 if dry_run:
-                    print(f"  WOULD replace {rm_path}")
-                    print(f"    -> symlink to {item['keep']}")
+                    self._say(f"  WOULD replace {rm_path}")
+                    self._say(f"    -> symlink to {item['keep']}")
                 else:
                     p = Path(rm_path)
                     if p.is_file() and not p.is_symlink():
                         p.unlink()
                         p.symlink_to(item["keep"])
-                        print(f"  Replaced {rm_path} -> {item['keep']}")
+                        self._say(f"  Replaced {rm_path} -> {item['keep']}")
                         # Update DB to note this is now a symlink
                         # (the hash and location are still valid)
 
         action = "Would save" if dry_run else "Saved"
-        print(f"\n{action}: {total_saved / 1e6:.1f} MB")
+        self._say(f"\n{action}: {total_saved / 1e6:.1f} MB")
         return plan
 
     def prune(self, dry_run: bool = True) -> list[str]:
@@ -3738,13 +3777,13 @@ class KernelDB:
         """
         stale = self.stale_locations()
         if not stale:
-            print("No stale locations found.")
+            self._say("No stale locations found.")
             return []
 
         action = "Would remove" if dry_run else "Removed"
         pruned_paths = []
         for sha256, abs_path in stale:
-            print(f"  {action}: {abs_path}")
+            self._say(f"  {action}: {abs_path}")
             pruned_paths.append(abs_path)
             if not dry_run:
                 self.con.execute(
@@ -3763,9 +3802,9 @@ class KernelDB:
                 self.con.execute(
                     "DELETE FROM kernels WHERE sha256 = ?", [sha256],
                 )
-                print(f"  Removed orphaned kernel record: {filename}")
+                self._say(f"  Removed orphaned kernel record: {filename}")
 
-        print(f"\n{action}: {len(stale)} stale location(s)")
+        self._say(f"\n{action}: {len(stale)} stale location(s)")
         return pruned_paths
 
     def prune_orphan_symlinks(self, dry_run: bool = True) -> list[str]:
@@ -3798,7 +3837,7 @@ class KernelDB:
                 roots.add(p.parent.parent)
 
         if not roots:
-            print("No download trees to walk (no registered metakernels).")
+            self._say("No download trees to walk (no registered metakernels).")
             return []
 
         dangling: list[Path] = []
@@ -3810,7 +3849,7 @@ class KernelDB:
                     dangling.append(sub)
 
         if not dangling:
-            print("No orphan symlinks found.")
+            self._say("No orphan symlinks found.")
             return []
 
         action = "Would remove" if dry_run else "Removed"
@@ -3819,14 +3858,14 @@ class KernelDB:
                 target = os.readlink(d)
             except OSError:
                 target = "?"
-            print(f"  {action}: {d}  →  {target}")
+            self._say(f"  {action}: {d}  →  {target}")
             if not dry_run:
                 try:
                     d.unlink()
                 except OSError as e:
                     logger.warning("Could not unlink %s: %s", d, e)
 
-        print(f"\n{action}: {len(dangling)} orphan symlink(s)")
+        self._say(f"\n{action}: {len(dangling)} orphan symlink(s)")
         return [str(p) for p in dangling]
 
     def prune_metakernels(
@@ -3874,7 +3913,7 @@ class KernelDB:
         """).fetchall()
 
         if not rows:
-            print("No metakernels in the registry.")
+            self._say("No metakernels in the registry.")
             return []
 
         # Cache mk_dir_url per mission to avoid N×get_mission queries.
@@ -3943,14 +3982,14 @@ class KernelDB:
                     )
 
         if no_url:
-            console.print(
+            self._show(
                 f"[dim]{len(no_url)} row(s) had no probeable URL "
                 f"(no source_url and no mission mk_dir_url). "
                 f"Use `spice-kernel-db rm <name>` to drop them manually.[/dim]"
             )
 
         if not dead:
-            print("No dead metakernels found.")
+            self._say("No dead metakernels found.")
             return []
 
         # Render results
@@ -3966,15 +4005,15 @@ class KernelDB:
                 str(d["status_code"]),
                 d["source_url"],
             )
-        console.print(table)
+        self._show(table)
 
         if dry_run:
-            console.print(
+            self._show(
                 f"\n[dim]Dry run — pass --execute to remove the "
                 f"{len(dead)} registry row(s) above.[/dim]"
             )
             if not delete_files:
-                console.print(
+                self._show(
                     "[dim]Add --delete-files to also unlink the .tm files "
                     "on disk.[/dim]"
                 )
@@ -3995,13 +4034,13 @@ class KernelDB:
                 if p.is_symlink() or p.is_file():
                     try:
                         p.unlink()
-                        console.print(f"  Deleted file: {p}")
+                        self._say(f"  Deleted file: {p}")
                     except OSError as e:
-                        console.print(
+                        self._show(
                             f"[yellow]Could not delete {p}: {e}[/yellow]"
                         )
 
-        console.print(
+        self._show(
             f"\n[bold]Removed {len(dead)} registry row(s)"
             f"{' + files' if delete_files else ''}.[/bold]"
         )

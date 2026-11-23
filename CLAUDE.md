@@ -38,11 +38,12 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 
 | Module | Role |
 |--------|------|
-| `db.py` | `KernelDB` class — all DB operations, scanning, resolution, metakernel rewriting, get, browse |
+| `db.py` | `KernelDB` class — all DB operations, scanning, resolution, metakernel rewriting, get, browse. Writes only to the `console` it was given (none by default: library use is silent, #49); warnings go to the `spice_kernel_db` logger |
 | `parser.py` | `ParsedMetakernel` dataclass; parse/write `.tm` files; symbol resolution |
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission(filepath, roots=None)` (path heuristic; the first directory below a configured kernel root wins) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
-| `config.py` | `Config` (`kernel_dirs`, the list of kernel roots; no root is special, `KernelDB.root_for` derives where a download lands), TOML persistence at `~/.config/spice-kernel-db/config.toml`, `kernel_roots()` / `add_kernel_root()` / `remove_kernel_root()` |
+| `config.py` | `Config` (`kernel_dirs`, the list of kernel roots; no root is special, `KernelDB.root_for` derives where a download lands), TOML persistence at `~/.config/spice-kernel-db/config.toml`, `kernel_roots()` / `add_root()` / `remove_root()`; raises `ConfigError`, never prints or prompts |
+| `api.py` | Module-level `get`, `check`, `scan`, `register_metakernel`, `resolve_metakernel`, `metakernels_covering`: one call against the configured database; `__init__.py`'s `__all__` is the public API (#49), mirrored in `docs/api.qmd` § Public API and checked by `tests/test_api.py` |
 | `cli/` | Typer CLI, one module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py` (ls, show, which, coverage, stats, check, doctor, plus the hidden aliases list, metakernels/mk, resolve, aliases, duplicates, verify), `transform.py` (scan, import, rewrite, rm, clean, dedup, and the hidden prune), `configure.py` (mission, config, reset); `prompts.py` holds the shared interactive pickers, `_app.py` the `app` object and per-invocation state, `__init__.py` the root options and `main()` |
 
 ### Key Design Decisions

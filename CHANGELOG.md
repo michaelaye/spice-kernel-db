@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A quiet library and a declared public API** (#49, closes #6). Nothing
+  under `spice_kernel_db` prints unless it is handed a `rich.console.Console`:
+  `KernelDB(console=...)` is where tables, notes, progress bars and the
+  download question go, and without one (the default) `get_metakernel`
+  answers its own question with no and reports `aborted`. The CLI passes its
+  console. Warnings go through the `spice_kernel_db` logger, which the CLI
+  routes to stderr (INFO under `--verbose`). `spice_kernel_db.__all__` is
+  the public API, listed in `docs/api.qmd` § Public API and held stable
+  within a major version, with module-level `get`, `check`, `scan`,
+  `register_metakernel`, `resolve_metakernel` and `metakernels_covering`
+  that open the configured database per call. `config.py` neither prints
+  nor prompts: a corrupt file raises `ConfigError` (the CLI prints the message
+  and exits 78, the configuration-error code, instead of falling back to
+  setup, which would have overwritten the file), `ensure_config()` with no file
+  and no `seed_root` raises it too, and the first-run questions live in the
+  CLI. `fetch_metakernel`, `list_remote_metakernels` and
+  `resolve_kernel_urls` are no longer exported from the package (they stay
+  in `spice_kernel_db.remote`).
 - **`check` answers three questions, each with its own exit bit** (#46).
   *present* (every listed kernel on disk, bit 1), *resolves* (every entry
   resolves through `PATH_VALUES` to the file the database knows, bit 2) and
@@ -103,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `info_metakernel()` carry `official`, and
   `import_metakernel(path, mission=None, official=True)` sets it.
 - **Python functions for the roots** (#48): `kernel_roots()`,
-  `add_kernel_root(dir)` and `remove_kernel_root(dir)`, exported from the
+  `add_root(dir)` and `remove_root(dir)`, exported from the
   package, and `ensure_config(seed_root=...)`, which writes a first
   configuration with that root instead of prompting. An existing configuration
   is never changed by the seed. `Config(db_path, kernel_dirs)` holds the

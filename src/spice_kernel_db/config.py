@@ -1,7 +1,8 @@
-"""Configuration management and first-run setup for spice-kernel-db.
+"""Configuration for spice-kernel-db: ~/.config/spice-kernel-db/config.toml.
 
-Stores user preferences in ~/.config/spice-kernel-db/config.toml.
-On first use, prompts interactively for database and kernel storage paths.
+This module neither prints nor prompts (#49): a corrupt or missing file is a
+``ConfigError``, and the first-run prompt and the config display live in
+``cli/configure.py``.
 
 Since #48 the storage section holds a *list* of kernel roots. Every root is
 scanned, resolved against and deduplicated across, and a download lands in
@@ -45,6 +46,14 @@ class Config:
         self.kernel_dirs = list(self.kernel_dirs) or [DEFAULT_KERNEL_DIR]
 
 
+class ConfigError(RuntimeError):
+    """The config file is corrupt, or there is none and nothing says what to write.
+
+    Not a ``ValueError``: ``remove_root`` raises those for a bad argument, and an
+    ``except ValueError`` around it must not swallow a broken config file.
+    """
+
+
 class LegacyDatabaseFound(RuntimeError):
     """A database sits at the pre-0.19 default and nothing says to use it."""
 
@@ -70,21 +79,23 @@ def default_db_path() -> str:
 
 
 def load_config() -> Config | None:
-    """Load config from TOML file. Returns None if not configured yet."""
+    """Load config from the TOML file; None when there is no file yet.
+
+    A file that does not parse raises ``ConfigError`` rather than reading as
+    "not configured": the next step after None is first-run setup, which
+    would overwrite it.
+    """
     if not CONFIG_FILE.is_file():
         return None
     try:
         with open(CONFIG_FILE, "rb") as f:
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
-        import sys
-        print(
-            f"Error: config file is corrupt: {CONFIG_FILE}\n"
+        raise ConfigError(
+            f"Config file is corrupt: {CONFIG_FILE}\n"
             f"  {e}\n"
-            f"  Fix the file manually or re-run: spice-kernel-db config --setup",
-            file=sys.stderr,
-        )
-        return None
+            f"  Fix the file by hand or re-run: spice-kernel-db config --setup"
+        ) from e
     storage = data.get("storage", {})
     # A file written before #48 holds one kernel_dir.
     roots = storage.get("kernel_dirs") or [storage.get("kernel_dir", DEFAULT_KERNEL_DIR)]
@@ -128,7 +139,7 @@ def kernel_roots(config: Config | None = None) -> list[Path]:
     return [Path(r).expanduser().resolve() for r in _loaded(config).kernel_dirs]
 
 
-def add_kernel_root(directory: str | Path, config: Config | None = None) -> Config:
+def add_root(directory: str | Path, config: Config | None = None) -> Config:
     """Append *directory* to the kernel roots and save (#48).
 
     The directory is created when missing. A root already present is not
@@ -145,7 +156,7 @@ def add_kernel_root(directory: str | Path, config: Config | None = None) -> Conf
     return config
 
 
-def remove_kernel_root(directory: str | Path, config: Config | None = None) -> Config:
+def remove_root(directory: str | Path, config: Config | None = None) -> Config:
     """Remove *directory* from the kernel roots and save (#48).
 
     Raises ``ValueError`` when it is not a root or is the last one; the
@@ -166,28 +177,7 @@ def remove_kernel_root(directory: str | Path, config: Config | None = None) -> C
     return config
 
 
-def setup_interactive() -> Config:
-    """Run first-time interactive setup.
-
-    Prompts for database location and kernel storage directory,
-    creates directories, saves config.
-    """
-    print("spice-kernel-db: First-time setup\n")
-
-    db_path = input(f"  Database location [{DEFAULT_DB_PATH}]: ").strip()
-    if not db_path:
-        db_path = DEFAULT_DB_PATH
-
-    kernel_dir = input(f"  Kernel storage directory [{DEFAULT_KERNEL_DIR}]: ").strip()
-    if not kernel_dir:
-        kernel_dir = DEFAULT_KERNEL_DIR
-
-    config = _write_first_config(db_path, kernel_dir)
-    print(f"\n  Config saved to {CONFIG_FILE}")
-    return config
-
-
-def _write_first_config(db_path: str, kernel_dir: str) -> Config:
+def write_first_config(db_path: str, kernel_dir: str) -> Config:
     """Create both directories and write the first config file."""
     Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     Path(kernel_dir).expanduser().mkdir(parents=True, exist_ok=True)
@@ -196,29 +186,21 @@ def _write_first_config(db_path: str, kernel_dir: str) -> Config:
     return config
 
 
-def show_config(config: Config) -> None:
-    """Print current configuration."""
-    print("\nspice-kernel-db configuration\n")
-    print(f"  Config file:   {CONFIG_FILE}")
-    print(f"  Database:      {config.db_path}")
-    for i, root in enumerate(config.kernel_dirs):
-        label = "Kernel roots:  " if i == 0 else "               "
-        print(f"  {label}{root}")
-    print()
-
-
 def ensure_config(seed_root: str | Path | None = None) -> Config:
-    """Load config or run interactive setup if first time.
+    """Load the config, or write a first one around *seed_root*.
 
     With *seed_root* and no config file yet, write a config whose first
-    kernel root is *seed_root* instead of prompting (#48: planetarypy seeds
-    skd's root from its own storage root on first run). An existing config
-    is never changed by *seed_root*.
+    kernel root is *seed_root* (#48: planetarypy seeds skd's root from its
+    own storage root on first run). An existing config is never changed by
+    *seed_root*. With no file and no seed there is nothing to write, so
+    ``ConfigError`` names the command that asks (#49); the CLI runs that
+    prompt itself.
     """
     config = load_config()
     if config is None:
-        if seed_root is not None:
-            config = _write_first_config(default_db_path(), str(Path(seed_root).expanduser()))
-        else:
-            config = setup_interactive()
+        if seed_root is None:
+            raise ConfigError(
+                "No configuration yet. Run: spice-kernel-db config --setup"
+            )
+        config = write_first_config(default_db_path(), str(Path(seed_root).expanduser()))
     return config

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     DownloadColumn,
@@ -97,6 +98,11 @@ class RemoteMetakernel:
     size: str  # "12K"
     base_name: str  # filename with version tag stripped
     version_tag: str | None  # "v461_20251127_001" or None
+
+
+def _progress(*columns, console: Console | None, transient: bool = False) -> Progress:
+    """A progress bar on *console*; without one it is disabled, so a library call draws nothing (#49)."""
+    return Progress(*columns, console=console, disable=console is None, transient=transient)
 
 
 def list_remote_metakernels(mk_dir_url: str) -> list[RemoteMetakernel]:
@@ -251,12 +257,14 @@ def _head_ok(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
 
 
 def check_mk_availability(
-    server_url: str, missions: list[str], *, max_workers: int = 16
+    server_url: str, missions: list[str], *, max_workers: int = 16,
+    console: Console | None = None,
 ) -> dict[str, bool]:
     """Check which missions have a ``kernels/mk/`` directory.
 
     Sends parallel HEAD requests to ``{server_url}{mission}/kernels/mk/``
-    and returns a mapping of mission name → availability.
+    and returns a mapping of mission name → availability. The progress bar
+    draws on *console*; without one there is no bar (#49).
     """
     if not server_url.endswith("/"):
         server_url += "/"
@@ -266,12 +274,12 @@ def check_mk_availability(
         return name, _head_ok(url)
 
     result: dict[str, bool] = {}
-    with Progress(
+    with _progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("{task.completed}/{task.total}"),
-        transient=True,
+        console=console, transient=True,
     ) as progress:
         task_id = progress.add_task("Checking metakernel directories", total=len(missions))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -454,9 +462,11 @@ def _head_size(url: str) -> tuple[str, int | None]:
 
 
 def query_remote_sizes(
-    urls: list[str], *, max_workers: int = 8
+    urls: list[str], *, max_workers: int = 8, console: Console | None = None,
 ) -> dict[str, int | None]:
     """Query Content-Length for multiple URLs in parallel.
+
+    The progress bar draws on *console*; without one there is no bar (#49).
 
     Connections are kept alive per worker thread, so *max_workers* is also the
     number of TLS handshakes performed. Raising it is not automatically
@@ -464,10 +474,10 @@ def query_remote_sizes(
     are opened at once (median 1.3 s serial vs 3.3 s at 8-way concurrency).
     """
     out: dict[str, int | None] = {}
-    with Progress(
+    with _progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
         BarColumn(), TextColumn("{task.completed}/{task.total} files"),
-        transient=True,
+        console=console, transient=True,
     ) as progress:
         task_id = progress.add_task("Querying sizes", total=len(urls))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -571,8 +581,11 @@ def download_kernels_parallel(
     max_workers: int = 8,
     total_bytes: int | None = None,
     expected_hashes: dict[str, str] | None = None,
+    console: Console | None = None,
 ) -> tuple[list[tuple[Path, str]], list[str]]:
     """Download multiple kernels in parallel with a byte-level progress bar.
+
+    The bar draws on *console*; without one there is no bar (#49).
 
     Args:
         tasks: List of (url, dest_path, filename) tuples.
@@ -607,7 +620,7 @@ def download_kernels_parallel(
 
     downloaded: list[tuple[Path, str]] = []
     warnings: list[str] = []
-    with Progress(*columns) as progress:
+    with _progress(*columns, console=console) as progress:
         if total_bytes and total_bytes > 0:
             pid = progress.add_task("Downloading", total=total_bytes)
         else:

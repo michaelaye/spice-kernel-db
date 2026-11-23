@@ -4,7 +4,6 @@ Split out of the former tests/test_kernel_db.py.
 """
 
 from __future__ import annotations
-import hashlib
 import logging
 import shutil
 import textwrap
@@ -12,8 +11,10 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+from rich.console import Console
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.config import Config, load_config, save_config
+from tests.helpers import REMOTE_MK_TEXT, fake_download
 from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
@@ -208,25 +209,7 @@ class TestParseMetakernelText:
 
 
 class TestGetMetakernel:
-    REMOTE_MK_TEXT = textwrap.dedent("""\
-        KPL/MK
-
-        Test remote metakernel
-
-        \\begindata
-
-          PATH_VALUES  = ( '..' )
-          PATH_SYMBOLS = ( 'KERNELS' )
-
-          KERNELS_TO_LOAD = (
-
-            '$KERNELS/lsk/naif0012.tls'
-            '$KERNELS/spk/new_kernel.bsp'
-
-          )
-
-        \\begintext
-    """)
+    REMOTE_MK_TEXT = REMOTE_MK_TEXT
 
     @pytest.fixture(autouse=True)
     def _sizes_unknown(self, remote_sizes):
@@ -261,21 +244,7 @@ class TestGetMetakernel:
         mock_resp.__exit__ = MagicMock(return_value=False)
         return mock_resp
 
-    @staticmethod
-    def _mock_download_kernels_parallel(
-        tasks, max_workers=8, total_bytes=None, expected_hashes=None,
-    ):
-        """Stand-in for the real downloader. Writes fake content to each
-        dest path and returns ``(dest, sha256)`` pairs that match the
-        on-disk bytes, so ``register_file``'s expected-hash check passes."""
-        results: list[tuple[Path, str]] = []
-        for url, dest, fname in tasks:
-            dest_path = Path(dest)
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            content = f"FAKE KERNEL {fname}".encode()
-            dest_path.write_bytes(content)
-            results.append((dest_path, hashlib.sha256(content).hexdigest()))
-        return results, []
+    _mock_download_kernels_parallel = staticmethod(fake_download)
 
     def test_get_shows_table(self, populated_db, tmp_path, capsys):
         """get_metakernel prints a table even when we skip download."""
@@ -818,7 +787,7 @@ class TestResolveMetakernel:
         db.close()
 
         mk_path = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             main([
                 "--db", str(tmp_spice_tree / "test.duckdb"),
                 "which", "--metakernel", str(mk_path),
@@ -839,7 +808,7 @@ class TestRewriteDefaultOutput:
         mk_path = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
         expected_output = mk_path.with_stem("juice_test_local")
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             main([
                 "--db", str(tmp_spice_tree / "test.duckdb"),
                 "rewrite", str(mk_path), "--mission", "JUICE",
@@ -1255,7 +1224,7 @@ class TestPruneMetakernelsNullSourceUrl:
     ):
         """Rows with neither source_url nor a mission mk_dir_url cannot
         be probed and should be noted but not classified as dead."""
-        db = KernelDB(tmp_path / "test.duckdb")
+        db = KernelDB(tmp_path / "test.duckdb", console=Console())
         # Mission exists but has no mk_dir_url
         db.con.execute(
             "INSERT INTO missions (name, server_url, mk_dir_url, dedup) "

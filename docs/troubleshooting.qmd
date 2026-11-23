@@ -124,7 +124,7 @@ Or install SpiceyPy separately: `pip install spiceypy`
 
 ## Corrupt config file
 
-If `config.toml` is malformed, the tool prints an error and falls back to interactive setup. To fix manually:
+If `config.toml` does not parse, every command prints `Config file is corrupt: <path>` with the parser's message and exits 78 (the conventional configuration-error code, so a script never mistakes it for one of `check`'s verdict bits); nothing falls back to setup, so the file is never overwritten behind you (from Python the same case raises `ConfigError`). To fix it:
 
 ```bash
 # Show the config file location

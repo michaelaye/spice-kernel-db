@@ -14,7 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from spice_kernel_db import config
-from spice_kernel_db.config import Config, ensure_config, save_config
+from spice_kernel_db.cli.configure import ensure_config_or_setup
+from spice_kernel_db.config import Config, save_config
 
 
 def _home(tmp_path_factory) -> Path:
@@ -32,11 +33,11 @@ def test_unpatched_save_config_writes_under_a_temporary_home(tmp_path_factory):
     assert "/y/kernels" in written.read_text()
 
 
-def test_unpatched_first_run_setup_writes_under_a_temporary_home(tmp_path_factory):
+def test_unpatched_first_run_setup_writes_under_a_temporary_home(tmp_path_factory, tty):
     home = _home(tmp_path_factory)
     assert not config.CONFIG_FILE.exists()
     with patch("builtins.input", return_value=""):
-        cfg = ensure_config()
+        cfg = ensure_config_or_setup()
     assert cfg == Config()
     assert config.CONFIG_FILE.is_file()
     # The defaults expand under the temporary HOME, not the real one.

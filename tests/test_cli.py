@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import spice_kernel_db
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.config import Config, load_config, save_config
 from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
@@ -61,8 +61,10 @@ class TestReset:
 
 class TestShowConfig:
     def test_show_config_prints_paths(self, capsys):
+        from spice_kernel_db.cli.configure import _show_config
+
         cfg = Config(db_path="/tmp/test.duckdb", kernel_dirs=["/tmp/kernels"])
-        show_config(cfg)
+        _show_config(cfg)
         captured = capsys.readouterr()
         assert "/tmp/test.duckdb" in captured.out
         assert "/tmp/kernels" in captured.out
@@ -117,8 +119,8 @@ class TestCLIVersion:
         """
         from spice_kernel_db.cli import main
 
-        with patch("spice_kernel_db.cli.ensure_config",
-                   side_effect=AssertionError("ensure_config called")):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup",
+                   side_effect=AssertionError("config loader called")):
             with pytest.raises(SystemExit) as exc_info:
                 main(["get", "--help"])
         assert exc_info.value.code == 0
@@ -188,7 +190,7 @@ class TestConfigSetGet:
     def test_config_get(self, tmp_path, capsys):
         from spice_kernel_db.cli import main
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config(
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config(
             db_path=str(tmp_path / "test.duckdb"),
             kernel_dirs=[str(tmp_path / "kernels")],
         )):
@@ -204,14 +206,14 @@ class TestConfigSetGet:
             db_path=str(tmp_path / "test.duckdb"),
             kernel_dirs=[str(tmp_path / "kernels")],
         )
-        with patch("spice_kernel_db.cli.ensure_config", return_value=config), \
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=config), \
              patch("spice_kernel_db.config.save_config") as mock_save:
             main(["config", "set", "db_path", "/new/path.duckdb"])
 
         mock_save.assert_called_once()
         assert config.db_path == "/new/path.duckdb"
         # the roots are a list and have their own verbs; no single-root key (2026-11-21)
-        with patch("spice_kernel_db.cli.ensure_config", return_value=config), \
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=config), \
              pytest.raises(SystemExit) as exc:
             main(["config", "set", "kernel_dir", "/new/path"])
         assert exc.value.code == 1 and "add-root" in capsys.readouterr().err
@@ -219,7 +221,7 @@ class TestConfigSetGet:
     def test_config_get_unknown_key(self, tmp_path):
         from spice_kernel_db.cli import main
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             with pytest.raises(SystemExit):
                 main(["config", "get", "nonexistent_key"])
 
@@ -227,17 +229,16 @@ class TestConfigSetGet:
 class TestCorruptConfig:
     """Test handling of corrupt config files."""
 
-    def test_corrupt_toml_returns_none(self, tmp_path):
-        from spice_kernel_db.config import CONFIG_FILE, load_config
+    def test_corrupt_toml_raises(self, tmp_path):
+        """#49: never None, which the next step would read as "not configured" and overwrite."""
+        from spice_kernel_db.config import ConfigError, load_config
 
-        # Write corrupt TOML
         corrupt_file = tmp_path / "config.toml"
         corrupt_file.write_text("this is not [valid toml = {{{")
 
-        with patch("spice_kernel_db.config.CONFIG_FILE", corrupt_file):
-            result = load_config()
-
-        assert result is None
+        with patch("spice_kernel_db.config.CONFIG_FILE", corrupt_file), \
+             pytest.raises(ConfigError, match="corrupt"):
+            load_config()
 
 
 class TestGlobalVerbose:
@@ -279,7 +280,7 @@ class TestVerifyCLI:
         db.rewrite_metakernel(src, out, mission="JUICE", link_root=link_root)
         db.close()
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             # Should run without raising SystemExit (exit 0)
             main([
                 "--db", str(tmp_path / "test.duckdb"),
@@ -311,7 +312,7 @@ class TestVerifyCLI:
         (link_root / "lsk" / "naif0012.tls").resolve().unlink()
         db.close()
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             with pytest.raises(SystemExit) as exc:
                 main([
                     "--db", str(tmp_path / "test.duckdb"),
@@ -343,7 +344,7 @@ class TestPruneMetakernelsCLI:
                 req.full_url, 404, "Not Found", {}, None,
             )
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()), \
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()), \
              patch("urllib.request.urlopen", side_effect=boom):
             main([
                 "--db", str(tmp_path / "test.duckdb"),
@@ -1142,7 +1143,7 @@ class TestOneResolver:
         def run(*argv: str) -> int:
             # check consults the remote mk/ listing when a source URL is
             # known; this test is about resolution, not staleness.
-            with patch("spice_kernel_db.cli.ensure_config", return_value=Config()), \
+            with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()), \
                  patch.object(KernelDB, "newer_remote_version", lambda *a, **k: None):
                 try:
                     main(["--db", str(db_path), *argv])
@@ -1288,7 +1289,7 @@ class TestVerbTree:
         db.close()
 
         def run(*argv: str) -> int:
-            with patch("spice_kernel_db.cli.ensure_config",
+            with patch("spice_kernel_db.cli.ensure_config_or_setup",
                        return_value=Config(db_path=str(db_path), kernel_dirs=[str(tmp_path / "kernels")])), \
                  patch.object(KernelDB, "newer_remote_version", lambda *a, **k: None):
                 try:
@@ -1573,7 +1574,7 @@ class TestCheckVerdicts:
             """Exit code of ``skd --db ... argv``; the server answers only
             when *server_sizes* is given, otherwise any contact is an error."""
             with ExitStack() as stack:
-                stack.enter_context(patch("spice_kernel_db.cli.ensure_config", return_value=Config()))
+                stack.enter_context(patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()))
                 stack.enter_context(patch("spice_kernel_db.remote.fetch_metakernel", return_value=remote_mk))
                 if server_sizes is not None:
                     stack.enter_context(remote_sizes({url(n): s for n, s in server_sizes.items()}))

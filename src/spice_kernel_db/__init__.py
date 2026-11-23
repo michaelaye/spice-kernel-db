@@ -1,11 +1,25 @@
-"""Content-addressed SPICE kernel database for deduplication and metakernel rewriting."""
+"""Content-addressed SPICE kernel database for deduplication and metakernel rewriting.
 
+The names below are the public API, listed in ``docs/api.qmd`` § Public API
+and held stable within a major version (#49). Everything else is internal.
+"""
+
+from spice_kernel_db.api import (
+    check,
+    get,
+    metakernels_covering,
+    register_metakernel,
+    resolve_metakernel,
+    scan,
+)
 from spice_kernel_db.config import (
     Config,
-    add_kernel_root,
+    ConfigError,
+    LegacyDatabaseFound,
+    add_root,
     ensure_config,
     kernel_roots,
-    remove_kernel_root,
+    remove_root,
 )
 from spice_kernel_db.db import (
     AmbiguousKernelRoot,
@@ -17,30 +31,30 @@ from spice_kernel_db.db import (
     RegistryRow,
 )
 from spice_kernel_db.parser import parse_metakernel, parse_metakernel_text
-from spice_kernel_db.remote import (
-    fetch_metakernel,
-    list_remote_metakernels,
-    resolve_kernel_urls,
-)
 
 __all__ = [
     "AmbiguousKernelRoot",
     "AmbiguousMetakernel",
     "ConcurrentModificationError",
     "Config",
+    "ConfigError",
     "KernelDB",
+    "LegacyDatabaseFound",
     "MetakernelNotTracked",
     "MetakernelUnreachableError",
     "RegistryRow",
-    "add_kernel_root",
+    "add_root",
+    "check",
     "ensure_config",
+    "get",
     "kernel_roots",
-    "fetch_metakernel",
-    "list_remote_metakernels",
+    "metakernels_covering",
     "parse_metakernel",
     "parse_metakernel_text",
-    "remove_kernel_root",
-    "resolve_kernel_urls",
+    "register_metakernel",
+    "remove_root",
+    "resolve_metakernel",
+    "scan",
 ]
 
 

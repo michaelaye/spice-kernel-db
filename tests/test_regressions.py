@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.config import Config, load_config, save_config
 from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
@@ -1037,7 +1037,7 @@ class TestC5ConcurrencyHandling:
         # Simulate a concurrent writer that mutates the kernel record
         # in between query_remote_sizes and the post-reacquire check.
         original_query = None
-        def evil_query(urls):
+        def evil_query(urls, **kwargs):
             # While the lock is released, "another process" mutates
             kernel.write_text("v2 different content")
             db.reacquire()
@@ -1522,7 +1522,7 @@ class TestH5TaskInfoKeyedByPath:
             return_value=(tm_text, "https://e.example/m/mk/m.tm"),
         ), patch(
             "spice_kernel_db.db.query_remote_sizes",
-            side_effect=lambda urls: {u: 10 for u in urls},
+            side_effect=lambda urls, **kw: {u: 10 for u in urls},
         ), patch(
             "spice_kernel_db.remote.download_kernel",
             side_effect=fake_dl,
@@ -1772,7 +1772,7 @@ class TestPoisonedRowsAreReported:
         )
         db.close()
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             with pytest.raises(SystemExit) as exc:
                 main(["--db", str(tmp_path / "t.duckdb"), "doctor"])
         assert exc.value.code == 1
@@ -1806,7 +1806,7 @@ class TestPoisonedRowsAreReported:
         )
         db.close()
 
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             main(["--db", str(tmp_path / "t.duckdb"), "check", str(mk)])
             assert "Poisoned" not in capsys.readouterr().out
             main(["--db", str(tmp_path / "t.duckdb"), "doctor"])

@@ -10,12 +10,16 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 
+from spice_kernel_db import config as config_mod
 from spice_kernel_db import registry
 from spice_kernel_db.config import (
-    add_kernel_root,
-    remove_kernel_root,
-    setup_interactive,
-    show_config,
+    CONFIG_FILE,
+    DEFAULT_DB_PATH,
+    DEFAULT_KERNEL_DIR,
+    Config,
+    add_root,
+    remove_root,
+    write_first_config,
 )
 from spice_kernel_db.db import KernelDB
 from spice_kernel_db.remote import (
@@ -95,6 +99,44 @@ def mission_remove(
             print(f"Mission '{name}' not found.", file=sys.stderr)
 
 
+def _setup_interactive() -> Config:
+    """First-run setup: ask for the two paths, create them, write the file.
+
+    Behind the terminal gate like every other prompt (#14): a script or CI
+    step with no config gets exit 2 and the two ways to write one.
+    """
+    _require_interactive(
+        "First-run setup",
+        hint="Run spice-kernel-db config --setup at a terminal, or call "
+             "spice_kernel_db.ensure_config(seed_root=<dir>) from Python.",
+    )
+    print("spice-kernel-db: First-time setup\n")
+    db_path = _ask(f"  Database location [{DEFAULT_DB_PATH}]: ").strip() or DEFAULT_DB_PATH
+    kernel_dir = (
+        _ask(f"  Kernel storage directory [{DEFAULT_KERNEL_DIR}]: ").strip()
+        or DEFAULT_KERNEL_DIR
+    )
+    cfg = write_first_config(db_path, kernel_dir)
+    print(f"\n  Config saved to {CONFIG_FILE}")
+    return cfg
+
+
+def ensure_config_or_setup() -> Config:
+    """The CLI's config loader: the file, or first-run setup when there is none."""
+    # Through the module: tests and embedding code patch ``config.load_config``.
+    return config_mod.load_config() or _setup_interactive()
+
+
+def _show_config(cfg: Config) -> None:
+    print("\nspice-kernel-db configuration\n")
+    print(f"  Config file:   {CONFIG_FILE}")
+    print(f"  Database:      {cfg.db_path}")
+    for i, root in enumerate(cfg.kernel_dirs):
+        label = "Kernel roots:  " if i == 0 else "               "
+        print(f"  {label}{root}")
+    print()
+
+
 @app.command(rich_help_panel=CONFIGURE, help="Show or update configuration")
 def config(
     ctx: typer.Context,
@@ -104,12 +146,12 @@ def config(
         help="'set <key> <value>', 'get <key>' (key: db_path), "
              "'add-root <dir>' or 'remove-root <dir>' (the kernel roots)")] = None,
 ) -> None:
-    cfg = state(ctx).config
     if setup:
-        setup_interactive()
+        _setup_interactive()
         return
+    cfg = state(ctx).config
     if not config_args:
-        show_config(cfg)
+        _show_config(cfg)
         return
     verb, *rest = config_args
     if verb == "get" and len(rest) == 1:
@@ -124,11 +166,11 @@ def config(
         save_config(cfg)
         print(f"{key} = {value}")
     elif verb == "add-root" and len(rest) == 1:
-        show_config(add_kernel_root(rest[0], cfg))
+        _show_config(add_root(rest[0], cfg))
         print(f"  spice-kernel-db scan {rest[0]} indexes it.")
     elif verb == "remove-root" and len(rest) == 1:
         try:
-            show_config(remove_kernel_root(rest[0], cfg))
+            _show_config(remove_root(rest[0], cfg))
         except ValueError as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
@@ -239,7 +281,7 @@ def _choose_mission(server_url: str, server_label: str) -> tuple[str, str] | Non
         print("No missions found.", file=sys.stderr)
         return None
 
-    mk_status = check_mk_availability(server_url, all_missions)
+    mk_status = check_mk_availability(server_url, all_missions, console=console)
     supported = [m for m in all_missions if mk_status.get(m)]
     unsupported = [m for m in all_missions if not mk_status.get(m)]
 

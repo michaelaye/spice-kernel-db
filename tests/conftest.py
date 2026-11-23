@@ -138,8 +138,9 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+from rich.console import Console
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.config import Config, load_config, save_config
 from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
@@ -259,8 +260,8 @@ def tmp_spice_tree(tmp_path):
 
 @pytest.fixture
 def db(tmp_path):
-    """Create a fresh KernelDB."""
-    return KernelDB(tmp_path / "test.duckdb")
+    """A fresh KernelDB that prints like the CLI's (tests read its output)."""
+    return KernelDB(tmp_path / "test.duckdb", console=Console())
 
 
 @pytest.fixture

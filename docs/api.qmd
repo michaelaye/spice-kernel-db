@@ -3,6 +3,41 @@ title: "API Reference"
 subtitle: "Python API"
 ---
 
+## Public API
+
+These are the names `spice_kernel_db` exports, and the list `spice_kernel_db.__all__` carries. They are the stability promise: within a major version they keep their names and the meaning of their arguments, so a dependent such as planetarypy can pin `spice-kernel-db>=0.23,<1`. Everything else in the package (`spice_kernel_db.db`, `.remote`, `.config`, `.cli`) is internal and may change in any release.
+
+```python
+from spice_kernel_db import (
+    # the database
+    KernelDB, RegistryRow,
+    # one call against the configured database
+    check, get, metakernels_covering, register_metakernel, resolve_metakernel, scan,
+    # configuration
+    Config, ConfigError, ensure_config, kernel_roots, add_root, remove_root,
+    # metakernel files
+    parse_metakernel, parse_metakernel_text,
+    # exceptions
+    AmbiguousKernelRoot, AmbiguousMetakernel, ConcurrentModificationError,
+    LegacyDatabaseFound, MetakernelNotTracked, MetakernelUnreachableError,
+)
+```
+
+The library is quiet: no function or method prints unless you hand it a `rich.console.Console` (`KernelDB(console=...)`, `get(console=...)`), and warnings go through the `spice_kernel_db` logger, so a script sees them only if it configures logging. The CLI is this API plus a console and one log handler.
+
+### One call against the configured database
+
+```python
+resolve_metakernel(ref, mission=None) -> Path
+metakernels_covering(body_id, et=None, mission=None) -> list[dict]
+check(ref, *, mission=None, hash_=False, remote=False, spice=False) -> dict
+get(ref, *, mission=None, yes=False, download_dir=None, force=False, console=None) -> dict
+scan(directory=None, *, mission=None) -> int
+register_metakernel(path, *, mission=None, official=True) -> dict
+```
+
+Each opens the database named in the config, does one thing and closes it; for several operations in a row keep a `KernelDB`. `get` takes a URL or any reference to a tracked metakernel (then it re-fetches from the stored source); without `yes=True` and without a console to ask on it downloads nothing and returns `aborted: True`. `scan` with no directory indexes every configured root and returns the number of files registered. `register_metakernel(official=False)` marks a metakernel assembled locally, such as the output of NAIF's subsetter. The methods behind them are `resolve_metakernel`, `metakernels_covering`, `check_report`, `get_metakernel` / `update_metakernel`, `scan_directory` / `scan_roots` and `import_metakernel` below.
+
 ## `KernelDB`
 
 ```python
@@ -18,8 +53,11 @@ KernelDB(
     db_path: str | Path | None = None,
     read_only: bool = False,
     kernel_roots: list[str | Path] | None = None,
+    console: rich.console.Console | None = None,
 )
 ```
+
+`console` is the one place the instance writes to: status tables, notes, progress bars and the download question of `get_metakernel`. Without one (the default) nothing is printed, progress bars are off and every question is answered no, so a script passes `yes=True` where it wants a download. The CLI passes its own console. Warnings go through the `spice_kernel_db` logger either way.
 
 Opens (or creates) the database at the given path. When `db_path` is `None` (the default), the path is loaded from `~/.config/spice-kernel-db/config.toml`; without a config file it is `~/.local/share/spice-kernel-db/kernels.duckdb`. The schema is initialized automatically (unless `read_only=True`).
 
@@ -145,8 +183,12 @@ Raises `MetakernelNotTracked` when nothing matches or the matched file is gone, 
 db.registry_rows(mission: str | None = None) -> list[RegistryRow]
 ```
 
-Every tracked metakernel as a `RegistryRow` (`mk_path`, `source_url`, `filename`, `mission`, `acquired_at`, `official`), ordered by mission and filename; *mission* is a case-insensitive prefix filter. The one registry query behind the resolver and the CLI pickers. `official` is `False` for a metakernel imported with `official=False` and `True` otherwise. The column is added when a database from before this release is first opened for writing. Opened read-only (`ls`, `show`, `doctor`, `check`) before that, every row reads as official.
+Every tracked metakernel as a `RegistryRow`, ordered by mission and filename; *mission* is a case-insensitive prefix filter. The one registry query behind the resolver and the CLI pickers. `official` is `False` for a metakernel imported with `official=False` and `True` otherwise. The column is added when a database from before this release is first opened for writing. Opened read-only (`ls`, `show`, `doctor`, `check`) before that, every row reads as official.
 
+
+#### `RegistryRow`
+
+A `NamedTuple` with one tracked metakernel's registry row: `mk_path` (the file on disk), `source_url` (where `get` fetched it, `None` for a scanned or imported file), `filename`, `mission`, `acquired_at` and `official`. Returned by `registry_rows` and `registry_row`; part of the public API because the module-level functions and planetarypy read it.
 
 #### `find_by_filename`
 
@@ -280,14 +322,14 @@ Fetch a remote metakernel, display a status table, and download missing kernels.
 2. Resolves kernel entries to full URLs (using `PATH_VALUES` relative to the metakernel URL)
 3. Checks each kernel against the local database
 4. Queries remote file sizes via parallel HTTP HEAD requests
-5. Displays a summary table with kernel names, sizes, and status (`in db` / `missing`)
-6. Prompts for confirmation (unless `yes=True`)
+5. Shows a summary table with kernel names, sizes, and status (`in db` / `missing`) on the instance's console
+6. Asks for confirmation on that console (unless `yes=True`); with no console there is nobody to ask, so the call stops after the status step like `dry_run`, writes nothing, and the result carries `aborted: True`
 7. Downloads missing kernels, preserving subdirectory structure, and registers them
 8. Creates symlinks for kernels already in the database so the metakernel works immediately
 
 `download_dir` defaults to `root_for(mission)`: the configured root that already holds kernels of the mission, or the only configured root. With several roots and no such fact it raises `AmbiguousKernelRoot` rather than guess; pass `download_dir` then. Downloaded files are placed under `<download_dir>/<mission>/<relpath>`.
 
-`verbose=True` additionally lists each kernel's resolved URL beneath the status table. The table itself is always shown — it precedes the download prompt, so it is what you decide on.
+`verbose=True` additionally lists each kernel's resolved URL beneath the status table. The table is shown whenever there is a console: it precedes the download question, so it is what you decide on.
 
 `dry_run=True` stops after the status table. Nothing is written to disk or to the database and no kernel is downloaded. This is what `skd update` runs without `--execute`.
 
@@ -416,7 +458,7 @@ List all tracked metakernels, optionally filtered by mission. Each entry include
 
 Alias rows (symlink metakernels created by `get`) inherit their target's entry count and content fingerprint, so the listing reads consistently — both rows show the same kernel count and one of them is annotated `↳ identical to <target>`.
 
-Prints a summary table (unless `show=False`) and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, `official`, plus `identical_to` (set when another row has the same content fingerprint).
+Shows a summary table on the instance's console (`show=False` suppresses it even with a console; planetarypy's released code passes it) and returns a list of dicts with keys: `filename`, `mission`, `source_url`, `acquired_at`, `mk_path`, `n_kernels`, `official`, plus `identical_to` (set when another row has the same content fingerprint).
 
 #### `metakernels_covering`
 
@@ -602,9 +644,11 @@ Properties and methods:
 
 ```python
 from spice_kernel_db import (
-    Config, ensure_config, kernel_roots, add_kernel_root, remove_kernel_root,
+    Config, ConfigError, ensure_config, kernel_roots, add_root, remove_root,
 )
 ```
+
+Nothing in this module prints or prompts. The first-run questions and the `skd config` display belong to the CLI.
 
 ### `ensure_config`
 
@@ -612,9 +656,9 @@ from spice_kernel_db import (
 ensure_config(seed_root: str | Path | None = None) -> Config
 ```
 
-Load configuration from `~/.config/spice-kernel-db/config.toml`. If no config file exists, runs an interactive first-time setup prompting for the database path and kernel storage directory.
+Load the configuration from `~/.config/spice-kernel-db/config.toml`. With `seed_root` and no config file yet, it writes a configuration with the default database path and `seed_root` as the first kernel root, and creates both directories. An existing configuration is never changed by `seed_root`. A library such as planetarypy calls it this way on first run to point skd at its own store.
 
-With `seed_root` and no config file yet, it prompts for nothing: it writes a configuration with the default database path and `seed_root` as the first kernel root, and creates both directories. An existing configuration is never changed by `seed_root`. A library such as planetarypy calls it this way on first run to point skd at its own store.
+With no file and no `seed_root` it raises `ConfigError` naming `spice-kernel-db config --setup`, the command that asks for the paths. A file that does not parse also raises `ConfigError`, never reads as "not configured".
 
 ### `Config`
 
@@ -635,20 +679,20 @@ The `[storage]` section of the file holds `kernel_dirs`, and `save_config` write
 
 ```python
 kernel_roots(config: Config | None = None) -> list[Path]
-add_kernel_root(directory: str | Path, config: Config | None = None) -> Config
-remove_kernel_root(directory: str | Path, config: Config | None = None) -> Config
+add_root(directory: str | Path, config: Config | None = None) -> Config
+remove_root(directory: str | Path, config: Config | None = None) -> Config
 ```
 
-`kernel_roots` returns the configured roots as expanded, resolved paths. Without a config file it returns the one default root. Pass `config` to avoid reading the file a second time. `add_kernel_root` and `remove_kernel_root` take the same `config` argument and edit that object instead of loading the file.
+`kernel_roots` returns the configured roots as expanded, resolved paths. Without a config file it returns the one default root. Pass `config` to avoid reading the file a second time. `add_root` and `remove_root` take the same `config` argument and edit that object instead of loading the file.
 
-`add_kernel_root` appends `directory` to the roots and saves. It creates the directory when missing and does not add a root twice; the order of the others is kept. It runs no prompt, and without a config file it writes one with the default database path. It returns the updated `Config`.
+`add_root` appends `directory` to the roots and saves. It creates the directory when missing and does not add a root twice; the order of the others is kept. It runs no prompt, and without a config file it writes one with the default database path. It returns the updated `Config`.
 
-`remove_kernel_root` removes `directory` from the roots and saves. It raises `ValueError` when the directory is not a root or is the last one. Files on disk and database rows are untouched; `clean` drops rows whose file is gone. It returns the updated `Config`.
+`remove_root` removes `directory` from the roots and saves. It raises `ValueError` when the directory is not a root or is the last one. Files on disk and database rows are untouched; `clean` drops rows whose file is gone. It returns the updated `Config`.
 
 ```python
-from spice_kernel_db import add_kernel_root, kernel_roots
+from spice_kernel_db import add_root, kernel_roots
 
-add_kernel_root("~/planetarypy_data/spice_kernels")
+add_root("~/planetarypy_data/spice_kernels")
 kernel_roots()
 # [PosixPath('/Users/me/.local/share/spice-kernel-db/kernels'),
 #  PosixPath('/Users/me/planetarypy_data/spice_kernels')]
@@ -680,8 +724,10 @@ Best-effort mission name for a kernel file, canonicalized like every stored miss
 
 ## Remote utilities
 
+Internal since 0.23 (#49): importable from `spice_kernel_db.remote`, not part of the public API above.
+
 ```python
-from spice_kernel_db import fetch_metakernel, resolve_kernel_urls
+from spice_kernel_db.remote import fetch_metakernel, resolve_kernel_urls
 ```
 
 ### `fetch_metakernel`
@@ -720,7 +766,7 @@ Dict mapping server labels to URLs: `{"NASA": "https://naif.jpl.nasa.gov/pub/nai
 ### `list_remote_metakernels`
 
 ```python
-from spice_kernel_db import list_remote_metakernels
+from spice_kernel_db.remote import list_remote_metakernels
 ```
 
 ```python
@@ -801,12 +847,27 @@ Return registry-defined candidate metakernel URLs for *mission* with placeholder
 
 ```python
 from spice_kernel_db import (
+    AmbiguousKernelRoot,
     AmbiguousMetakernel,
     ConcurrentModificationError,
+    ConfigError,
+    LegacyDatabaseFound,
     MetakernelNotTracked,
     MetakernelUnreachableError,
 )
 ```
+
+### `ConfigError`
+
+Raised by `load_config` and `ensure_config` when the config file does not parse, or when there is no file and no `seed_root` to write one from. Subclass of `RuntimeError` (not `ValueError`, which `remove_root` uses for a bad argument). The CLI prints the message and exits 78, the conventional code for a configuration error, outside the 0 to 7 that `check` uses as verdict bits; `spice-kernel-db config --setup` writes a fresh file.
+
+### `LegacyDatabaseFound`
+
+Raised by `KernelDB()` when no config file exists and a database sits at the pre-0.19 default `~/.spice_kernels.duckdb`; the message names the move command. Subclass of `RuntimeError`.
+
+### `AmbiguousKernelRoot`
+
+Raised by `KernelDB.root_for()` (and so by `get_metakernel`, `update_metakernel` and `scan_directory(archive=True)`) when several kernel roots are configured and nothing says which one a mission's download belongs in: no root holds the metakernel or kernels of that mission. Subclass of `LookupError`. Attributes: `mission`, `roots` (the candidates), `stored` (whether the mission is in more than one root). The CLI shows a picker at a terminal and exits 2 otherwise; `--download-dir` is the explicit answer.
 
 ### `AmbiguousMetakernel`
 

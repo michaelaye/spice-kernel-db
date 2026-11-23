@@ -48,7 +48,7 @@ A root is only searched once it has been scanned. After `skd config add-root <di
 
 The mission of a file found under a root is the first directory below the root. A file directly in a root, or in a type directory such as `mk` or `spk`, gets its mission from the filename alone. Outside every root the mission is guessed from the path as before. A tracked metakernel keeps the mission in its registry row: `check`, `rewrite` and `coverage` read it from there and never guess it from the path again.
 
-Edit the list with `skd config add-root <dir>` and `skd config remove-root <dir>` (see [`config`](#config)). From Python, use `kernel_roots()`, `add_kernel_root()` and `remove_kernel_root()` ([API](api.qmd#kernel-roots)).
+Edit the list with `skd config add-root <dir>` and `skd config remove-root <dir>` (see [`config`](#config)). From Python, use `kernel_roots()`, `add_root()` and `remove_root()` ([API](api.qmd#kernel-roots)).
 
 ## Verbs at a glance
 
@@ -421,7 +421,7 @@ Check a metakernel. Three questions, each answered on its own line with its own 
 | resolves | does every entry resolve through `PATH_VALUES`/`PATH_SYMBOLS` to the file the database knows (size, with `--hash` also SHA-256), with no traversal, dangling link or ambiguous name? | 2 | always |
 | matches remote | does every kernel's size (with `--hash` also its SHA-256) match the server? | 4 | `--remote` |
 
-The exit code is the sum, so a script can read it: `0` all green, `1` a kernel missing, `2` the metakernel does not resolve, `4` a kernel differs from the server, `5` missing plus differs, and so on. The output never collapses into one tick; a verdict that did not run says `not checked`. (Exit 2 is also the code for an ambiguous name or a usage error; those print their reason before any verdict runs.)
+The exit code is the sum, so a script can read it: `0` all green, `1` a kernel missing, `2` the metakernel does not resolve, `4` a kernel differs from the server, `5` missing plus differs, and so on. The output never collapses into one tick; a verdict that did not run says `not checked`. (Exit 2 is also the code for an ambiguous name or a usage error; those print their reason before any verdict runs. A config file that does not parse exits 78 from every command, so it is never read as a verdict.)
 
 ```bash
 skd check [metakernel] [--remote] [--hash] [--spice] [--json] [--mission NAME]

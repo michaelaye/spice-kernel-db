@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.config import Config, load_config, save_config
 from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
@@ -77,6 +77,43 @@ class _ConWrapper:
 
 
 FIXTURE_REGISTRY = Path(__file__).parent / "fixtures" / "mission_registry_min.toml"
+
+# A remote metakernel as get_metakernel fetches it: one kernel the fixture
+# tree already holds and one it does not.
+REMOTE_MK_TEXT = textwrap.dedent("""\
+    KPL/MK
+
+    Test remote metakernel
+
+    \\begindata
+
+      PATH_VALUES  = ( '..' )
+      PATH_SYMBOLS = ( 'KERNELS' )
+
+      KERNELS_TO_LOAD = (
+
+        '$KERNELS/lsk/naif0012.tls'
+        '$KERNELS/spk/new_kernel.bsp'
+
+      )
+
+    \\begintext
+""")
+
+
+def fake_download(tasks, max_workers=8, total_bytes=None, expected_hashes=None, console=None):
+    """Stand-in for ``download_kernels_parallel``: writes fake bytes to each
+    destination and returns ``(dest, sha256)`` pairs that match them, so
+    ``register_file``'s expected-hash check passes. Same signature as the
+    real one, ``console`` included (#49)."""
+    results: list[tuple[Path, str]] = []
+    for _url, dest, fname in tasks:
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        content = f"FAKE KERNEL {fname}".encode()
+        dest_path.write_bytes(content)
+        results.append((dest_path, hashlib.sha256(content).hexdigest()))
+    return results, []
 
 
 class _FakeResp:

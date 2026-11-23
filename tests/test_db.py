@@ -12,8 +12,9 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+from rich.console import Console
 from spice_kernel_db import KernelDB, parse_metakernel
-from spice_kernel_db.config import Config, load_config, save_config, show_config
+from spice_kernel_db.config import Config, load_config, save_config
 from spice_kernel_db.hashing import (
     canonicalize_mission,
     classify_kernel,
@@ -387,20 +388,20 @@ class TestKernelRoots:
 
     # C27
     def test_add_and_remove_root(self, tmp_path, capsys):
-        from spice_kernel_db import add_kernel_root, kernel_roots, remove_kernel_root
+        from spice_kernel_db import add_root, kernel_roots, remove_root
         from spice_kernel_db.cli import main
 
         save_config(Config(db_path=str(tmp_path / "t.duckdb"), kernel_dirs=[str(tmp_path / "one")]))
         two = tmp_path / "two"
-        cfg = add_kernel_root(two)
+        cfg = add_root(two)
         assert cfg.kernel_dirs == [str(tmp_path / "one"), str(two)] and two.is_dir()
-        assert add_kernel_root(two).kernel_dirs == cfg.kernel_dirs  # idempotent
+        assert add_root(two).kernel_dirs == cfg.kernel_dirs  # idempotent
         assert kernel_roots() == [tmp_path / "one", two]
         with pytest.raises(ValueError, match="not a configured"):
-            remove_kernel_root(tmp_path / "three")
-        assert remove_kernel_root(two).kernel_dirs == [str(tmp_path / "one")]
+            remove_root(tmp_path / "three")
+        assert remove_root(two).kernel_dirs == [str(tmp_path / "one")]
         with pytest.raises(ValueError, match="only kernel root"):
-            remove_kernel_root(tmp_path / "one")
+            remove_root(tmp_path / "one")
 
         main(["config", "add-root", str(two)])
         out = capsys.readouterr().out
@@ -1183,7 +1184,7 @@ class TestPruneOrphanSymlinks:
         """Build a download-tree shape that mimics what `get` produces:
         download_dir/<mission>/mk/<file.tm> + download_dir/<mission>/lsk/...
         Returns (db, dangling_link, healthy_link)."""
-        db = KernelDB(tmp_path / "test.duckdb")
+        db = KernelDB(tmp_path / "test.duckdb", console=Console())
         dl = tmp_path / "downloads"
         mission_root = dl / "JUICE"
         (mission_root / "mk").mkdir(parents=True)
@@ -1236,7 +1237,7 @@ class TestPruneOrphanSymlinks:
 
     def test_no_registered_metakernels_skips_walk(self, tmp_path, capsys):
         """With nothing in metakernel_registry there's no tree to walk."""
-        db = KernelDB(tmp_path / "test.duckdb")
+        db = KernelDB(tmp_path / "test.duckdb", console=Console())
         result = db.prune_orphan_symlinks(dry_run=True)
         assert result == []
         captured = capsys.readouterr().out
@@ -1247,9 +1248,9 @@ class TestPruneOrphanSymlinks:
         """#47: clean replaced prune; its classes combine instead of excluding
         each other, and an empty registry means nothing to probe."""
         from spice_kernel_db.cli import main
-        db = KernelDB(tmp_path / "test.duckdb")
+        db = KernelDB(tmp_path / "test.duckdb", console=Console())
         db.close()
-        with patch("spice_kernel_db.cli.ensure_config", return_value=Config()):
+        with patch("spice_kernel_db.cli.ensure_config_or_setup", return_value=Config()):
             main([
                 "--db", str(tmp_path / "test.duckdb"),
                 "clean", "--registry", "--symlinks",

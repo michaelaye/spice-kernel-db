@@ -19,6 +19,8 @@ import typer
 from spice_kernel_db.config import Config
 from spice_kernel_db.db import KernelDB
 
+from .prompts import console
+
 # Help panels, in the order they appear in ``--help`` (#47).
 ACQUIRE = "acquire"
 INSPECT = "inspect"
@@ -95,7 +97,8 @@ def open_db(ctx: typer.Context, *, read_only: bool = False) -> Iterator[KernelDB
     """
     st = state(ctx)
     db = KernelDB(st.db, read_only=read_only,
-                  kernel_roots=st.config.kernel_dirs if st.db_override is None else None)
+                  kernel_roots=st.config.kernel_dirs if st.db_override is None else None,
+                  console=console)
     try:
         yield db
     finally:
