@@ -14,8 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README opens with a note on what 0.30 changed at the command line
   (renamed verbs and their old names, `update` with `--execute`, the
   `kernel_dirs` list, exit codes, the quiet library). 0.30.0 went to PyPI before
-  that note existed, so this release carries it to the PyPI page. No code
-  change.
+  that note existed, so this release carries it to the PyPI page. The README
+  also stops saying the docs are built with Quarto (they are built with
+  great-docs since 0.30.0, with a user guide and a generated API reference),
+  its Python examples use the quiet library correctly (`get(..., yes=True)`,
+  `KernelDB(console=...)`, `resolve_metakernel()` for the path to `furnsh`),
+  and the dependency list names Typer and requests. No code change.
 
 ## [0.30.0] - 2026-11-23
 

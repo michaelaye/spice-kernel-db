@@ -54,7 +54,7 @@ Browse, get, and manage SPICE kernels and metakernels across NASA and ESA missio
 
 ## Documentation
 
-Full documentation is at [michaelaye.github.io/spice-kernel-db](https://michaelaye.github.io/spice-kernel-db/) and built with [Quarto](https://quarto.org/).
+Full documentation is at [michaelaye.github.io/spice-kernel-db](https://michaelaye.github.io/spice-kernel-db/): a [user guide](https://michaelaye.github.io/spice-kernel-db/user-guide/) (usage, CLI, coverage, troubleshooting, a tutorial) and an [API reference](https://michaelaye.github.io/spice-kernel-db/reference/) generated from the docstrings with [great-docs](https://posit-dev.github.io/great-docs/). The site also publishes `llms.txt` and an agent skill for AI assistants.
 
 ## Installation
 
@@ -106,35 +106,38 @@ Downloads the metakernel, checks which kernels you already have, downloads the m
 
 ```python
 import spiceypy as spice
-from spice_kernel_db import KernelDB
+from spice_kernel_db import resolve_metakernel
 
-db = KernelDB()
-mks = db.list_metakernels(mission="JUICE")
-spice.furnsh(mks[0]["mk_path"])
+spice.furnsh(str(resolve_metakernel("juice_ops")))
 ```
+
+skd manages the kernel files and loads nothing; `resolve_metakernel` turns a
+tracked name (filename, base name, path or URL) into the path to hand to
+`furnsh`.
 
 ### Python API
 
+The library is quiet: nothing prints unless you hand it a console, and a
+download happens only with `yes=True`. `spice_kernel_db.__all__` is the public
+API, documented in the [reference](https://michaelaye.github.io/spice-kernel-db/reference/).
+
 ```python
-from spice_kernel_db import KernelDB
+from spice_kernel_db import KernelDB, check, get, resolve_metakernel
 
-db = KernelDB()
+# One call against the configured database
+get("https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm", yes=True)
+report = check("juice_ops")          # verdicts and evidence; exit_code is a sum of bits
+path = resolve_metakernel("juice_ops")
 
-# Browse remote metakernels
-db.browse_remote_metakernels(
-    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
-    mission="JUICE",
-)
+# Several operations in a row: keep a KernelDB; a console makes it print like the CLI
+from rich.console import Console
 
-# Get a metakernel (downloads missing kernels automatically)
-db.get_metakernel(
-    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm",
-    mission="JUICE",
-)
-
-# Optionally deduplicate across missions
-db.deduplicate_with_symlinks(dry_run=True)   # preview
-db.deduplicate_with_symlinks(dry_run=False)  # execute
+with KernelDB(console=Console()) as db:
+    db.browse_remote_metakernels(
+        "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/", mission="JUICE",
+    )
+    db.deduplicate_with_symlinks(dry_run=True)   # preview
+    db.deduplicate_with_symlinks(dry_run=False)  # execute
 ```
 
 ## Supported servers
@@ -151,6 +154,9 @@ Both use the same `<server>/<MISSION>/kernels/mk/` directory structure.
 - Python >= 3.11
 - [DuckDB](https://duckdb.org/) >= 1.0
 - [rich](https://rich.readthedocs.io/) >= 13.0
+- [Typer](https://typer.tiangolo.com/) >= 0.27
+- [requests](https://requests.readthedocs.io/) >= 2.31
+- optional: [spiceypy](https://spiceypy.readthedocs.io/) >= 6.0 for `coverage` (`pip install 'spice-kernel-db[spice]'`)
 
 ## License
 
