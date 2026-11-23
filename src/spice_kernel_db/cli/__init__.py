@@ -36,6 +36,23 @@ EXIT_CONFIG = 78
 _LOG = logging.getLogger("spice_kernel_db")
 
 
+def exit_code(exc: BaseException) -> int | None:
+    """The exit code for one of this package's exceptions, or None for any other.
+
+    ``main()`` uses it, and so does a program that mounts
+    ``spice_kernel_db.cli.app`` under its own command (planetarypy's
+    ``plp spice``): it catches what escapes its Typer app and asks here, so
+    both front doors exit the same way (#45, #49; planetarypy #51).
+    """
+    if isinstance(exc, (AmbiguousMetakernel, AmbiguousKernelRoot)):
+        return 2  # the candidates are listed; the caller names one
+    if isinstance(exc, MetakernelNotTracked):
+        return 1
+    if isinstance(exc, ConfigError):
+        return EXIT_CONFIG  # never one of check's verdict bits
+    return None
+
+
 def _log_handler() -> logging.Handler:
     """The library's warnings as bare lines on stderr, what Python's own last-resort
     handler printed before #49, so a long path is not wrapped or coloured."""
@@ -139,17 +156,10 @@ def main(argv: list[str] | None = None) -> None:
     _LOG.addHandler(handler)  # for this run only: an embedding process keeps its own logging
     try:
         rc = app(args=argv, prog_name="spice-kernel-db", standalone_mode=False)
-    except (AmbiguousMetakernel, AmbiguousKernelRoot) as exc:
-        # The one mapping for every command (#45): list the candidates, exit 2.
+    except (AmbiguousMetakernel, AmbiguousKernelRoot, MetakernelNotTracked, ConfigError) as exc:
+        # The one mapping for every command (#45), shared with host CLIs.
         print(str(exc), file=sys.stderr)
-        sys.exit(2)
-    except MetakernelNotTracked as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
-    except ConfigError as exc:
-        # Not 1: `check` uses 1 for a missing kernel, and a script must tell them apart.
-        print(str(exc), file=sys.stderr)
-        sys.exit(EXIT_CONFIG)
+        sys.exit(exit_code(exc))
     except typer.Abort:
         print("Aborted.", file=sys.stderr)
         sys.exit(1)

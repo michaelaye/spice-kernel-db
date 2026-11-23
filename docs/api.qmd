@@ -23,6 +23,8 @@ from spice_kernel_db import (
 )
 ```
 
+**Hosting the CLI.** A program with its own Typer CLI mounts skd's command tree as one of its groups with `app.add_typer(spice_kernel_db.cli.app, name=...)` (planetarypy does this as `plp spice`), and maps the exceptions that escape its app with `spice_kernel_db.cli.exit_code(exc)`: 1 for an untracked metakernel, 2 for an ambiguous name or root, 78 for a config error, `None` for anything that is not skd's. Those two names are the host contract and change only with a major version; the rest of `spice_kernel_db.cli` is internal.
+
 The library is quiet: no function or method prints unless you hand it a `rich.console.Console` (`KernelDB(console=...)`, `get(console=...)`), and warnings go through the `spice_kernel_db` logger, so a script sees them only if it configures logging. The CLI is this API plus a console and one log handler.
 
 ### One call against the configured database

@@ -199,6 +199,27 @@ class TestConfigErrors:
         assert "config --setup" in capsys.readouterr().err
 
 
+class TestHostContract:
+    """C48: what a host CLI (planetarypy's `plp spice`) mounts and asks."""
+
+    def test_exit_code_mapping(self):
+        import typer
+
+        from spice_kernel_db.cli import EXIT_CONFIG, app, exit_code
+        from spice_kernel_db.db import (
+            AmbiguousKernelRoot,
+            AmbiguousMetakernel,
+            MetakernelNotTracked,
+        )
+
+        assert isinstance(app, typer.Typer)
+        assert exit_code(MetakernelNotTracked("x.tm")) == 1
+        assert exit_code(AmbiguousMetakernel("x", ["a.tm", "b.tm"])) == 2
+        assert exit_code(AmbiguousKernelRoot("JUICE", [Path("/one"), Path("/two")])) == 2
+        assert exit_code(ConfigError("corrupt")) == EXIT_CONFIG == 78
+        assert exit_code(ValueError("not ours")) is None
+
+
 class TestPublicApi:
     def test_all_matches_docs(self):
         """C45: the documented list and __all__ are the same names."""
