@@ -1,0 +1,190 @@
+---
+title: "Using skd from Python"
+execute:
+  eval: false
+---
+
+spice-kernel-db manages kernel files; it loads nothing. From Python you fetch,
+index and check metakernels with it, then hand the resulting path to spiceypy.
+This page walks through that from a fresh install to a light-time computation.
+The code is not executed when the docs build, because every step talks to
+NAIF or to your own store; run it in a notebook or a script.
+
+The names used here are the public API, `spice_kernel_db.__all__`, listed on
+the [home page](index.qmd#public-api) and documented in the
+[reference](../reference/index.html). They are kept stable within a major
+version, so a project can pin `spice-kernel-db>=0.30,<1`.
+
+## Two ways in
+
+**One call against the configured database.** The module-level functions open
+the database named in your config, do one thing and close it:
+
+```python
+from spice_kernel_db import check, get, metakernels_covering, resolve_metakernel, scan
+
+get("https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm", yes=True)
+report = check("juice_ops")
+path = resolve_metakernel("juice_ops")
+```
+
+**A `KernelDB` for several operations.** It is a context manager, and a
+`console=` makes it print what the CLI prints:
+
+```python
+from rich.console import Console
+from spice_kernel_db import KernelDB
+
+with KernelDB(console=Console()) as db:
+    db.list_metakernels()
+    db.check_report("juice_ops")
+```
+
+Without a console (the default) nothing is printed, progress bars are off, and
+every question is answered no, so a script passes `yes=True` where it wants a
+download. Warnings go through the `spice_kernel_db` logger; configure
+`logging` to see them.
+
+## Fetch a metakernel
+
+`get` takes a URL the first time and a tracked name after that:
+
+```python
+from spice_kernel_db import get
+
+result = get(
+    "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm",
+    mission="JUICE",
+    yes=True,
+)
+result["downloaded"]   # the kernel files written
+result["warnings"]     # anything the downloader could not fetch
+```
+
+Where the files land is derived: the kernel root that already holds the
+metakernel or its mission, else the only configured root. With several roots
+and no such fact `AmbiguousKernelRoot` is raised; `download_dir=` is the
+explicit answer. The `.tm` skd writes carries absolute `PATH_VALUES`, so it
+works from any working directory.
+
+Re-fetching later needs only the name, and `yes=True` once more:
+
+```python
+get("juice_ops", yes=True)
+```
+
+## Check it
+
+```python
+from spice_kernel_db import check
+
+report = check("juice_ops")
+report["exit_code"]      # 0 when every kernel is present and every entry resolves
+for verdict in report["verdicts"]:
+    print(verdict["ok"], verdict["line"])   # ok is True, False or None (not checked)
+```
+
+`exit_code` is a sum of bits: 1 a kernel is missing, 2 an entry does not
+resolve, 4 a kernel differs from the server (only with `remote=True`). A
+script can branch on it the way `skd check` lets a shell script branch.
+
+## Hand it to spiceypy
+
+```python
+import spiceypy as spice
+from spice_kernel_db import resolve_metakernel
+
+spice.furnsh(str(resolve_metakernel("juice_ops")))
+```
+
+`resolve_metakernel` accepts any form a user might have in hand: the registry
+filename, the version-stripped base name, a path, or the source URL. An
+untracked name raises `MetakernelNotTracked`; a name matching several tracked
+metakernels raises `AmbiguousMetakernel` with the candidates.
+
+## Which metakernel covers a body at a time?
+
+```python
+import spiceypy as spice
+from spice_kernel_db import metakernels_covering
+
+et = spice.utc2et("2032-01-15T00:00:00")
+rows = metakernels_covering(body_id=-28, et=et)   # JUICE
+rows[0]["filename"], rows[0]["intervals"]
+```
+
+This reads the SPK coverage of every tracked metakernel's kernels and needs
+spiceypy (the `[spice]` extra).
+
+## Kernels you already have
+
+```python
+from spice_kernel_db import register_metakernel, scan
+
+scan("/data/spice/MRO/kernels", mission="MRO")          # index kernel files
+register_metakernel("/data/spice/mk/mro_2024.tm", mission="MRO", official=False)
+```
+
+`official=False` marks a metakernel assembled locally, such as the output of
+NAIF's subsetter, so `ls` and `show` say so.
+
+## A complete example
+
+```python
+import logging
+
+import spiceypy as spice
+from spice_kernel_db import check, get, resolve_metakernel
+
+logging.basicConfig(level=logging.WARNING)   # see skd's warnings
+
+get("https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm", yes=True)
+if check("juice_ops")["exit_code"]:
+    raise SystemExit("juice_ops is incomplete; run `skd check juice_ops` for the detail")
+
+spice.furnsh(str(resolve_metakernel("juice_ops")))
+et = spice.utc2et("2032-01-15T00:00:00")
+_, light_time = spice.spkpos("JUICE", et, "J2000", "NONE", "EARTH")
+print(f"one-way light time Earth to JUICE: {light_time / 60:.1f} min")
+```
+
+## Errors you can catch
+
+| Exception | Raised when | CLI exit code |
+|:---|:---|---|
+| `MetakernelNotTracked` | a name matches nothing skd tracks | 1 |
+| `AmbiguousMetakernel` | a name matches several tracked metakernels | 2 |
+| `AmbiguousKernelRoot` | several roots and nothing says which holds a download | 2 |
+| `MetakernelUnreachableError` | the source of a tracked metakernel is gone (HTTP 403, 404, 410) | 2 |
+| `ConcurrentModificationError` | another process changed the records during a download | 1 |
+| `ConfigError` | the config file does not parse, or none exists and nothing seeds it | 78 |
+
+All are importable from `spice_kernel_db`.
+
+## Hosting the command line
+
+A program with its own Typer CLI can mount skd's command tree as one of its
+groups; planetarypy does this as `plp spice`:
+
+```python
+import typer
+from spice_kernel_db.cli import app as skd_app, exit_code, logging_to_stderr
+
+app = typer.Typer()
+app.add_typer(skd_app, name="spice")
+
+
+def main() -> None:
+    try:
+        with logging_to_stderr():
+            app()
+    except Exception as exc:
+        code = exit_code(exc)   # None for anything that is not skd's
+        if code is None:
+            raise
+        typer.echo(str(exc), err=True)
+        raise SystemExit(code)
+```
+
+`app`, `exit_code` and `logging_to_stderr` are the host contract and change
+only with a major version.

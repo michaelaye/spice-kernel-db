@@ -35,7 +35,7 @@ This is error-prone and time-consuming. For researchers who need kernels from mu
 - Stores them in a content-addressed database
 - Creates a local symlink tree that satisfies the metakernel's expected layout
 
-Instead of manually downloading and organizing 40 files, you run one command. See the [`get` command](04-cli.qmd#get) for details.
+Instead of manually downloading and organizing 40 files, you run one command. See the [`get` command](05-cli.qmd#get) for details.
 
 
 ## Problem 2: Metakernels don't match your local layout

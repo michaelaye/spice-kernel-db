@@ -12,7 +12,7 @@ test:
 notebooks:
 	@for nb in notebooks/*.ipynb; do \
 		[ -e "$$nb" ] || continue; \
-		quarto convert "$$nb" --output "docs/06-$$(basename "$${nb%.ipynb}").qmd"; \
+		quarto convert "$$nb" --output "docs/07-$$(basename "$${nb%.ipynb}").qmd"; \
 	done
 
 docs: notebooks
@@ -22,4 +22,4 @@ serve: notebooks
 	great-docs preview
 
 clean:
-	rm -rf dist build *.egg-info great-docs/ docs/06-*.qmd
+	rm -rf dist build *.egg-info great-docs/ docs/07-*.qmd

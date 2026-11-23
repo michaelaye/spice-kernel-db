@@ -70,10 +70,11 @@ Steps 1 and 2 go through `find_by_filename`, which joins on `sha256`, so identic
 
 **Docs ship with the feature, not after.** Every new CLI subcommand, every new flag on an existing subcommand, every new public method on `KernelDB`, and every new behavior visible to the user (new error class, new exit code, new output format) must land in the same change as the corresponding documentation update. Concretely:
 
-- New or changed CLI subcommand → entry in `docs/04-cli.qmd` (table of options + at least one example).
-- New CLI flag → row added to the relevant subcommand's options table in `docs/04-cli.qmd`.
+- New or changed CLI subcommand → entry in `docs/05-cli.qmd` (table of options + at least one example).
+- New CLI flag → row added to the relevant subcommand's options table in `docs/05-cli.qmd`.
 - New public name (`__init__.py` export) → a numpy docstring that says everything a user needs, and an entry under `reference:` in `great-docs.yml` (the test fails otherwise). A new `KernelDB` method needs only the docstring.
-- New user-visible error or recovery path → entry in `docs/07-troubleshooting.qmd`.
+- New user-visible error or recovery path → entry in `docs/08-troubleshooting.qmd`.
+- New public function, or a change to how a script uses the library (quiet library, `yes=`, `console=`, exit codes) → the worked examples in `docs/04-python.qmd` and the Python snippets in `docs/03-usage.qmd` follow in the same change.
 - New feature → `CHANGELOG.md` entry under the unreleased section (or current dev version).
 
 A pull request that adds features without updating docs is incomplete. If you spot an existing gap while doing other work, fix it in the same change rather than filing a TODO.

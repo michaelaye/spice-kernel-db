@@ -64,19 +64,24 @@ skd config add-root ~/planetarypy_data/spice_kernels
 skd scan
 ```
 
-`config add-root` appends the directory to `kernel_dirs`. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](04-cli.qmd#several-kernel-roots) for the details.
+`config add-root` appends the directory to `kernel_dirs`. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](05-cli.qmd#several-kernel-roots) for the details.
 
 From Python, `add_root(dir)` does the same without a prompt, and `ensure_config(seed_root=dir)` writes a first configuration with `dir` as its root when none exists yet.
 
 ### Python API
 
 ```python
+from rich.console import Console
 from spice_kernel_db import KernelDB
 
-db = KernelDB()  # uses the configured database path
-# or:
+db = KernelDB()                    # the configured database; prints nothing
 db = KernelDB("/path/to/custom.duckdb")
+db = KernelDB(console=Console())   # prints what the CLI prints
 ```
+
+The library is quiet unless it is given a console, and it downloads only with
+`yes=True`. The Python snippets on this page show the calls; [Using skd from
+Python](04-python.qmd) walks through a whole session.
 
 ## Setting up a mission
 
@@ -235,7 +240,8 @@ Remote metakernels: JUICE (https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/)
 ### Python API
 
 ```python
-db.browse_remote_metakernels(
+# the table appears only on a console: KernelDB(console=Console())
+rows = db.browse_remote_metakernels(
     "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/",
     mission="JUICE",
     show_versioned=True,
@@ -322,19 +328,22 @@ spice-kernel-db get juice_ops.tm -y
 db.get_metakernel(
     "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm",
     mission="JUICE",
-    yes=True,  # skip prompt
+    yes=True,  # without a console there is nobody to ask, so this is required to download
 )
 ```
 
-Or with a custom download directory:
+Or with an explicit kernel root instead of the derived one:
 
 ```python
 db.get_metakernel(
     url,
     download_dir="/data/spice/juice",
     mission="JUICE",
+    yes=True,
 )
 ```
+
+The one-call form is `get(url, yes=True)` from `spice_kernel_db`.
 
 ## Listing tracked metakernels
 
@@ -387,13 +396,13 @@ spice-kernel-db ls JUICE
 ### Python API
 
 ```python
-# List all
-db.list_metakernels()
+# List all: the rows come back; the table appears only on a console
+rows = db.list_metakernels()
 
 # Filter by mission
-db.list_metakernels(mission="JUICE")
+rows = db.list_metakernels(mission="JUICE")
 
-# Show info for a specific metakernel
+# Details of one metakernel (printed on a console; the registry row is db.registry_row(name))
 db.info_metakernel("juice_ops.tm")
 ```
 
@@ -742,8 +751,8 @@ dups = db.report_duplicates()
 
 ```python
 with KernelDB() as db:
-    db.scan_directory("/data/spice/JUICE/kernels")
-    db.report_duplicates()
+    count, missions = db.scan_directory("/data/spice/JUICE/kernels")
+    dups = db.report_duplicates()   # a list; printed as a table only on a console
 # connection is closed automatically
 ```
 
@@ -801,9 +810,10 @@ Missions with `dedup=False` are protected and their files are never touched.
 ### Python API example
 
 ```python
+from rich.console import Console
 from spice_kernel_db import KernelDB
 
-with KernelDB() as db:
+with KernelDB(console=Console()) as db:   # a console, so the tables below print
     # 1. Configure missions
     db.add_mission(
         "JUICE",
@@ -818,10 +828,11 @@ with KernelDB() as db:
         mission="JUICE",
     )
 
-    # 3. Get a metakernel
+    # 3. Get a metakernel (with a console the download question is asked; yes=True skips it)
     db.get_metakernel(
         "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_ops.tm",
         mission="JUICE",
+        yes=True,
     )
 
     # 4. Optionally scan existing local kernels

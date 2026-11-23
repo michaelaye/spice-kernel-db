@@ -373,7 +373,7 @@ Because identity is content-based, `which` surfaces names an *archive* (e.g. ESA
 
 ## `coverage`
 
-Check SPK body coverage in a metakernel. See the [Coverage](05-coverage.qmd) page for full details.
+Check SPK body coverage in a metakernel. See the [Coverage](06-coverage.qmd) page for full details.
 
 ```bash
 skd coverage <body> [metakernel] [--mission NAME]
