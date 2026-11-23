@@ -264,6 +264,21 @@ class TestPublicApi:
         assert {n for n in listed if n.startswith("cli.")} == {"cli.exit_code", "cli.logging_to_stderr"}
         assert len(listed) == len(set(listed))
 
+    def test_skill_decision_table_names_real_functions(self):
+        """C56: every `use` in the generated skill's decision table names a public function."""
+        from spice_kernel_db import KernelDB
+
+        text = (Path(__file__).parent.parent / "great-docs.yml").read_text()
+        uses = re.findall(r'^\s+use: "([^"]+)"', text, flags=re.MULTILINE)
+        assert len(uses) >= 5
+        for use in uses:
+            names = re.findall(r"\b([A-Za-z_]\w*)\s*\(", use)
+            assert names, use
+            for name in names:
+                if name.startswith("KernelDB."):
+                    name = name.split(".", 1)[1]
+                assert hasattr(spice_kernel_db, name) or hasattr(KernelDB, name), (use, name)
+
     def test_dir_matches_all(self):
         public = {
             n for n in dir(spice_kernel_db)

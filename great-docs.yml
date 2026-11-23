@@ -56,3 +56,34 @@ reference:
     contents:
       - cli.exit_code
       - cli.logging_to_stderr
+
+# The agent skill (skill.md, .well-known/agent-skills/) is generated from the
+# docstrings; these keys add the judgment a reader cannot get from signatures.
+# Every `use` below names a public function or a KernelDB attribute (tests/test_api.py).
+skill:
+  decision_table:
+    - need: "A metakernel from a NAIF or ESA server, with the kernels it lists"
+      use: "get(url, yes=True)"
+    - need: "The on-disk path of a metakernel skd tracks, from a filename, base name, path or URL"
+      use: "resolve_metakernel(ref)"
+    - need: "Whether a tracked metakernel is complete and every entry resolves"
+      use: "check(ref) and the bits of its exit_code"
+    - need: "A tracked metakernel whose SPK kernels cover a body at an ephemeris time"
+      use: "metakernels_covering(body_id, et)"
+    - need: "Kernels already on disk, indexed into the store"
+      use: "scan(directory) for kernel files, register_metakernel(path) for a metakernel"
+    - need: "The local path of one kernel file by name"
+      use: "KernelDB.resolve_kernel(filename)"
+    - need: "Several operations in a row"
+      use: "KernelDB() as a context manager; read_only=True for queries"
+  gotchas:
+    - "skd manages kernel files and loads nothing. Hand the path from resolve_metakernel() to spiceypy.furnsh()."
+    - "The library is quiet: without console= nothing is printed and every question is answered no, so pass yes=True to download."
+    - "Where a download lands is derived (the root that holds the metakernel or its mission, else the only root); with several roots and no such fact AmbiguousKernelRoot is raised, and download_dir= is the explicit answer."
+    - "check()'s exit_code is a sum of bits: 1 a kernel missing, 2 an entry does not resolve, 4 differs from the server (only with remote=True). 78 is a configuration error, never a verdict."
+    - "The .tm skd writes carries absolute PATH_VALUES, so it works from any working directory."
+    - "Warnings go through the spice_kernel_db logger; configure logging to see them."
+  best_practices:
+    - "Pin the release you tested with an upper bound below the next major (for example >=0.23,<1): spice_kernel_db.__all__ is the stability promise."
+    - "Use the module-level functions for one call and a KernelDB for several; open it read_only=True for queries."
+    - "A tracked name (juice_crema_5_2) is more stable than a URL: get() by URL once, then resolve_metakernel() and check() by name."
