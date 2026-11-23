@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The README opens with a note on what 0.30 changed at the command line
-  (renamed verbs and their old names, `update` with `--execute`, several
-  kernel roots, exit codes, the quiet library). 0.30.0 went to PyPI before
+  (renamed verbs and their old names, `update` with `--execute`, the
+  `kernel_dirs` list, exit codes, the quiet library). 0.30.0 went to PyPI before
   that note existed, so this release carries it to the PyPI page. No code
   change.
 

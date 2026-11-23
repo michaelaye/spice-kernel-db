@@ -14,9 +14,10 @@ Browse, get, and manage SPICE kernels and metakernels across NASA and ESA missio
 >   away in 1.0.
 > - **`update` walks every tracked metakernel** and reports; it downloads only
 >   with `--execute`. `get <name>` re-fetches one.
-> - **Several kernel roots:** `config.toml` holds `kernel_dirs = [...]` (a file
->   with the old `kernel_dir` still loads). Where a download lands is derived
->   from what is already on disk; there is no download target to configure.
+> - **Kernel roots:** the config key is `kernel_dirs = [...]`; one entry is the
+>   normal case, more are allowed (`config add-root`), and a file with the old
+>   `kernel_dir` still loads. Where a download lands is derived from what is
+>   already on disk; there is no download target to configure.
 > - **Scripts can read the exit code:** `check` returns a sum of bits (1 a
 >   kernel missing, 2 an entry does not resolve, 4 differs from the server),
 >   an untracked name is 1, an ambiguous name or root is 2, a broken config
