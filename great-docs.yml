@@ -84,6 +84,6 @@ skill:
     - "The .tm skd writes carries absolute PATH_VALUES, so it works from any working directory."
     - "Warnings go through the spice_kernel_db logger; configure logging to see them."
   best_practices:
-    - "Pin the release you tested with an upper bound below the next major (for example >=0.23,<1): spice_kernel_db.__all__ is the stability promise."
+    - "Pin the release you tested with an upper bound below the next major (for example >=0.30,<1): spice_kernel_db.__all__ is the stability promise."
     - "Use the module-level functions for one call and a KernelDB for several; open it read_only=True for queries."
     - "A tracked name (juice_crema_5_2) is more stable than a URL: get() by URL once, then resolve_metakernel() and check() by name."

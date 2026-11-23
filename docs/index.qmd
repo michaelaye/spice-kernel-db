@@ -56,7 +56,7 @@ See the [Usage Guide](03-usage.qmd) for the full walkthrough.
 
 ## Public API
 
-These are the names `spice_kernel_db` exports, and the list `spice_kernel_db.__all__` carries. They are the stability promise: within a major version they keep their names and the meaning of their arguments, so a dependent such as planetarypy can pin `spice-kernel-db>=0.23,<1`. Everything else in the package (`spice_kernel_db.db`, `.remote`, `.config`, `.cli`) is internal and may change in any release. The [API reference](../reference/index.html) is generated from these names' docstrings.
+These are the names `spice_kernel_db` exports, and the list `spice_kernel_db.__all__` carries. They are the stability promise: within a major version they keep their names and the meaning of their arguments, so a dependent such as planetarypy can pin `spice-kernel-db>=0.30,<1`. Everything else in the package (`spice_kernel_db.db`, `.remote`, `.config`, `.cli`) is internal and may change in any release. The [API reference](../reference/index.html) is generated from these names' docstrings.
 
 ```python
 from spice_kernel_db import (

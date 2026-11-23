@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-23
+
+The version jumps from 0.22.3 to 0.30.0 to mark the CLI redesign: there are
+no 0.23 to 0.29 releases. Everything below landed between 2026-11-19 and
+2026-11-23 from the CLI review (#41, #43, #45 to #49, #53, #55).
+
 ### Changed
 
 - **The documentation is built with great-docs** (#53). The API reference is
@@ -1414,6 +1420,8 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
+[Unreleased]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.3...v0.30.0
 [0.22.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.0...v0.22.1

@@ -6,7 +6,7 @@ context:
   #   .../source/s/spice_kernel_db/spice_kernel_db-0.22.3.tar.gz -> 200
   # The old meta.yaml carried the hyphenated form, so it was broken too.
   pypi_name: spice_kernel_db
-  version: "0.22.3"
+  version: "0.30.0"
 
 package:
   name: ${{ name }}
