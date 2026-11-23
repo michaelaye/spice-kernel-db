@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The documentation is built with great-docs** (#53). The API reference is
+  generated from the docstrings of the public names (`great-docs.yml`
+  `reference:`, kept equal to `spice_kernel_db.__all__` by a test); the
+  hand-written `api.qmd` is gone and what it said now lives in those
+  docstrings. The guides (motivation, design, usage, CLI, coverage, tutorial,
+  troubleshooting) are unchanged in content, and `make docs` / `make serve`
+  build and preview the site.
+
 ### Added
 
 - **A quiet library and a declared public API** (#49, closes #6). Nothing
@@ -16,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers its own question with no and reports `aborted`. The CLI passes its
   console. Warnings go through the `spice_kernel_db` logger, which the CLI
   routes to stderr (INFO under `--verbose`). `spice_kernel_db.__all__` is
-  the public API, listed in `docs/api.qmd` § Public API and held stable
+  the public API, listed in `docs/index.qmd` § Public API and held stable
   within a major version, with module-level `get`, `check`, `scan`,
   `register_metakernel`, `resolve_metakernel` and `metakernels_covering`
   that open the configured database per call. `config.py` neither prints

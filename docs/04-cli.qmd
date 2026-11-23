@@ -48,7 +48,7 @@ A root is only searched once it has been scanned. After `skd config add-root <di
 
 The mission of a file found under a root is the first directory below the root. A file directly in a root, or in a type directory such as `mk` or `spk`, gets its mission from the filename alone. Outside every root the mission is guessed from the path as before. A tracked metakernel keeps the mission in its registry row: `check`, `rewrite` and `coverage` read it from there and never guess it from the path again.
 
-Edit the list with `skd config add-root <dir>` and `skd config remove-root <dir>` (see [`config`](#config)). From Python, use `kernel_roots()`, `add_root()` and `remove_root()` ([API](api.qmd#kernel-roots)).
+Edit the list with `skd config add-root <dir>` and `skd config remove-root <dir>` (see [`config`](#config)). From Python, use `kernel_roots()`, `add_root()` and `remove_root()` ([API](index.qmd#public-api)).
 
 ## Verbs at a glance
 
@@ -367,13 +367,13 @@ When the content is known under more than one filename, the path is followed by 
 ::: {.callout-tip}
 ## Discover upstream aliases without deduplicating
 
-Because identity is content-based, `which` surfaces names an *archive* (e.g. ESA) publishes the same bytes under — revealing, for example, that a `_v13` kernel is byte-identical to `_v12`, or that two trajectory scenarios reuse the same solar-array/antenna kernels. This is a pure discovery feature: it needs **no `dedup` step** (symlinking duplicates is a separate, optional space-saving operation). See [Discovering archive-side aliases](design.qmd#content-identity).
+Because identity is content-based, `which` surfaces names an *archive* (e.g. ESA) publishes the same bytes under — revealing, for example, that a `_v13` kernel is byte-identical to `_v12`, or that two trajectory scenarios reuse the same solar-array/antenna kernels. This is a pure discovery feature: it needs **no `dedup` step** (symlinking duplicates is a separate, optional space-saving operation). See [Discovering archive-side aliases](02-design.qmd#content-identity).
 :::
 
 
 ## `coverage`
 
-Check SPK body coverage in a metakernel. See the [Coverage](coverage.qmd) page for full details.
+Check SPK body coverage in a metakernel. See the [Coverage](05-coverage.qmd) page for full details.
 
 ```bash
 skd coverage <body> [metakernel] [--mission NAME]

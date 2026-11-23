@@ -15,12 +15,14 @@ from typing import Annotated, Optional
 
 import typer
 
-from spice_kernel_db.config import ConfigError
+from spice_kernel_db.config import ConfigError, LegacyDatabaseFound
 from spice_kernel_db.db import (
     AmbiguousKernelRoot,
     AmbiguousMetakernel,
+    ConcurrentModificationError,
     KernelDB,
     MetakernelNotTracked,
+    MetakernelUnreachableError,
 )
 
 from ._app import State, app
@@ -39,30 +41,82 @@ _LOG = logging.getLogger("spice_kernel_db")
 
 
 def exit_code(exc: BaseException) -> int | None:
-    """The exit code for one of this package's exceptions, or None for any other.
+    """The exit code for one of this package's exceptions, or ``None`` for any other.
 
-    ``main()`` uses it, and so does a program that mounts
-    ``spice_kernel_db.cli.app`` under its own command (planetarypy's
-    ``plp spice``): it catches what escapes its Typer app and asks here, so
-    both front doors exit the same way (#45, #49; planetarypy #51).
+    This is part of the host contract with ``spice_kernel_db.cli.app`` and ``logging_to_stderr``. A
+    program with its own Typer CLI mounts skd's command tree as one of its groups with
+    ``app.add_typer(spice_kernel_db.cli.app, name=...)``. This is what planetarypy does as
+    ``plp spice``. The host catches what escapes its Typer app and asks here, so both front doors
+    exit the same way. ``main()`` uses it too (#45, #49; planetarypy #51). These three names change
+    only with a major version. The rest of ``spice_kernel_db.cli`` is internal.
+
+    The mapping:
+
+    - 1: ``MetakernelNotTracked``, and ``ConcurrentModificationError`` (another process changed the
+      kernel records during a download; run the command again).
+    - 2: ``AmbiguousMetakernel`` and ``AmbiguousKernelRoot``, where the candidates are listed and
+      the caller names one, and ``MetakernelUnreachableError``, where the source is gone (HTTP 403,
+      404 or 410) and the caller decides what to drop.
+    - 78: ``ConfigError`` and ``LegacyDatabaseFound``, the conventional code for a configuration
+      error. It is never one of ``check``'s verdict bits, which use 0 to 7.
+    - ``None``: any exception that is not skd's. A host re-raises it, so a bug keeps its traceback.
+
+    Parameters
+    ----------
+    exc : BaseException
+        The exception that escaped the app.
+
+    Returns
+    -------
+    int | None
+        The exit code, or ``None`` when the exception has no mapping.
+
+    Examples
+    --------
+    >>> import sys
+    >>> from spice_kernel_db.cli import exit_code, logging_to_stderr
+    >>> try:
+    ...     with logging_to_stderr():
+    ...         app(standalone_mode=False)  # the host's Typer app
+    ... except Exception as exc:
+    ...     code = exit_code(exc)
+    ...     if code is None:
+    ...         raise
+    ...     print(exc, file=sys.stderr)
+    ...     sys.exit(code)
     """
-    if isinstance(exc, (AmbiguousMetakernel, AmbiguousKernelRoot)):
-        return 2  # the candidates are listed; the caller names one
-    if isinstance(exc, MetakernelNotTracked):
+    if isinstance(exc, (AmbiguousMetakernel, AmbiguousKernelRoot, MetakernelUnreachableError)):
+        return 2  # the candidates are listed, or the source is gone; the caller decides
+    if isinstance(exc, (MetakernelNotTracked, ConcurrentModificationError)):
         return 1
-    if isinstance(exc, ConfigError):
-        return EXIT_CONFIG  # never one of check's verdict bits
+    if isinstance(exc, (ConfigError, LegacyDatabaseFound)):
+        return EXIT_CONFIG  # a configuration matter, never one of check's verdict bits
     return None
 
 
 @contextmanager
 def logging_to_stderr() -> Iterator[None]:
-    """For one CLI run, the library's warnings (INFO under ``-v``) as bare lines
-    on stderr, what Python's last-resort handler printed before #49, so a long
-    path is neither wrapped nor coloured. Removed on exit, so an embedding
-    process keeps its own logging. ``main()`` runs inside it, and so does a
-    host CLI that mounts ``app`` (planetarypy's ``plp``): part of the host
-    contract with ``app`` and ``exit_code``.
+    """For one CLI run, print the library's warnings as bare lines on stderr.
+
+    INFO messages are included under ``-v``. This is what Python's last-resort handler printed
+    before #49, so a long path is neither wrapped nor coloured. The handler is removed on exit, so
+    an embedding process keeps its own logging.
+
+    The library is quiet: its warnings go through the ``spice_kernel_db`` logger, and a script sees
+    them only if it configures logging. ``main()`` runs inside this context manager, and so does a
+    host CLI that mounts ``spice_kernel_db.cli.app`` (planetarypy's ``plp``). It is part of the host
+    contract with ``app`` and ``exit_code``, and changes only with a major version.
+
+    Yields
+    ------
+    None
+        A context manager. Run the app inside the ``with`` block.
+
+    Examples
+    --------
+    >>> from spice_kernel_db.cli import logging_to_stderr
+    >>> with logging_to_stderr():
+    ...     app()  # the host's Typer app
     """
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(message)s"))
@@ -167,10 +221,6 @@ def main(argv: list[str] | None = None) -> None:
     try:
         with logging_to_stderr():
             rc = app(args=argv, prog_name="spice-kernel-db", standalone_mode=False)
-    except (AmbiguousMetakernel, AmbiguousKernelRoot, MetakernelNotTracked, ConfigError) as exc:
-        # The one mapping for every command (#45), shared with host CLIs.
-        print(str(exc), file=sys.stderr)
-        sys.exit(exit_code(exc))
     except typer.Abort:
         print("Aborted.", file=sys.stderr)
         sys.exit(1)
@@ -179,5 +229,13 @@ def main(argv: list[str] | None = None) -> None:
 
         rich_utils.rich_format_error(exc)
         sys.exit(exc.exit_code)
+    except Exception as exc:
+        # The one mapping for every skd exception (#45), shared with host CLIs;
+        # anything else is a bug and keeps its traceback.
+        code = exit_code(exc)
+        if code is None:
+            raise
+        print(str(exc), file=sys.stderr)
+        sys.exit(code)
     if isinstance(rc, int):  # Exit codes only; a command's return value is not one
         sys.exit(rc)

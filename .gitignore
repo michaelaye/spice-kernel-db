@@ -16,6 +16,9 @@ venv/
 .venv/
 docs/_site/
 docs/.quarto/
+# great-docs build directory and the tutorial page `make notebooks` generates
+great-docs/
+docs/06-*.qmd
 docs/.gitignore
 3i_atlas.bsp
 

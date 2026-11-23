@@ -14,7 +14,37 @@ from pathlib import Path
 
 @dataclass
 class ParsedMetakernel:
-    """Parsed representation of a SPICE metakernel (.tm) file."""
+    """Parsed representation of a SPICE metakernel (``.tm``) file.
+
+    A dataclass returned by ``parse_metakernel`` and ``parse_metakernel_text``.
+
+    Attributes
+    ----------
+    source_path : Path
+        Absolute path to the source file when parsed with ``parse_metakernel``. When parsed with
+        ``parse_metakernel_text`` it is the *source* string given there, as a ``Path``.
+    header : str
+        Everything before the first ``\\begindata``.
+    path_values : list[str]
+        Contents of ``PATH_VALUES``.
+    path_symbols : list[str]
+        Contents of ``PATH_SYMBOLS``.
+    kernels : list[str]
+        Contents of ``KERNELS_TO_LOAD``.
+
+    Notes
+    -----
+    The properties and methods are:
+
+    ``symbol_map``
+        Mapping from symbol name to path value (``dict[str, str]``).
+    ``resolve(entry)``
+        Replace the ``$SYMBOL`` references in an entry with their values (``str``).
+    ``kernel_filenames()``
+        Basenames of all kernels (``list[str]``).
+    ``kernel_relpaths()``
+        Relative paths with ``$SYMBOL`` stripped (``list[str]``).
+    """
 
     source_path: Path
     header: str
@@ -24,7 +54,16 @@ class ParsedMetakernel:
 
     @property
     def symbol_map(self) -> dict[str, str]:
-        """Map from $SYMBOL to its PATH_VALUE."""
+        """Mapping from symbol name to its ``PATH_VALUES`` entry.
+
+        The ``PATH_SYMBOLS`` and ``PATH_VALUES`` lists are paired in order. The keys are the symbol
+        names as written in ``PATH_SYMBOLS``, without the ``$``.
+
+        Returns
+        -------
+        dict[str, str]
+            Symbol name to path value.
+        """
         return dict(zip(self.path_symbols, self.path_values))
 
     def _ordered_symbols(self) -> list[tuple[str, str]]:
@@ -40,21 +79,43 @@ class ParsedMetakernel:
         )
 
     def resolve(self, raw_entry: str) -> str:
-        """Replace $SYMBOLs in a kernel entry with their PATH_VALUES."""
+        """Replace the ``$SYMBOL`` references in a kernel entry with their ``PATH_VALUES``.
+
+        Parameters
+        ----------
+        raw_entry : str
+            A ``KERNELS_TO_LOAD`` entry, for example ``"$KERNELS/lsk/naif0012.tls"``.
+
+        Returns
+        -------
+        str
+            The entry with every symbol replaced by its value.
+        """
         result = raw_entry
         for sym, val in self._ordered_symbols():
             result = result.replace(f"${sym}", val)
         return result
 
     def kernel_filenames(self) -> list[str]:
-        """Return just the basenames of all KERNELS_TO_LOAD entries."""
+        """Return the basenames of all ``KERNELS_TO_LOAD`` entries.
+
+        Returns
+        -------
+        list[str]
+            One basename per entry, in order.
+        """
         return [Path(k).name for k in self.kernels]
 
     def kernel_relpaths(self) -> list[str]:
-        """Return the relative paths (with $SYMBOL stripped) for each kernel.
+        """Return the relative path of each kernel, with the ``$SYMBOL`` stripped.
 
-        E.g. '$KERNELS/lsk/naif0012.tls' -> 'lsk/naif0012.tls'
-        H3: process longest symbols first to avoid prefix collision.
+        For example ``'$KERNELS/lsk/naif0012.tls'`` becomes ``'lsk/naif0012.tls'``. H3: the longest
+        symbols are processed first, to avoid a prefix collision.
+
+        Returns
+        -------
+        list[str]
+            One relative path per entry, in order.
         """
         result = []
         ordered = [s for s, _ in self._ordered_symbols()]
@@ -193,9 +254,34 @@ def _parse_text(text: str, source_path: Path) -> ParsedMetakernel:
 
 
 def parse_metakernel(path: str | Path) -> ParsedMetakernel:
-    """Parse a SPICE metakernel (.tm) file.
+    """Parse a SPICE metakernel (``.tm``) file from a local path, without needing a database.
 
-    Handles multiple \\begindata / \\begintext blocks as per SPICE spec.
+    Handles multiple ``\\begindata`` / ``\\begintext`` blocks as the SPICE specification describes.
+
+    Parameters
+    ----------
+    path : str | Path
+        The ``.tm`` file.
+
+    Returns
+    -------
+    ParsedMetakernel
+        The parsed ``PATH_VALUES``, ``PATH_SYMBOLS`` and ``KERNELS_TO_LOAD``, with the header.
+        ``source_path`` is the absolute path of the file.
+
+    Raises
+    ------
+    FileNotFoundError
+        *path* does not exist.
+
+    Examples
+    --------
+    >>> from spice_kernel_db import parse_metakernel
+    >>> mk = parse_metakernel("demo.tm")  # a file with the two kernels of the next example
+    >>> mk.symbol_map
+    {'KERNELS': '/data/kernels'}
+    >>> mk.kernel_filenames()
+    ['naif0012.tls', 'jup365.bsp']
     """
     path = Path(path)
     text = path.read_text(errors="replace")
@@ -205,12 +291,39 @@ def parse_metakernel(path: str | Path) -> ParsedMetakernel:
 def parse_metakernel_text(text: str, source: str) -> ParsedMetakernel:
     """Parse a SPICE metakernel from text content.
 
-    Use this for metakernels fetched from remote URLs where no local
-    file exists.
+    Use this for a metakernel fetched from a remote URL, where no local file exists.
 
-    Args:
-        text: The metakernel text content.
-        source: Source identifier (e.g. URL) stored as source_path.
+    Parameters
+    ----------
+    text : str
+        The metakernel text content.
+    source : str
+        A source identifier, for example the URL. It is stored as the ``source_path`` attribute of
+        the result, converted to a ``Path``. A URL therefore loses one slash of its ``://``.
+
+    Returns
+    -------
+    ParsedMetakernel
+        The parsed ``PATH_VALUES``, ``PATH_SYMBOLS`` and ``KERNELS_TO_LOAD``, with the header.
+
+    Examples
+    --------
+    >>> from spice_kernel_db import parse_metakernel_text
+    >>> lines = [
+    ...     "KPL/MK",
+    ...     "\\\\begindata",
+    ...     "  PATH_VALUES  = ( '/data/kernels' )",
+    ...     "  PATH_SYMBOLS = ( 'KERNELS' )",
+    ...     "  KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif0012.tls' '$KERNELS/spk/jup365.bsp' )",
+    ...     "\\\\begintext",
+    ... ]
+    >>> mk = parse_metakernel_text("\\n".join(lines), "https://example.org/mk/demo.tm")
+    >>> mk.symbol_map
+    {'KERNELS': '/data/kernels'}
+    >>> mk.kernel_relpaths()
+    ['lsk/naif0012.tls', 'spk/jup365.bsp']
+    >>> mk.resolve(mk.kernels[0])
+    '/data/kernels/lsk/naif0012.tls'
     """
     return _parse_text(text, Path(source))
 

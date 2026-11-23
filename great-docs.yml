@@ -1,0 +1,58 @@
+# great-docs configuration: https://posit-dev.github.io/great-docs/user-guide/configuration.html
+parser: numpy
+dynamic: false
+display_name: spice-kernel-db
+authors:
+  - name: K.-Michael Aye
+    role: Author
+user_guide: docs
+
+# API reference: exactly the public API (spice_kernel_db.__all__, checked by
+# tests/test_api.py) plus the host contract, grouped as docs/index.qmd groups them.
+reference:
+  - title: "The database"
+    desc: "One DuckDB file, content-addressed by SHA-256, with every kernel location and tracked metakernel."
+    contents:
+      - KernelDB
+      - RegistryRow
+
+  - title: "One call against the configured database"
+    desc: "Each opens the database named in the config, does one thing and closes it."
+    contents:
+      - check
+      - get
+      - metakernels_covering
+      - register_metakernel
+      - resolve_metakernel
+      - scan
+
+  - title: "Configuration"
+    desc: "The config file and the kernel roots. Nothing here prints or prompts."
+    contents:
+      - Config
+      - ConfigError
+      - ensure_config
+      - kernel_roots
+      - add_root
+      - remove_root
+
+  - title: "Metakernel files"
+    desc: "Reading and writing .tm files."
+    contents:
+      - parse_metakernel
+      - parse_metakernel_text
+
+  - title: "Exceptions"
+    contents:
+      - AmbiguousKernelRoot
+      - AmbiguousMetakernel
+      - ConcurrentModificationError
+      - LegacyDatabaseFound
+      - MetakernelNotTracked
+      - MetakernelUnreachableError
+
+  - title: "Hosting the CLI"
+    desc: "`spice_kernel_db.cli.app` is the Typer app a host mounts under its own command (planetarypy's `plp spice`); these two complete the host contract."
+    contents:
+      - cli.exit_code
+      - cli.logging_to_stderr

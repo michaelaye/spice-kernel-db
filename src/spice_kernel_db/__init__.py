@@ -1,7 +1,8 @@
 """Content-addressed SPICE kernel database for deduplication and metakernel rewriting.
 
-The names below are the public API, listed in ``docs/api.qmd`` § Public API
-and held stable within a major version (#49). Everything else is internal.
+The names below are the public API, listed in ``docs/index.qmd`` § Public API,
+documented in the generated reference, and held stable within a major version
+(#49). Everything else is internal.
 """
 
 from spice_kernel_db.api import (

@@ -13,7 +13,7 @@ Browse, get, and manage SPICE kernels and metakernels across NASA and ESA missio
 > per-mission dedup flag (also fixed in 0.10.0). Users who only used `scan` and
 > single-kernel lookup (`which` today) are not affected. After updating,
 > remove all symlinks in your kernel directories and re-run
-> `spice-kernel-db update --execute`. See [CHANGELOG.md](CHANGELOG.md)
+> `spice-kernel-db update --execute`. See [CHANGELOG.md](https://github.com/michaelaye/spice-kernel-db/blob/main/CHANGELOG.md)
 > for recovery steps.
 
 ## What this tool does

@@ -169,22 +169,39 @@ def _should_skip_download(
 
 
 class ConcurrentModificationError(RuntimeError):
-    """Raised when the DB was modified by another process during a
-    long-running operation that had released the write lock.
+    """Another process modified the kernel records during a download.
 
-    Operations that detect this state must abort rather than silently
-    overwrite the other process's work (C5). Users can typically retry
-    the operation; if it persists, another `get`/`scan` is still
-    running concurrently.
+    ``KernelDB.get_metakernel`` (and so ``update_metakernel`` and the module-level ``get``) releases
+    the database lock while it talks to the network, so that other processes can read in the
+    meantime. Afterwards it checks that the kernel records it looked at are unchanged. If another
+    process changed them, the operation aborts with this error instead of silently overwriting that
+    process's work (C5).
+
+    Retry after the other writer has finished. If the error persists, another ``get`` or ``scan`` is
+    still running. Subclass of ``RuntimeError``.
     """
 
 
 class MetakernelNotTracked(LookupError):
-    """Raised when a metakernel name is neither on disk nor in the registry.
+    """A metakernel reference matched nothing that skd tracks.
 
-    Issue #11: `skd check <name>.tm` used to hand the bare name straight to
-    parse_metakernel(), which raised FileNotFoundError from inside the parser
-    and printed a traceback. The name simply had not been downloaded yet.
+    Raised when a reference is neither a file on disk nor a match in the metakernel registry, or
+    when the matching registry row points at a file that is gone. Every method that resolves a
+    metakernel reference can raise it, among them ``KernelDB.resolve_metakernel``,
+    ``update_metakernel`` and ``info_metakernel``. Subclass of ``LookupError``.
+
+    The default message carries the hint ``spice-kernel-db get <name>``. When the row's file is gone
+    it names ``clean --registry`` and ``get`` instead. The CLI prints the message and exits with
+    code 1.
+
+    Issue #11: ``skd check <name>.tm`` used to hand the bare name straight to ``parse_metakernel``,
+    which raised ``FileNotFoundError`` from inside the parser and printed a traceback. The name had
+    not been downloaded yet.
+
+    Attributes
+    ----------
+    name : str
+        The reference as it was given.
     """
 
     def __init__(self, name: str, detail: str | None = None):
@@ -197,10 +214,22 @@ class MetakernelNotTracked(LookupError):
 
 
 class AmbiguousMetakernel(LookupError):
-    """Raised when a metakernel reference matches several registry rows (#45).
+    """A metakernel reference matched several registry rows.
 
-    The resolver never picks the first match: the caller lists
-    ``candidates`` and asks for a more specific name.
+    Raised by ``KernelDB.resolve_metakernel`` (and so by every method that takes a metakernel
+    reference) when the reference matches more than one row, for example a base name while two
+    versioned snapshots are tracked. The resolver never picks the first match (#45). Subclass of
+    ``LookupError``.
+
+    The caller lists ``candidates`` and asks for a more specific name. The CLI does that and exits
+    with code 2.
+
+    Attributes
+    ----------
+    name : str
+        The reference as it was given.
+    candidates : list[str]
+        The registry filenames that matched.
     """
 
     def __init__(self, name: str, candidates: list[str]):
@@ -214,13 +243,25 @@ class AmbiguousMetakernel(LookupError):
 
 
 class AmbiguousKernelRoot(LookupError):
-    """Raised when nothing says which configured root a download belongs in.
+    """Nothing says which configured kernel root a download belongs in.
 
-    ``KernelDB.root_for`` derives the root from the metakernel's own path,
-    then from where the mission's kernels already are, then from the one
-    configured root. With several roots and none of those facts it never
-    picks the first (Michael, 2026-11-21): the CLI lists ``roots`` and asks
-    at a terminal, exits 2 in a script, and ``--download-dir`` names one.
+    Raised by ``KernelDB.root_for`` when several kernel roots are configured and the available facts
+    do not single one out. ``root_for`` derives the root from the metakernel's own path, then from
+    the one configured root, then from where the mission's kernels already are. With several roots
+    and none of those facts it never picks the first (decided 2026-11-21). ``get_metakernel``,
+    ``update_metakernel`` and ``scan_directory(archive=True)`` call ``root_for``, so they raise it
+    too. Subclass of ``LookupError``.
+
+    At a terminal the CLI lists ``roots`` and asks. In a script it exits with code 2, and
+    ``--download-dir`` is the explicit answer.
+
+    Attributes
+    ----------
+    mission : str | None
+        The mission the download is for, or ``None`` when no mission is involved.
+    roots : list[Path]
+        The candidates. When more than one root already holds kernels of the mission these are those
+        roots, otherwise every configured root.
     """
 
     def __init__(self, mission: str | None, roots: list[Path], stored: bool = False):
@@ -237,7 +278,28 @@ class AmbiguousKernelRoot(LookupError):
 
 
 class RegistryRow(NamedTuple):
-    """One ``metakernel_registry`` row, as ``KernelDB.registry_rows`` returns it."""
+    """One tracked metakernel, as a row of the metakernel registry.
+
+    Returned by ``KernelDB.registry_rows`` and ``KernelDB.registry_row``. The class is part of the
+    public API because the module-level functions and planetarypy read it. A ``NamedTuple``, so a
+    row unpacks in field order.
+
+    Attributes
+    ----------
+    mk_path : str
+        The metakernel file on disk.
+    source_url : str | None
+        Where ``get`` fetched it from. ``None`` for a file that was scanned or imported.
+    filename : str
+        The file's name.
+    mission : str
+        The mission the row belongs to.
+    acquired_at : object
+        The acquisition time stored with the row (a DuckDB timestamp).
+    official : bool
+        ``False`` for a metakernel assembled locally (``skd import --unofficial``), ``True``
+        otherwise. Defaults to ``True``.
+    """
 
     mk_path: str
     source_url: str | None
@@ -297,10 +359,25 @@ def _check_verdicts(present: dict, resolves: dict, server: dict | None) -> list[
 
 
 class MetakernelUnreachableError(LookupError):
-    """Raised when the remote metakernel returns a permanent HTTP error
-    (403/404/410), typically because NAIF rotated the file into
-    ``former_versions/``. The local registry row is now an obsolete
-    pointer; the user should clean it up with ``clean --registry``.
+    """The remote copy of a tracked metakernel is gone.
+
+    Raised by ``KernelDB.update_metakernel`` when the remote server answers with a permanent HTTP
+    error (403, 404 or 410). The usual cause is that NAIF rotated the file into
+    ``former_versions/``. The local registry row is then an obsolete pointer. Subclass of
+    ``LookupError``.
+
+    To clean it up, call ``db.prune_metakernels(dry_run=False)`` or run
+    ``spice-kernel-db clean --registry``. ``update_all`` does not raise this error. It reports the
+    row in its result.
+
+    Attributes
+    ----------
+    url : str
+        The URL that was requested.
+    status : int
+        The HTTP status code.
+    filename : str
+        The metakernel's filename.
     """
 
     def __init__(self, url: str, status: int, filename: str):
@@ -354,15 +431,99 @@ def _format_size(n: int) -> str:
 class KernelDB:
     """Content-addressed SPICE kernel database.
 
-    Schema:
-        kernels:     sha256 (PK), filename, kernel_type, size_bytes
-        locations:   sha256 + abs_path (PK), mission, source_url, scanned_at
-        metakernel_entries:  mk_path + entry_index (PK), raw_entry, filename
-        metakernel_registry: mk_path (PK), mission, source_url, filename, acquired_at
+    Wraps a DuckDB database and provides scanning, lookup, metakernel tracking, downloading,
+    rewriting and deduplication. Every kernel file is identified by its SHA-256 hash, not by its
+    filename. Several locations (from different missions, or the same mission in different
+    directories) can reference the same hash, which is how duplicates are detected.
 
-    A kernel is uniquely identified by its SHA-256. Multiple *locations*
-    (from different missions or the same mission in different directories)
-    can reference the same hash — that's how duplicates are detected.
+    The library is quiet. No method prints unless the instance was given a ``rich.console.Console``
+    (``KernelDB(console=...)``), and warnings go through the ``spice_kernel_db`` logger, so a script
+    sees them only if it configures logging. The CLI is this API plus a console and one log handler.
+
+    For one operation against the configured database, the module-level functions ``check``,
+    ``get``, ``scan`` and the others open the database, do one thing and close it again. Keep a
+    ``KernelDB`` for several operations in a row. An instance is a context manager that closes the
+    connection on exit.
+
+    Parameters
+    ----------
+    db_path : str | Path | None, default None
+        The DuckDB file to open, created if it does not exist. ``None`` reads the path from
+        ``~/.config/spice-kernel-db/config.toml``. Without a config file it is
+        ``~/.local/share/spice-kernel-db/kernels.duckdb``.
+    read_only : bool, default False
+        Open the database for queries only, and skip the schema initialisation. Several read-only
+        connections can be open at once. DuckDB's file lock means none can open while another
+        process has the database open for writing, for example during ``get``.
+    kernel_roots : list[str | Path] | None, default None
+        The kernel roots used to guess a mission from a path. ``None`` reads them from the
+        configuration the first time they are needed. The resolved list is available as the
+        ``kernel_roots`` property. Pass it to keep a script independent of the user's configuration.
+    console : rich.console.Console | None, default None
+        The one place the instance writes to: status tables, notes, progress bars and the download
+        question of ``get_metakernel``. Without one nothing is printed, progress bars are off and
+        every question is answered no, so a script passes ``yes=True`` where it wants a download.
+        The CLI passes its own console.
+
+    Attributes
+    ----------
+    db_path : str
+        The expanded path of the open database file.
+    read_only : bool
+        Whether the database was opened read-only.
+    console : rich.console.Console | None
+        The console given at construction.
+    kernel_roots : list[Path]
+        The kernel roots, as expanded, resolved paths. Read from the configuration on first use
+        unless they were passed to the constructor.
+
+    Raises
+    ------
+    LegacyDatabaseFound
+        ``db_path`` is ``None``, there is no config file, and a database sits at the pre-0.19
+        default ``~/.spice_kernels.duckdb`` while the new default does not exist. The message names
+        the move command. Before 0.21.0 that database was opened with a ``FutureWarning``. Since
+        0.21.0 it is not, so that an empty database is not started quietly beside it.
+    ConfigError
+        ``db_path`` is ``None`` and the config file does not parse.
+    duckdb.IOException
+        ``read_only`` is ``True`` and another process holds the database open for writing.
+
+    See Also
+    --------
+    check, get, scan, resolve_metakernel, metakernels_covering, register_metakernel :
+        The module-level functions that wrap one call each.
+
+    Notes
+    -----
+    The schema is created when the database is opened for writing. It has these tables:
+
+    ``kernels``
+        One row per unique file content: ``sha256`` (primary key), ``filename`` (the first name
+        seen), ``kernel_type``, ``size_bytes`` and ``superseded_by``.
+    ``locations``
+        Where files live on disk: ``sha256`` and ``abs_path`` (primary key), ``mission``,
+        ``source_url`` and ``scanned_at``. References ``kernels``.
+    ``kernel_aliases``
+        A view of ``locations``: every distinct on-disk basename a content hash appears under.
+    ``metakernel_entries``
+        The kernel entries inside each ``.tm`` file: ``mk_path`` and ``entry_index`` (primary key),
+        ``raw_entry`` and ``filename``.
+    ``metakernel_registry``
+        The tracked metakernel files: ``mk_path`` (primary key), ``mission``, ``source_url``,
+        ``filename``, ``acquired_at`` and ``official``.
+    ``missions``
+        The configured missions: ``name`` (primary key), ``server_url``, ``mk_dir_url``, ``dedup``
+        and ``added_at``.
+    ``kernel_coverage``
+        Cached SPK coverage intervals per body: ``sha256``, ``body_id`` and ``interval_index``
+        (primary key), ``et_start`` and ``et_end``.
+
+    Examples
+    --------
+    >>> from spice_kernel_db import KernelDB
+    >>> with KernelDB(read_only=True) as db:
+    ...     path = db.resolve_metakernel("juice_crema_5_2.tm")
     """
 
     def __init__(
@@ -372,14 +533,46 @@ class KernelDB:
         kernel_roots: list[str | Path] | None = None,
         console: Console | None = None,
     ):
-        """Open the database.
+        """Open (or create) the database.
 
-        ``console`` is the one place this class writes to (#49, #6): tables,
-        notes and the download question all go to it. Without one (the
-        default, for library use) nothing is printed, progress bars are off
-        and every question is answered no, so a script passes ``yes=True``
-        where it wants a download. Warnings go through the
-        ``spice_kernel_db`` logger either way.
+        When ``db_path`` is ``None`` the path is read from
+        ``~/.config/spice-kernel-db/config.toml``, and without a config file it is
+        ``~/.local/share/spice-kernel-db/kernels.duckdb``. The schema is initialised automatically
+        unless ``read_only`` is set. The class docstring describes the tables.
+
+        Parameters
+        ----------
+        db_path : str | Path | None, default None
+            The DuckDB file to open, created if it does not exist. ``None`` takes the path from the
+            config file, or the default above.
+        read_only : bool, default False
+            Open the database for queries only, and skip the schema initialisation. Several
+            read-only connections can be open at once. DuckDB's file lock means none can open while
+            another process has the database open for writing, for example during ``get``.
+        kernel_roots : list[str | Path] | None, default None
+            The kernel roots used to guess a mission from a path. ``None`` reads them from the
+            configuration the first time they are needed. The resolved list is available as the
+            ``db.kernel_roots`` property. Pass it to keep a script independent of the user's
+            configuration.
+        console : rich.console.Console | None, default None
+            The one place this class writes to (#49, #6): tables, notes, progress bars and the
+            download question all go to it. Without one (the default, for library use) nothing is
+            printed, progress bars are off and every question is answered no, so a script passes
+            ``yes=True`` where it wants a download. Warnings go through the ``spice_kernel_db``
+            logger either way.
+
+        Raises
+        ------
+        LegacyDatabaseFound
+            ``db_path`` is ``None``, there is no config file, and a database sits at the pre-0.19
+            default ``~/.spice_kernels.duckdb`` while the new default does not exist. Before 0.21.0
+            that database was opened with a ``FutureWarning``. Since 0.21.0 it is not, and the
+            message names the move command, rather than quietly starting an empty database beside
+            it.
+        ConfigError
+            ``db_path`` is ``None`` and the config file does not parse.
+        duckdb.IOException
+            The database is locked by another process, or the path cannot be opened.
         """
         # Imported here, not at module level: ``duckdb`` costs ~30 ms to
         # import and ``skd --version`` never opens a database (#26).
@@ -475,7 +668,17 @@ class KernelDB:
 
     @property
     def kernel_roots(self) -> list[Path]:
-        """The configured kernel roots, resolved once per instance (#48)."""
+        """The configured kernel roots, as expanded, resolved paths.
+
+        Read from the configuration the first time they are needed and kept for the life of the
+        instance (#48). A list passed as ``kernel_roots`` to the constructor takes the place of the
+        configuration, which keeps a script independent of the user's setup.
+
+        Returns
+        -------
+        list[Path]
+            The kernel roots, in configured order.
+        """
         if self._kernel_roots is None:
             self._kernel_roots = kernel_roots()
         return self._kernel_roots
@@ -485,13 +688,41 @@ class KernelDB:
         return guess_mission(str(path), self.kernel_roots)
 
     def root_for(self, mission: str | None, mk_path: str | Path | None = None) -> Path:
-        """The kernel root a download belongs in (Michael, 2026-11-21).
+        """The kernel root a download belongs in (decided 2026-11-21).
 
-        In order: the root holding *mk_path* (a tracked metakernel is
-        re-fetched into its own store); the only configured root; the one
-        root that already holds kernels of *mission*. Raises
-        ``AmbiguousKernelRoot`` when several roots remain, so the caller
-        asks instead of guessing. There is no configured download target.
+        This is the one answer to "which kernel root does this download belong in". In order:
+
+        1. the root that contains *mk_path*, since a tracked metakernel is re-fetched into its own
+           store;
+        2. the only configured root;
+        3. the one root that already holds kernels of *mission*.
+
+        When several roots remain it raises ``AmbiguousKernelRoot`` instead of picking the first.
+        The CLI turns that into a picker at a terminal and exit code 2 in a script. There is no
+        configured download target.
+
+        ``get_metakernel`` and ``update_metakernel`` call it when ``download_dir`` is not given (a
+        URL that is already tracked uses that row's root), and ``scan_directory(archive=True)``
+        calls it for every file outside the roots.
+
+        Parameters
+        ----------
+        mission : str | None
+            The mission the download is for. Matched case-insensitively against the missions of the
+            registered locations.
+        mk_path : str | Path | None, default None
+            A tracked metakernel's path. The root containing it wins.
+
+        Returns
+        -------
+        Path
+            The kernel root.
+
+        Raises
+        ------
+        AmbiguousKernelRoot
+            Several roots are configured and neither *mk_path* nor the mission's existing kernels
+            single one out.
         """
         roots = self.kernel_roots
         if mk_path is not None and (root := root_containing(mk_path, roots)) is not None:
@@ -635,13 +866,20 @@ class KernelDB:
     ) -> None:
         """Register a mission in the database.
 
-        Args:
-            name: Mission name (e.g. "JUICE"). Canonicalised via
-                :func:`canonicalize_mission` (H4) so ``juice``/``Juice``
-                collapse to the same row.
-            server_url: Root server URL (e.g. NASA or ESA).
-            mk_dir_url: Full URL to the mission's mk/ directory.
-            dedup: Whether deduplication is enabled for this mission.
+        If the mission already exists, the existing entry is replaced.
+
+        Parameters
+        ----------
+        name : str
+            Mission name, for example ``"JUICE"``. It is canonicalised (H4), so ``juice`` and
+            ``Juice`` collapse to the same row. The names ``generic`` and ``unknown`` stay
+            lowercase, every other name becomes uppercase.
+        server_url : str
+            Root server URL, for example the NASA or ESA SPICE archive.
+        mk_dir_url : str
+            Full URL of the mission's ``mk/`` directory.
+        dedup : bool, default True
+            Whether deduplication is enabled for this mission. ``deduplicate_plan`` respects it.
         """
         name = canonicalize_mission(name)
         self.con.execute("""
@@ -650,7 +888,15 @@ class KernelDB:
         """, [name, server_url, mk_dir_url, dedup])
 
     def list_missions(self) -> list[dict]:
-        """List all configured missions."""
+        """List all configured missions.
+
+        Returns
+        -------
+        list[dict]
+            One dict per mission, ordered by name, with the keys ``name``, ``server_url``,
+            ``server_label`` (``"NASA"``, ``"ESA"`` or ``"custom"``), ``mk_dir_url``, ``dedup`` and
+            ``added_at``.
+        """
         rows = self.con.execute("""
             SELECT name, server_url, mk_dir_url, dedup, added_at
             FROM missions ORDER BY name
@@ -668,9 +914,19 @@ class KernelDB:
         return results
 
     def remove_mission(self, name: str) -> bool:
-        """Remove a mission from the database (case-insensitive, prefix-matchable).
+        """Remove a mission from the database.
 
-        Uses the same fuzzy lookup as ``get_mission``. Returns True if found.
+        The lookup is the one ``get_mission`` uses: case-insensitive, and a unique prefix is enough.
+
+        Parameters
+        ----------
+        name : str
+            Mission name or unique prefix of one.
+
+        Returns
+        -------
+        bool
+            ``True`` if the mission was found and removed, ``False`` if not.
         """
         mission = self.get_mission(name)
         if mission is None:
@@ -679,10 +935,20 @@ class KernelDB:
         return True
 
     def get_mission(self, name: str) -> dict | None:
-        """Look up a mission by name (case-insensitive, prefix-matchable).
+        """Look up a mission by name.
 
-        Tries exact match first, then case-insensitive prefix match.
-        Returns None if no match or if the prefix is ambiguous.
+        Tries an exact case-insensitive match first, then a case-insensitive prefix match.
+
+        Parameters
+        ----------
+        name : str
+            Mission name or prefix of one.
+
+        Returns
+        -------
+        dict | None
+            The mission as a dict with the same keys as ``list_missions`` returns. ``None`` if
+            nothing matches or if the prefix matches several missions.
         """
         row = self.con.execute("""
             SELECT name, server_url, mk_dir_url, dedup, added_at
@@ -720,20 +986,43 @@ class KernelDB:
         archive_dir: str | Path | None = None,
         expected_hash: str | None = None,
     ) -> str:
-        """Register a single kernel file. Returns its SHA-256.
+        """Register a single kernel file and return its SHA-256.
 
-        If the file's hash already exists but under a different filename,
-        the new location is still recorded (pointing to the same hash).
-        This is exactly what happens when JUICE ships ``jup365_19900101_20500101.bsp``
-        and generic_kernels has ``jup365.bsp`` — same content, different names,
-        one hash.
+        If the file's content is already in the database under a different filename, the new
+        location is still recorded and points to the same hash. That is what happens when JUICE
+        ships ``jup365_19900101_20500101.bsp`` and generic_kernels has ``jup365.bsp``: same content,
+        different names, one hash. The match is logged at the ``INFO`` level.
 
-        If ``archive_dir`` is set, the file is moved to
-        ``archive_dir/mission/kernel_type/filename`` and a symlink is left
-        at the original location.
+        If the path was registered before under another hash, that location is stale. It is deleted,
+        and the old kernel row is marked superseded by the new hash. This applies to every stale row
+        at the path, not only one.
 
-        If ``expected_hash`` is provided, the computed hash is verified
-        against it before storing. Raises ValueError on mismatch (Issue 7).
+        Parameters
+        ----------
+        path : str | Path
+            The kernel file.
+        mission : str | None, default None
+            The mission to file it under, canonicalised. ``None`` guesses it with ``guess_mission``
+            and the database's kernel roots.
+        source_url : str | None, default None
+            Where the file was downloaded from, stored with the location.
+        archive_dir : str | Path | None, default None
+            If given, the file is moved to ``<archive_dir>/<mission>/<kernel_type>/<filename>`` and
+            a symlink is left at the original location.
+        expected_hash : str | None, default None
+            If given, the computed SHA-256 is compared with it before anything is stored (Issue 7).
+
+        Returns
+        -------
+        str
+            The file's SHA-256 hex digest.
+
+        Raises
+        ------
+        FileNotFoundError
+            *path* is not a file.
+        ValueError
+            The computed hash differs from *expected_hash*.
         """
         p = Path(path).resolve()
         if not p.is_file():
@@ -899,17 +1188,41 @@ class KernelDB:
         return h
 
     def aliases(self, name_or_hash: str) -> dict | None:
-        """Follow the dedup trail for a kernel.
+        """Follow the deduplication trail for a kernel.
 
-        ``name_or_hash`` may be a full or partial SHA-256, the canonical
-        filename, or *any* alias filename the content has been seen under.
-        Returns a dict with the content hash, canonical name, kernel type,
-        size, every known filename (``aliases``), and all on-disk
-        ``locations`` — or ``None`` if nothing matches.
+        Content-addressed deduplication stores one physical file per hash under a single canonical
+        name. This method surfaces every other name that content is known by, so the deduplication
+        is followable.
 
-        This exists because content-addressed dedup stores one physical
-        file per hash under a single canonical name; this surfaces every
-        other name that file is known by so the deduplication is followable.
+        Aliases are derived from ``locations``, not stored separately. The read-only view
+        ``kernel_aliases (sha256, filename)`` exposes every distinct on-disk basename each content
+        hash appears under, so a deduplicated kernel (identical bytes under several names) is
+        followable with no extra bookkeeping. The trade-off is that a name is forgotten once its
+        file is pruned.
+
+        The companion ``alias_counts(shas)`` maps each hash to its number of known names.
+        ``alias_counts_by_name(filenames)`` maps each filename to how many other names its content
+        is known under. It is used to render the ``(+N aliases)`` annotation in kernel listings.
+
+        Parameters
+        ----------
+        name_or_hash : str
+            A full or partial SHA-256 (at least 6 hex characters), the canonical filename, or any
+            alias filename the content has been registered under. Filenames match
+            case-insensitively.
+
+        Returns
+        -------
+        dict | None
+            ``None`` if nothing matches. Otherwise a dict with the keys:
+
+            - ``sha256`` (str)
+            - ``canonical`` (str): the first-seen filename, ``kernels.filename``
+            - ``kernel_type`` (str)
+            - ``size_bytes`` (int)
+            - ``superseded`` (bool)
+            - ``aliases`` (list[str]): every filename this content is known under
+            - ``locations`` (list[dict]): each with ``abs_path``, ``mission`` and ``source_url``
         """
         key = name_or_hash.strip()
         sha: str | None = None
@@ -986,10 +1299,20 @@ class KernelDB:
         }
 
     def alias_counts(self, shas: list[str]) -> dict[str, int]:
-        """Map each sha256 to how many filenames it's known under.
+        """Map each SHA-256 to how many filenames it is known under.
 
-        Used to annotate listings with ``(+N aliases)`` without a per-row
-        query. Counts > 1 mean the kernel has been deduplicated.
+        Used to annotate listings with ``(+N aliases)`` without a query per row. A count above 1
+        means the kernel has been deduplicated.
+
+        Parameters
+        ----------
+        shas : list[str]
+            Full SHA-256 hex digests.
+
+        Returns
+        -------
+        dict[str, int]
+            Hash to number of known filenames. A hash with no known name is omitted.
         """
         if not shas:
             return {}
@@ -1007,14 +1330,21 @@ class KernelDB:
         return {r[0]: r[1] for r in rows}
 
     def alias_counts_by_name(self, filenames: list[str]) -> dict[str, int]:
-        """For each filename, how many *other* names its content is known
-        under (i.e. how deduplicated it is).
+        """For each filename, count how many other names its content is known under.
 
-        Returns ``{filename: extra_count}`` containing only names whose
-        content has at least one alias (``extra_count >= 1``); names with
-        no aliases — or that aren't in the DB — are omitted. Matching is
-        case-insensitive; keys are returned exactly as passed in. Used to
-        annotate kernel listings with ``(+N aliases)``.
+        Used to annotate kernel listings with ``(+N aliases)``.
+
+        Parameters
+        ----------
+        filenames : list[str]
+            Kernel basenames. Matching is case-insensitive.
+
+        Returns
+        -------
+        dict[str, int]
+            ``{filename: extra_count}``, with the keys exactly as passed in. Only names whose
+            content has at least one alias (``extra_count >= 1``) are included. Names with no
+            aliases, or that are not in the database, are omitted.
         """
         if not filenames:
             return {}
@@ -1051,16 +1381,49 @@ class KernelDB:
     ) -> tuple[int, set[str]]:
         """Recursively scan a directory tree and register all kernel files.
 
-        With ``archive`` each file is moved into a kernel root, laid out as
-        ``<root>/<mission>/<type>/<file>``, and a symlink is left behind.
-        The root is the file's own when it already sits in one, else
-        ``root_for`` of its mission (2026-11-21). Every file's root is
-        settled before anything moves, so an ``AmbiguousKernelRoot`` leaves
-        the tree untouched; *archive_roots* (``{mission: root}``) is how the
-        CLI answers it and calls again.
+        Files are registered with ``register_file``. Every ``.tm`` file found is also indexed and
+        added to the metakernel registry.
 
-        Returns ``(count, missions_found)`` — the number of files registered
-        and the set of mission names detected during the scan.
+        If *mission* is not given, it is detected for each file from its path with ``guess_mission``
+        and the database's kernel roots: under a root, the first directory below the root;
+        elsewhere, the path structure (``.../<MISSION>/kernels/...``). ``register_file`` guesses the
+        same way when it is given no mission.
+
+        With *archive*, each file is moved into a kernel root, laid out as
+        ``<root>/<mission>/<type>/<filename>``, and a symlink is left at the original location. The
+        root is the file's own when it already sits in a configured root, else ``root_for`` of its
+        mission (2026-11-21). Every file's root is settled before anything moves, so an
+        ``AmbiguousKernelRoot`` leaves the tree untouched. *archive_roots* (``{mission: root}``) is
+        how the CLI answers it and calls again. ``scan_roots`` takes the same two arguments.
+
+        Parameters
+        ----------
+        root : str | Path
+            The directory to scan.
+        mission : str | None, default None
+            File everything under this mission instead of detecting it.
+        extensions : set[str] | None, default None
+            The file extensions to register, lowercase and with the dot. ``None`` means every known
+            SPICE kernel extension: ``.bc``, ``.bsp``, ``.bpc``, ``.tpc``, ``.tf``, ``.ti``,
+            ``.tls``, ``.tsc``, ``.bds`` and ``.tm``.
+        verbose : bool, default False
+            Write each registered file name on the instance's console, if it has one.
+        archive : bool, default False
+            Move the files into a kernel root, as described above.
+        archive_roots : dict[str, Path] | None, default None
+            The root to use for each mission when ``archive`` is set and ``root_for`` cannot decide.
+
+        Returns
+        -------
+        tuple[int, set[str]]
+            ``(count, missions_found)``: the number of files registered and the set of mission names
+            detected during the scan.
+
+        Raises
+        ------
+        AmbiguousKernelRoot
+            With *archive*, a file outside the roots belongs to a mission that ``root_for`` cannot
+            place and *archive_roots* does not answer.
         """
         if extensions is None:
             extensions = KERNEL_EXTENSIONS
@@ -1126,9 +1489,25 @@ class KernelDB:
         self, verbose: bool = False, archive: bool = False,
         archive_roots: dict[str, Path] | None = None,
     ) -> tuple[int, set[str]]:
-        """``scan_directory`` over every configured kernel root (#48).
+        """Run ``scan_directory`` over every configured kernel root.
 
-        Returns the total count and the union of missions found.
+        The roots in ``db.kernel_roots`` are scanned in order, as ``skd scan`` does with no
+        directory (#48). A root that is not an existing directory is skipped with a warning to the
+        ``spice_kernel_db`` logger: ``Kernel root <path> does not exist; skipped.``
+
+        Parameters
+        ----------
+        verbose : bool, default False
+            As for ``scan_directory``.
+        archive : bool, default False
+            As for ``scan_directory``.
+        archive_roots : dict[str, Path] | None, default None
+            As for ``scan_directory``.
+
+        Returns
+        -------
+        tuple[int, set[str]]
+            The total count of registered files and the union of the missions found.
         """
         count, missions = 0, set()
         for root in self.kernel_roots:
@@ -1188,20 +1567,28 @@ class KernelDB:
     def find_by_filename(self, filename: str) -> list[dict]:
         """Find all locations for a kernel by filename.
 
-        Checks both the canonical filename in the kernels table AND the
-        actual filename in the locations path. This handles the case where
-        the same content is stored under different names (e.g. jup365.bsp
-        vs jup365_19900101_20500101.bsp).
+        Checks both the canonical filename in the ``kernels`` table and the actual filename in the
+        location path. This handles the same content stored under different names (for example
+        ``jup365.bsp`` and ``jup365_19900101_20500101.bsp``).
 
-        Superseded kernels (kernels.superseded_by IS NOT NULL) are excluded.
-        Filename comparison is case-insensitive (C8): kernel names are
-        treated identically across HFS+/APFS (case-insensitive) and
-        ext4/NTFS (case-sensitive) filesystems. Identity is the sha256
-        anyway — name casing is metadata.
+        Superseded kernels (``kernels.superseded_by IS NOT NULL``) are excluded. The comparison is
+        case-insensitive (C8): kernel names are treated identically on case-insensitive (HFS+, APFS)
+        and case-sensitive (ext4, NTFS) filesystems. Identity is the SHA-256 anyway, and name casing
+        is metadata.
 
-        Ordering is deterministic: by mission, then most-recently-scanned
-        location, then path — so callers see stable results even when
-        multiple non-superseded kernels share the same filename.
+        The order is deterministic: by mission, then most recently scanned location, then path.
+        Callers see stable results even when several non-superseded kernels share a filename.
+
+        Parameters
+        ----------
+        filename : str
+            The kernel's basename.
+
+        Returns
+        -------
+        list[dict]
+            One dict per location with the keys ``sha256``, ``abs_path``, ``mission``,
+            ``kernel_type`` and ``size_bytes``.
         """
         rows = self.con.execute("""
             SELECT DISTINCT k.sha256, l.abs_path, l.mission,
@@ -1220,7 +1607,18 @@ class KernelDB:
         ]
 
     def find_by_hash(self, sha256: str) -> list[dict]:
-        """Find all locations for a kernel by its hash."""
+        """Find all locations for a kernel by its SHA-256 hash.
+
+        Parameters
+        ----------
+        sha256 : str
+            The full hex digest.
+
+        Returns
+        -------
+        list[dict]
+            One dict per location with the keys ``abs_path``, ``mission`` and ``filename``.
+        """
         rows = self.con.execute("""
             SELECT l.abs_path, l.mission, k.filename
             FROM locations l
@@ -1265,21 +1663,37 @@ class KernelDB:
     ) -> tuple[str | None, list[str]]:
         """Resolve a kernel filename to an absolute path on disk.
 
-        Mission-aware resolution order:
-          1. Exact filename match in preferred_mission
-          2. Exact filename match in any mission
-          3. Path-suffix match (file on disk registered under different name)
-          4. Metakernel registry match (for ``.tm`` files acquired via ``get``)
-          5. None — suggest ``spice-kernel-db scan`` to re-index
+        The resolution is mission-aware (see the design notes on mission-aware resolution). In
+        priority order:
 
-        Steps 1 and 2 match on content, so a location actually named *filename*
-        always wins over a byte-identical file registered under another name
-        (issue #9); the latter is used only when no file of the requested name
-        is registered, and adds a warning when it is.
+        1. Exact filename match in *preferred_mission*. No warning.
+        2. Exact filename match in any mission. Warns when a *preferred_mission* was given.
+        3. Path-suffix match: a file on disk that is registered under a different name. Warns when
+           the registered name differs from *filename*.
+        4. Metakernel registry match, for ``.tm`` files acquired with ``get``. Warns only on a
+           cross-mission hit.
+        5. Not found: ``(None, [])``. No hint is produced, so the caller decides whether to suggest
+           ``scan``.
 
-        Returns:
-            (resolved_path, warnings) where warnings is a list of
-            human-readable strings about fallback decisions.
+        Steps 1 and 2 match on content, so a name can have several hits when two byte-identical
+        files are registered under different names. A location actually named *filename* always wins
+        over a byte-identical file registered under another name (issue #9). A differently-named
+        copy is used only when no file of the requested name is registered, and says so in a
+        warning.
+
+        Parameters
+        ----------
+        filename : str
+            The kernel's basename.
+        preferred_mission : str | None, default None
+            The mission to prefer in steps 1, 3 and 4.
+
+        Returns
+        -------
+        tuple[str | None, list[str]]
+            ``(path, warnings)``. *path* is the resolved absolute path, or ``None`` if nothing was
+            found. *warnings* is a list of human-readable strings about the fallback decisions that
+            were taken.
         """
         warnings: list[str] = []
 
@@ -1361,9 +1775,20 @@ class KernelDB:
     # ------------------------------------------------------------------
 
     def report_duplicates(self, min_copies: int = 2) -> list[dict]:
-        """Return kernels that exist in multiple locations.
+        """Find and report kernels that exist in multiple locations.
 
-        Each result: sha256, filename, size_bytes, count, paths, missions.
+        With a console, a summary panel and the first 30 duplicated kernels are printed.
+
+        Parameters
+        ----------
+        min_copies : int, default 2
+            The minimum number of locations for a kernel to be reported.
+
+        Returns
+        -------
+        list[dict]
+            One dict per kernel, largest first, with the keys ``sha256``, ``filename``,
+            ``size_bytes``, ``count``, ``paths``, ``missions`` and ``wasted_bytes``.
         """
         rows = self.con.execute("""
             SELECT k.sha256, k.filename, k.size_bytes, COUNT(*) AS cnt,
@@ -1437,11 +1862,17 @@ class KernelDB:
               True if official is None else official])
 
     def index_metakernel(self, mk_path: str | Path):
-        """Parse and register a metakernel's entries in the DB.
+        """Parse a metakernel and store its entries in the ``metakernel_entries`` table.
 
-        C6: the DELETE + N INSERTs are wrapped in a transaction. A crash
-        between them previously left an empty metakernel_entries set
-        for this mk_path, which made the kernel list silently incomplete.
+        The existing entries of the metakernel are replaced. C6: the ``DELETE`` and the ``INSERT``
+        statements run in one transaction. A crash between them used to leave an empty
+        ``metakernel_entries`` set for this ``mk_path``, which made the kernel list silently
+        incomplete.
+
+        Parameters
+        ----------
+        mk_path : str | Path
+            The ``.tm`` file.
         """
         mk_path = str(Path(mk_path).resolve())
         parsed = parse_metakernel(mk_path)
@@ -1465,8 +1896,22 @@ class KernelDB:
     def registry_rows(self, mission: str | None = None) -> list[RegistryRow]:
         """Every tracked metakernel, ordered by mission and filename.
 
-        *mission* is a case-insensitive prefix filter. The one registry
-        query behind ``resolve_metakernel`` and the CLI pickers (#45).
+        This is the one registry query behind ``resolve_metakernel`` and the CLI pickers (#45).
+
+        The ``official`` column was added in a later release. It is created when a database from
+        before that release is first opened for writing. Opened read-only (``ls``, ``show``,
+        ``doctor``, ``check``) before that, every row reads as official.
+
+        Parameters
+        ----------
+        mission : str | None, default None
+            Case-insensitive prefix filter on the mission.
+
+        Returns
+        -------
+        list[RegistryRow]
+            The rows. ``official`` is ``False`` for a metakernel imported with ``official=False``
+            and ``True`` otherwise.
         """
         where, params = "", []
         if mission:
@@ -1527,12 +1972,38 @@ class KernelDB:
     ) -> Path:
         """The on-disk path of the metakernel *ref* names (#45).
 
-        A path that exists is returned as is; anything else goes through
-        ``registry_row``. Every command that reads a metakernel resolves
-        through here, so a name that works for ``check`` works for ``show``
-        and ``rewrite`` too (#41). Raises ``MetakernelNotTracked`` when
-        nothing matches or the matched file is gone, ``AmbiguousMetakernel``
-        when several rows match.
+        *ref* can be a path that exists, a registry filename, a registry ``mk_path``, the
+        ``source_url`` the metakernel was fetched from, or a version-stripped base name
+        (``juice_crema_5_2.tm`` for ``juice_crema_5_2_v473_20260819_001.tm``). Names are
+        case-insensitive, with or without ``.tm``. A path that exists is returned as it is. Anything
+        else goes through ``registry_row``.
+
+        Every command that reads a metakernel resolves through this method, so a name that works for
+        ``check`` works for ``show`` and ``rewrite`` too (#41).
+
+        Parameters
+        ----------
+        ref : str | Path
+            The metakernel reference.
+        mission : str | None, default None
+            Narrow the registry to one mission (case-insensitive prefix match).
+
+        Returns
+        -------
+        Path
+            The metakernel file on disk.
+
+        Raises
+        ------
+        MetakernelNotTracked
+            Nothing matches, or the matched file is gone.
+        AmbiguousMetakernel
+            Several registry rows match. The method never picks the first of several.
+
+        Examples
+        --------
+        >>> db.resolve_metakernel("juice_crema_5_2.tm")
+        PosixPath('.../JUICE/mk/juice_crema_5_2_v473_20260819_001.tm')
         """
         candidate = Path(ref)
         if candidate.is_file():
@@ -1750,21 +2221,38 @@ class KernelDB:
         mk_path: str | Path,
         mission: str | None = None,
     ) -> dict:
-        """Check which kernels from a metakernel are already available.
+        """Check which kernels from a metakernel are already available locally.
 
-        Args:
-            mk_path: Path to the .tm file.
-            mission: Mission name for preferred-mission resolution.
+        Each ``KERNELS_TO_LOAD`` entry is looked up with ``resolve_kernel``, preferring the
+        metakernel's mission. The method prints nothing and touches no network. The CLI renders its
+        result, and ``check_report`` adds the other verdicts (#46).
 
-        Returns:
-            dict with keys:
-                mk_path:  the resolved path, as str
-                mission:  the mission used for resolution
-                found:    list of (raw_entry, local_path)
-                missing:  list of raw_entry
-                warnings: list of str
-        Prints nothing and touches no network; the CLI renders it and
-        ``check_report`` adds the other verdicts (#46).
+        Parameters
+        ----------
+        mk_path : str | Path
+            Any reference ``resolve_metakernel`` accepts, so a path to the ``.tm`` file or a tracked
+            name.
+        mission : str | None, default None
+            Mission name for preferred-mission resolution. By default it is read from the registry
+            row of a tracked metakernel, and only an untracked file is guessed from its path.
+
+        Returns
+        -------
+        dict
+            With the keys:
+
+            - ``mk_path``: the resolved path, as a string
+            - ``mission``: the mission used for resolution
+            - ``found``: list of ``(raw_entry, local_path)`` tuples
+            - ``missing``: list of ``raw_entry`` strings
+            - ``warnings``: list of warning strings
+
+        Raises
+        ------
+        MetakernelNotTracked
+            *mk_path* matches nothing.
+        AmbiguousMetakernel
+            *mk_path* matches several registry rows.
         """
         mk_path = self.resolve_metakernel(mk_path, mission=mission)
         parsed = parse_metakernel(mk_path)
@@ -1795,15 +2283,55 @@ class KernelDB:
         remote: bool = False,
         spice: bool = False,
     ) -> dict:
-        """Everything ``check`` reports, as data (#46).
+        """Everything the ``check`` command reports, as data (#46).
 
-        Runs ``check_metakernel`` (present), ``verify_metakernel``
-        (resolves; sha256 with *hash_*) and, only with *remote*,
-        ``verify_against_server`` and ``newer_remote_version``, the two
-        network calls. Returns ``mk_path``, the three raw results under
-        ``present``, ``resolves`` and ``remote``, the ``newer`` notice,
-        ``verdicts`` (``_check_verdicts`` rows) and ``exit_code``, the sum
-        of the failed verdicts' bits.
+        Runs ``check_metakernel`` (present), ``verify_metakernel`` (resolves, with SHA-256 checks
+        when *hash_* is set) and, only when *remote* is set, ``verify_against_server`` and
+        ``newer_remote_version``. Those two are the only network calls. ``check_metakernel`` itself
+        prints nothing and touches no network.
+
+        The three verdicts, each a bit of the exit code, are:
+
+        - 1, ``present``: every kernel of the metakernel is on disk;
+        - 2, ``resolves``: every entry resolves soundly through ``PATH_VALUES`` and matches the
+          database;
+        - 4, ``matches remote``: every local kernel matches the server (only with *remote*).
+
+        Parameters
+        ----------
+        mk_path : str | Path
+            Any reference ``resolve_metakernel`` accepts.
+        mission : str | None, default None
+            Mission name for preferred-mission resolution.
+        hash_ : bool, default False
+            Verify SHA-256 hashes: recompute them for the ``resolves`` verdict and, with *remote*,
+            compare them against the server.
+        remote : bool, default False
+            Compare the local kernels with the server. This is the one network path.
+        spice : bool, default False
+            With *remote*, also furnsh each local kernel in an isolated kernel pool and report what
+            SPICE refuses to read. Needs SpiceyPy.
+
+        Returns
+        -------
+        dict
+            With the keys:
+
+            - ``mk_path``: the resolved path, as a string
+            - ``present``: the raw result of ``check_metakernel``
+            - ``resolves``: the raw result of ``verify_metakernel``
+            - ``remote``: the raw result of ``verify_against_server``, or ``None`` without *remote*
+            - ``newer``: the newer-version notice, or ``None``
+            - ``verdicts``: the three verdicts as ``{bit, ok, line}`` rows. ``ok`` is ``True``,
+              ``False``, or ``None`` when the verdict was not checked
+            - ``exit_code``: the sum of the failed verdicts' bits, 0 to 7
+
+        Raises
+        ------
+        MetakernelNotTracked
+            *mk_path* matches nothing.
+        AmbiguousMetakernel
+            *mk_path* matches several registry rows.
         """
         present = self.check_metakernel(mk_path, mission=mission)
         resolves = self.verify_metakernel(mk_path, deep=hash_)
@@ -1906,23 +2434,38 @@ class KernelDB:
     ) -> tuple[Path, list[str]]:
         """Rewrite a metakernel for local use with minimal edits.
 
-        Strategy: create a symlink tree at ``link_root`` that mirrors the
-        original ``$KERNELS/type/filename`` layout. Each symlink points to
-        the actual file on disk (which might live in a different mission's
-        tree). The rewritten metakernel only changes PATH_VALUES to point
-        to ``link_root`` — everything else is identical to the original.
+        The method creates a symlink tree at *link_root* that mirrors the original
+        ``$KERNELS/<type>/<filename>`` layout. Each symlink points to the actual file on disk, which
+        may live in a different mission's tree. Only ``PATH_VALUES`` in the output ``.tm`` file is
+        changed, to point to *link_root*. ``KERNELS_TO_LOAD``, ``PATH_SYMBOLS`` and all comments are
+        preserved. See the design notes on minimal metakernel edits for the rationale.
 
-        If ``link_root`` is None, defaults to a ``kernels/`` directory
-        next to the output file (matching the common ``..`` convention).
+        A kernel that cannot be found gets no symlink and a warning. A kernel path that would escape
+        *link_root* is skipped with a warning.
 
-        Args:
-            mk_path:   Path to original .tm file.
-            output:    Where to write the new .tm.
-            mission:   Mission name for preferred-mission resolution.
-            link_root: Where to create the symlink tree.
+        Parameters
+        ----------
+        mk_path : str | Path
+            The original metakernel: a path, or any reference ``resolve_metakernel`` accepts.
+        output : str | Path
+            Where to write the new ``.tm`` file.
+        mission : str | None, default None
+            Mission name for preferred-mission resolution.
+        link_root : str | Path | None, default None
+            Where to create the symlink tree. ``None`` means a ``kernels/`` directory next to
+            *output*, matching the common ``..`` convention.
 
-        Returns:
-            (output_path, warnings)
+        Returns
+        -------
+        tuple[Path, list[str]]
+            ``(output_path, warnings)``.
+
+        Raises
+        ------
+        MetakernelNotTracked
+            *mk_path* matches nothing.
+        AmbiguousMetakernel
+            *mk_path* matches several registry rows.
         """
         mk_path = self.resolve_metakernel(mk_path, mission=mission)
         output = Path(output)
@@ -2005,29 +2548,59 @@ class KernelDB:
         *,
         deep: bool = False,
     ) -> dict:
-        """Cross-check a metakernel against the database.
+        """Deeply cross-check a metakernel against the database.
 
-        Walks every KERNELS_TO_LOAD entry, applies PATH_VALUES/PATH_SYMBOLS
-        substitution to get the absolute path SPICE will load, then checks:
+        Each entry in ``KERNELS_TO_LOAD`` is substituted through ``PATH_VALUES`` and
+        ``PATH_SYMBOLS`` to the absolute path SPICE will load. That path is validated against the
+        ``kernels`` row of the registered location at that path, or of the file a symlink there
+        leads to. Only a path the database has not registered falls back to the ``kernels`` rows
+        whose filename matches (case-insensitive).
 
-        * the path stays within the PATH_VALUES root (no traversal — C1)
-        * the file (or symlink target) exists
-        * its size matches kernels.size_bytes for the expected filename
-        * with ``deep=True``, its sha256 matches kernels.sha256
-        * the canonical kernels row is not superseded (C3)
-        * no ambiguity between multiple active kernels rows sharing the
-          same filename but different hashes (C3)
+        Checks, with the entry ``status`` each failure gets:
 
-        Args:
-            mk_path: Path to the .tm file (typically rewritten with
-                absolute PATH_VALUES).
-            deep: If True, recompute sha256 for every entry. Otherwise
-                stat-only checks (fast).
+        - ``PATH_VALUES`` entries that are not absolute, or not existing directories
+          (``BAD_PATH_VALUE``);
+        - traversal escape from the ``PATH_VALUES`` root (``TRAVERSAL``, C1);
+        - dangling symlinks (``DANGLING``), missing files (``NOT_FOUND``) and paths that are not
+          files (``NOT_FILE``);
+        - size mismatch against ``kernels.size_bytes`` (``SIZE_MISMATCH``);
+        - SHA-256 mismatch against ``kernels.sha256``, only with ``deep=True`` (``HASH_MISMATCH``);
+        - ambiguous resolution (``AMBIGUOUS``, C3): the path is not registered and several
+          non-superseded ``kernels`` rows share the filename. A registered path is never ambiguous,
+          so a same-named kernel with other content in another mission or kernel root is not flagged
+          (see the design notes on ``superseded_by`` semantics);
+        - files the database does not know (``UNREGISTERED``).
 
-        Returns:
-            ``{'entries': [...], 'ok': int, 'fail': int, 'fatal': bool}``
-            where each entry is a dict with keys ``raw``, ``resolved``,
-            ``status``, ``detail``.
+        An entry that passes has status ``OK``. This is the recommended cross-check after every
+        ``get``, ``update`` and ``rewrite``. Run it with ``deep=True`` periodically to catch content
+        corruption that preserves the size.
+
+        Parameters
+        ----------
+        mk_path : str | Path
+            The metakernel: a path, or any reference ``resolve_metakernel`` accepts. Typically a
+            rewritten one with absolute ``PATH_VALUES``.
+        deep : bool, default False
+            Recompute the SHA-256 of every entry. Without it only stat-based checks run, which is
+            fast.
+
+        Returns
+        -------
+        dict
+            With the keys ``entries``, ``ok`` (the number of entries that passed), ``fail`` (the
+            number that did not), ``fatal``, ``mk_path`` and ``deep``. Each entry is a dict with
+            ``raw``, ``resolved``, ``status`` and ``detail`` (and ``sha256`` for a verified one in
+            deep mode). ``fatal`` is ``True`` if any entry is in a P0 state: ``BAD_PATH_VALUE``,
+            ``TRAVERSAL``, ``DANGLING``, ``NOT_FOUND``, ``NOT_FILE``, ``AMBIGUOUS``,
+            ``SIZE_MISMATCH`` or ``HASH_MISMATCH``. ``UNREGISTERED`` counts as a failure but is not
+            fatal.
+
+        Raises
+        ------
+        MetakernelNotTracked
+            *mk_path* matches nothing.
+        AmbiguousMetakernel
+            *mk_path* matches several registry rows.
         """
         from os.path import abspath, normpath
         mk_path = self.resolve_metakernel(mk_path)
@@ -2393,37 +2966,80 @@ class KernelDB:
         verbose: bool = False,
         dry_run: bool = False,
     ) -> dict:
-        """Fetch a remote metakernel, show status, and download missing kernels.
+        """Fetch a remote metakernel, show its status, and download the missing kernels.
 
-        Args:
-            url: URL to a remote .tm metakernel file.
-            download_dir: The kernel root to download into (default:
-                ``root_for(mission)``: the root that already holds the
-                mission, or the only one; ``AmbiguousKernelRoot`` when
-                several could). Preserves the remote subdirectory structure
-                (lsk/, spk/, etc.).
-            mission: Override auto-detected mission name.
-            yes: If True, skip the confirmation prompt. Without it the
-                question is asked on the instance's console; with no console
-                nothing is written and the result carries ``aborted: True``.
-            verbose: If True, list each kernel's resolved URL under the status
-                table. The table itself is always shown: it precedes the
-                download prompt, so it is what the user decides on (#4).
-            force: If True, treat all kernels as missing and re-download.
-            alias_filename: Optional second name to expose this metakernel
-                under (e.g. the version-stripped ``juice_crema_5_2.tm`` when
-                the actual file is ``juice_crema_5_2_v470_20260415_001.tm``).
-                A symlink is created at ``mk/<alias_filename>`` pointing to
-                the downloaded file, and a second ``metakernel_registry``
-                row is added so ``which <alias_filename>`` works.
-            dry_run: If True, stop after the status table: nothing is written
-                to disk or to the database and no kernel is downloaded. This
-                is what ``update`` (all tracked metakernels) runs by default
-                (#47).
+        The steps are:
 
-        Returns:
-            dict with keys: found, missing, downloaded, warnings (and
-            ``dry_run: True`` when nothing was written)
+        1. Fetch and parse the remote ``.tm`` file.
+        2. Resolve each kernel entry to a full URL, using ``PATH_VALUES`` relative to the metakernel
+           URL.
+        3. Check each kernel against the local database.
+        4. Query the remote file sizes with parallel HTTP HEAD requests.
+        5. Show a summary table with kernel names, sizes and status (``in db`` or ``missing``) on
+           the instance's console.
+        6. Ask for confirmation on that console, unless ``yes=True``. With no console there is
+           nobody to ask. The call then stops after the status step like ``dry_run``, writes
+           nothing, and the result carries ``aborted: True``.
+        7. Download the missing kernels, preserving the subdirectory structure, and register them.
+        8. Create symlinks for the kernels already in the database, so the metakernel works
+           immediately. This applies when deduplication is enabled for the mission. Without it every
+           kernel is downloaded fresh.
+
+        The metakernel itself is saved as ``<download_dir>/<mission>/mk/<filename>`` with absolute
+        ``PATH_VALUES``, so it works from any working directory. Downloaded files are placed under
+        ``<download_dir>/<mission>/<relpath>``.
+
+        The table is shown whenever there is a console. It precedes the download question, so it is
+        what you decide on.
+
+        Parameters
+        ----------
+        url : str
+            URL of a remote ``.tm`` metakernel file.
+        download_dir : str | Path | None, default None
+            The kernel root to download into. ``None`` means ``root_for(mission)``: the configured
+            root that already holds kernels of the mission, or the only configured root. A URL that
+            is already tracked uses that row's root.
+        mission : str | None, default None
+            Override the mission name, which is otherwise guessed from the URL.
+        yes : bool, default False
+            Skip the confirmation prompt.
+        force : bool, default False
+            Treat all kernels as missing and download them again.
+        alias_filename : str | None, default None
+            A second name to expose this metakernel under, for example the version-stripped
+            ``juice_crema_5_2.tm`` when the actual file is ``juice_crema_5_2_v470_20260415_001.tm``.
+            A symlink is created at ``mk/<alias_filename>`` pointing to the downloaded file, and a
+            second ``metakernel_registry`` row is added so ``which <alias_filename>`` works. When
+            the server redirects to a differently named file, the requested name is used as the
+            alias automatically.
+        verbose : bool, default False
+            List each kernel's resolved URL beneath the status table.
+        dry_run : bool, default False
+            Stop after the status table. Nothing is written to disk or to the database and no kernel
+            is downloaded. This is what ``skd update`` runs without ``--execute`` (#47).
+
+        Returns
+        -------
+        dict
+            With the keys ``found`` and ``missing`` (the indices of the metakernel's kernel entries
+            that are in the database and that are not), ``downloaded`` (the paths of the registered
+            files) and ``warnings``. After a dry run the dict also has ``dry_run: True`` and
+            ``downloaded`` is empty. It has ``aborted: True`` when nothing was downloaded because
+            there was no console to ask on, or because the question was answered no. In the second
+            case the registry is restored to its state before the call.
+
+        Raises
+        ------
+        AmbiguousKernelRoot
+            ``download_dir`` is not given and ``root_for`` cannot choose among several roots. Pass
+            ``download_dir`` then.
+        ConcurrentModificationError
+            Another process modified the kernel records while the lock was released for the network
+            I/O.
+        ValueError
+            A ``PATH_VALUES`` entry of the remote metakernel resolves outside the download
+            directory.
         """
         if mission is None:
             mission = guess_mission(url)
@@ -2444,7 +3060,7 @@ class KernelDB:
         # the file this URL fetched before, else the root that holds the
         # mission, else the only root. Several roots and no such fact raise
         # AmbiguousKernelRoot; there is no configured download target
-        # (Michael, 2026-11-21).
+        # (decided 2026-11-21).
         if download_dir is None:
             try:
                 tracked = self.registry_row(url)
@@ -2817,26 +3433,57 @@ class KernelDB:
         dry_run: bool = False,
         rescan: bool = True,
     ) -> dict:
-        """Re-fetch a metakernel from its source URL and download new kernels.
+        """Re-fetch a metakernel from its source URL and download new or missing kernels.
 
-        Looks up the source URL from ``metakernel_registry``, falling back to
-        the mission's ``mk_dir_url`` + filename if no source URL is stored.
+        The source URL comes from the ``metakernel_registry``. If no source URL is stored, the
+        mission's ``mk_dir_url`` plus the filename is used. After downloading, the kernel
+        directories referenced by the metakernel are rescanned, so newly downloaded files are
+        indexed at once. The rescan does not happen after a dry run or with ``force``, since
+        ``get_metakernel`` has already registered everything then.
 
-        Args:
-            mk_path_or_name: mk_path or filename of a registered metakernel.
-            mission: Override auto-detected mission name.
-            verbose: If True, name each directory as it is re-scanned; otherwise
-                report the count in one line (#4).
-            download_dir: Override the kernel root; by default the one that
-                holds the metakernel (``root_for``).
-            yes: Skip confirmation prompt.
-            dry_run: Report what would change and write nothing (#47).
-            rescan: Re-index the directories the metakernel points at after
-                the download (default). ``update_all`` passes False and
-                scans each distinct directory once at the end.
+        Parameters
+        ----------
+        mk_path_or_name : str | Path
+            The ``mk_path`` or filename of a registered metakernel, or any other form
+            ``resolve_metakernel`` takes.
+        mission : str | None, default None
+            Override the mission name, which is otherwise read from the registry row.
+        download_dir : str | Path | None, default None
+            Override the kernel root. By default it is the one that holds the metakernel
+            (``root_for``).
+        yes : bool, default False
+            Skip the confirmation prompt.
+        force : bool, default False
+            Download everything again.
+        verbose : bool, default False
+            Name each directory as it is rescanned. Otherwise the count is reported in one line
+            (#4).
+        dry_run : bool, default False
+            Report what would change and write nothing (#47). No rescan happens.
+        rescan : bool, default True
+            Re-index the directories the metakernel points at after the download. ``update_all``
+            passes ``False`` and scans each distinct directory once at the end.
 
-        Returns:
-            dict from ``get_metakernel``, plus ``scan_dirs`` after a real run.
+        Returns
+        -------
+        dict
+            The dict ``get_metakernel`` returns. After a real run (neither ``dry_run`` nor
+            ``force``) it also has ``scan_dirs``, the set of directories the metakernel points at.
+
+        Raises
+        ------
+        MetakernelNotTracked
+            The metakernel is not in the registry.
+        AmbiguousMetakernel
+            The reference matches several registry rows.
+        LookupError
+            The metakernel was added by ``scan`` or ``import`` without a source URL, and its mission
+            has no ``mk/`` URL.
+        MetakernelUnreachableError
+            The remote returns HTTP 403, 404 or 410. This is typically NAIF rotating the file into
+            ``former_versions/``. Use ``prune_metakernels`` to clean up the stale registry row.
+        AmbiguousKernelRoot
+            ``download_dir`` is not given and ``root_for`` cannot choose.
         """
         row = self.registry_row(mk_path_or_name, mission=mission)
         if row is None:
@@ -2940,21 +3587,32 @@ class KernelDB:
             )
 
     def update_all(self, dry_run: bool = False, verbose: bool = False) -> list[dict]:
-        """Re-fetch every tracked metakernel from its source (#47).
+        """Re-fetch every tracked metakernel from its source, as ``skd update`` does (#47).
 
-        With ``dry_run`` each metakernel's status table is shown and
-        nothing is written. Otherwise the missing kernels are downloaded
-        without a per-metakernel prompt (the CLI's ``--execute`` is the
-        confirmation) and the directories every metakernel points at are
-        re-indexed once at the end. Each metakernel re-fetches into its own
-        root (``root_for``); there is no directory argument, since one
-        directory for metakernels from several roots would undo that. Alias rows (a symlink next to its
-        target) are skipped; a source that has gone from the server, or a
-        row without one, is reported in the table, never fatal.
+        Each metakernel lands in the root that holds it (``root_for``). There is no directory
+        argument, since one directory for metakernels from several roots would undo that. With
+        ``dry_run`` each metakernel's status table is shown and nothing is written. Otherwise the
+        missing kernels are downloaded without a per-metakernel prompt (the CLI's ``--execute`` is
+        the confirmation), and the directories the metakernels point at are re-indexed once at the
+        end. The ``skd update`` command passes ``dry_run=True`` unless ``--execute`` is given.
 
-        Returns one dict per registry row walked: ``filename``, ``mission``,
-        ``count`` (kernels missing in a dry run, downloaded otherwise) and
-        ``error`` (None or one line).
+        Alias rows, where a symlink stands next to its target, are skipped. A source that has gone
+        from the server, a source that cannot be reached, and a row with no source URL are reported
+        in the summary table and never raise.
+
+        Parameters
+        ----------
+        dry_run : bool, default False
+            Show what would be downloaded and write nothing.
+        verbose : bool, default False
+            Name each directory as it is rescanned.
+
+        Returns
+        -------
+        list[dict]
+            One dict per registry row walked, with the keys ``filename``, ``mission``, ``count`` and
+            ``error``. ``count`` is the number of missing kernels in a dry run and the number of
+            downloaded kernels otherwise. ``error`` is ``None`` or a one-line reason.
         """
         report: list[dict] = []
         scan_dirs: dict[Path, str] = {}
@@ -2998,18 +3656,36 @@ class KernelDB:
     ) -> dict:
         """Track a metakernel that is already on disk, without a download (#47).
 
-        *official* False marks a metakernel assembled locally (a subsetter's
-        output) rather than one published by an archive; ``ls`` and
-        ``show`` say so (#48).
+        This is what ``skd import`` does. The method indexes the metakernel's entries, registers
+        every kernel it resolves to that exists on disk, and adds the registry row with no source
+        URL (as ``scan`` does for the ``.tm`` files it meets).
 
-        Indexes its entries, registers every kernel it resolves to that
-        exists on disk, and adds the registry row with no source URL (as
-        ``scan`` does for the .tm files it meets). *mission* defaults to
-        ``guess_mission`` on the path.
+        ``official=False`` marks a metakernel assembled locally (#48), such as a subsetter's output
+        or the one planetarypy builds in ``archived_kernels.py``, as ``skd import --unofficial``
+        does. The flag is stored in the registry, ``ls`` appends ``unofficial`` to the name, and
+        ``show`` prints ``Official: no``. Importing a path again replaces its row, so the flag
+        follows the latest call.
 
-        Returns ``mk_path``, ``filename``, ``mission``, ``n_entries``,
-        ``n_registered`` and ``missing`` (the entries whose file is not on
-        disk). Raises ``FileNotFoundError`` when *mk_path* is not a file.
+        Parameters
+        ----------
+        mk_path : str | Path
+            The ``.tm`` file.
+        mission : str | None, default None
+            The mission. Defaults to the one guessed from the path with ``guess_mission``, taking
+            the configured kernel roots into account.
+        official : bool, default True
+            ``False`` marks a metakernel assembled locally rather than published by an archive.
+
+        Returns
+        -------
+        dict
+            With the keys ``mk_path``, ``filename``, ``mission``, ``n_entries``, ``n_registered``
+            and ``missing``, the entries whose file is not on disk.
+
+        Raises
+        ------
+        FileNotFoundError
+            *mk_path* is not a file.
         """
         p = Path(mk_path).expanduser().resolve()
         if not p.is_file():
@@ -3047,10 +3723,29 @@ class KernelDB:
     ) -> list[dict]:
         """List all tracked metakernels, optionally filtered by mission.
 
-        The *mission* filter is case-insensitive with prefix matching.
-        With ``show=False`` nothing is printed even on a console; the rows
-        are only returned. Legacy since #49 (the library is quiet without a
-        console); kept because planetarypy's released code passes it.
+        Each entry includes the number of kernel entries. Alias rows (symlink metakernels created by
+        ``get``) inherit their target's entry count and content fingerprint, so the listing reads
+        consistently. Both rows show the same kernel count, and one of them is annotated
+        ``↳ identical to <target>``.
+
+        With a console, a summary table is shown. ``show=False`` suppresses it even with a console.
+        That argument is legacy since #49, because the library is quiet without a console, and is
+        kept because planetarypy's released code passes it.
+
+        Parameters
+        ----------
+        mission : str | None, default None
+            Case-insensitive prefix filter on the mission.
+        show : bool, default True
+            Show the summary table on the instance's console, if it has one.
+
+        Returns
+        -------
+        list[dict]
+            One dict per metakernel with the keys ``filename``, ``mission``, ``source_url``,
+            ``acquired_at``, ``mk_path``, ``n_kernels``, ``official`` and ``identical_to``.
+            ``identical_to`` is the name of another row with the same content fingerprint, else
+            ``None``.
         """
         where, params = "", []
         if mission:
@@ -3167,22 +3862,38 @@ class KernelDB:
     ) -> list[dict]:
         """Tracked metakernels whose SPK kernels cover a body.
 
-        Prints nothing and writes nothing, so it works on a
-        ``read_only=True`` database. Coverage comes from the SPK files each
-        metakernel loads that exist on disk; identical aliases are skipped.
+        Meant for code that needs to pick a metakernel rather than show one. The method prints
+        nothing and writes nothing, so it works on a ``read_only=True`` database. Coverage is read
+        from the SPK files each metakernel loads that exist on disk. Identical aliases are skipped.
+        With *et* only the metakernels covering that ephemeris time are returned. Without it, any
+        coverage counts.
 
-        Args:
-            body_id: NAIF ID of the body, e.g. ``-121`` for BepiColombo MPO.
-            et: Ephemeris time that must be covered. ``None`` accepts any
-                coverage at all.
-            mission: Optional case-insensitive mission prefix filter.
+        Parameters
+        ----------
+        body_id : int
+            NAIF ID of the body, for example ``-121`` for BepiColombo MPO.
+        et : float | None, default None
+            Ephemeris time that must be covered. ``None`` accepts any coverage at all.
+        mission : str | None, default None
+            Case-insensitive mission prefix filter.
 
-        Returns:
-            The matching ``list_metakernels`` rows, each with an added
-            ``intervals`` key: the ``(et_start, et_end)`` windows for the body.
+        Returns
+        -------
+        list[dict]
+            The matching ``list_metakernels`` rows, each with an added ``intervals`` key: the
+            ``(et_start, et_end)`` windows for the body.
 
-        Raises:
-            ImportError: SpiceyPy is not installed.
+        Raises
+        ------
+        ImportError
+            SpiceyPy is not installed.
+
+        Examples
+        --------
+        >>> import spiceypy
+        >>> db = KernelDB(read_only=True)
+        >>> spiceypy.furnsh("naif0012.tls")
+        >>> rows = db.metakernels_covering(-121, spiceypy.utc2et("2027-06-01"))  # BepiColombo MPO
         """
         from spice_kernel_db.coverage import spk_coverage
 
@@ -3209,12 +3920,35 @@ class KernelDB:
     def info_metakernel(
         self, name: str, kernel_type: str | None = None, mission: str | None = None,
     ) -> dict:
-        """Show a metakernel: its registry row and the kernels it lists (#47).
+        """Show detailed information about a tracked metakernel, as ``skd show`` does (#47).
 
-        *name* is any form ``resolve_metakernel`` accepts, or the path of a
-        .tm that is not tracked (then the row fields are None and the file
-        is read directly). *kernel_type* limits the printed kernel table to
-        one type; the counts stay whole.
+        Displays the registry row and, for each kernel the metakernel lists, its status (``in db``
+        or ``missing``) with kernel type and size.
+
+        Parameters
+        ----------
+        name : str
+            Any form ``resolve_metakernel`` accepts, or the path of a ``.tm`` file that is not
+            tracked. For an untracked file the row fields in the result are ``None`` and the file is
+            read directly.
+        kernel_type : str | None, default None
+            Limit the printed kernel table to one type. The counts stay whole.
+        mission : str | None, default None
+            Narrow the registry lookup to one mission.
+
+        Returns
+        -------
+        dict
+            With the keys ``filename``, ``mission``, ``source_url``, ``acquired_at``, ``mk_path``,
+            ``official``, ``kernels``, ``n_kernels``, ``n_in_db`` and ``n_missing``. ``kernels`` is
+            a list of dicts with ``filename``, ``kernel_type``, ``size_bytes`` and ``status``.
+
+        Raises
+        ------
+        MetakernelNotTracked
+            *name* matches no registry row and is not a file on disk.
+        AmbiguousMetakernel
+            *name* matches several registry rows.
         """
         row = self.registry_row(name, mission=mission)
         if row is None:
@@ -3350,33 +4084,37 @@ class KernelDB:
         filter: str | None = None,
         archived: bool = False,
     ) -> list[dict]:
-        """Scan a remote NAIF mk/ directory and show available metakernels.
+        """Scan a remote NAIF ``mk/`` directory and show the available metakernels.
 
-        Groups metakernels by base name (stripping version tags like
-        ``_v461_20251127_001``), counts versioned snapshots, and checks
-        which base metakernels have been locally acquired.
+        Groups the entries by base name (stripping version tags like ``_v461_20251127_001``), counts
+        the versioned snapshots, and checks which base metakernels have been acquired locally. A
+        summary table is printed on the instance's console, if it has one.
 
-        Args:
-            mk_dir_url: URL to a mission's ``mk/`` directory.
-            mission: Override auto-detected mission name.
-            show_versioned: If True, list versioned snapshots under each
-                base metakernel.
-            sort_by: Row ordering. ``"name"`` (default) sorts alphabetically
-                by base name. ``"date"`` sorts by latest remote modification
-                date ascending, so the most recently updated metakernels
-                appear at the bottom of the table.
-            filter: Case-insensitive substring filter applied to entry
-                filenames before grouping. Useful for narrowing large
-                listings (e.g. the ~1400-entry JUICE ``former_versions/``).
-            archived: If True, treat each entry as a distinct historical
-                metakernel — no base-name aggregation. Use for browsing
-                ``former_versions/`` directories where every file is an
-                independent frozen-in-time metakernel, not a snapshot of
-                a current file.
+        Parameters
+        ----------
+        mk_dir_url : str
+            URL of a mission's ``mk/`` directory.
+        mission : str | None, default None
+            Override the mission name, which is otherwise detected.
+        show_versioned : bool, default False
+            List the versioned snapshots under each base metakernel.
+        sort_by : str, default "name"
+            Row ordering. ``"name"`` sorts alphabetically by base name. ``"date"`` sorts by latest
+            remote modification date, ascending, so the most recently updated metakernels appear at
+            the bottom.
+        filter : str | None, default None
+            Case-insensitive substring applied to entry filenames before grouping. Useful for
+            narrowing large listings such as the ~1,400-entry JUICE ``former_versions/`` archive.
+        archived : bool, default False
+            Treat each entry as a distinct historical metakernel, with no base-name aggregation. Use
+            it for browsing ``former_versions/`` directories, where every file is an independent
+            frozen-in-time metakernel rather than a snapshot of a current file.
 
-        Returns:
-            List of dicts with keys: ``base_name``, ``n_versions``,
-            ``latest_date``, ``is_local``, ``filenames``.
+        Returns
+        -------
+        list[dict]
+            One dict per row with the keys ``base_name``, ``n_versions``, ``latest_date``,
+            ``is_local`` and ``filenames``.
         """
         entries = list_remote_metakernels(mk_dir_url)
         if filter:
@@ -3551,17 +4289,20 @@ class KernelDB:
     # ------------------------------------------------------------------
 
     def poisoned_superseded(self) -> list[dict]:
-        """Kernels flagged superseded by content that exists in no live location.
+        """Find kernels flagged as superseded by content that exists in no live location.
 
-        The state #29 made repairable and #31 makes visible: the kernel's own
-        file is on disk, so ``which`` should find it, but ``superseded_by``
-        points at a hash with no file anywhere, so ``find_by_filename``
-        skips the row and every ``update`` downloads the kernel again.
-        ``scan`` over the kernel directory repairs every row listed here;
-        a genuine upstream update whose newer file is on disk is not listed.
+        These kernels' own file is present on disk, so ``which`` should find it, but
+        ``superseded_by`` points at a hash with no file anywhere. ``find_by_filename`` therefore
+        skips the row, so the kernel resolves as "not found" and every ``update`` downloads it
+        again. #29 made the state repairable and #31 makes it visible. ``scan`` over the kernel
+        directory repairs every row listed here. A genuine upstream update whose newer file is on
+        disk is not listed.
 
-        Returns one dict per kernel: ``sha256``, ``filename``,
-        ``superseded_by`` and ``abs_path`` (a present location).
+        Returns
+        -------
+        list[dict]
+            One dict per kernel with the keys ``sha256``, ``filename``, ``superseded_by`` and
+            ``abs_path`` (a present location).
         """
         rows = self.con.execute("""
             SELECT k.sha256, k.filename, k.superseded_by, l.abs_path
@@ -3585,23 +4326,40 @@ class KernelDB:
         return out
 
     def stale_locations(self) -> list[tuple[str, str]]:
-        """``(sha256, abs_path)`` of every location whose file is gone from
-        disk. The one walk behind ``clean`` and ``doctor``."""
+        """List the registered locations whose file is gone from disk.
+
+        This is the one walk behind ``clean`` and ``doctor``.
+
+        Returns
+        -------
+        list[tuple[str, str]]
+            ``(sha256, abs_path)`` for every such location.
+        """
         rows = self.con.execute(
             "SELECT sha256, abs_path FROM locations ORDER BY abs_path"
         ).fetchall()
         return [(sha, path) for sha, path in rows if not Path(path).exists()]
 
     def doctor(self) -> dict:
-        """Database health, nothing per metakernel (#46).
+        """Report the health of the database, with no metakernel argument (#46).
 
-        ``poisoned`` is ``poisoned_superseded()``: the one state that is
-        corruption, since every ``update`` re-downloads those kernels.
-        ``missing_locations`` and ``missing_metakernels`` list rows whose
-        file is gone from disk; ``clean`` and ``rm`` clean them up.
-        ``conflicting_locations`` are paths with more than one row (one file
-        registered under two hashes, #48); a ``scan`` of the directory keeps
-        the row matching the file and supersedes the rest.
+        The CLI's ``doctor`` prints the result and exits 1 only when ``poisoned`` is not empty. That
+        is the one state that is corruption, since every ``update`` re-downloads those kernels. A
+        ``scan_directory`` of the directory holding a conflicting path keeps the row that matches
+        the file on disk and supersedes the others. ``register_file`` supersedes every stale row at
+        the path, not only one.
+
+        Returns
+        -------
+        dict
+            With the keys:
+
+            - ``n_kernels``, ``n_locations`` and ``n_metakernels``: the row counts;
+            - ``poisoned``: the ``poisoned_superseded()`` rows;
+            - ``missing_locations``: location paths whose file is gone, which ``clean`` removes;
+            - ``conflicting_locations``: paths with more than one ``locations`` row, that is, one
+              file registered under more than one hash (#48);
+            - ``missing_metakernels``: registry filenames whose file is gone, which ``rm`` removes.
         """
         registry = self.registry_rows()
         return {
@@ -3621,7 +4379,17 @@ class KernelDB:
         }
 
     def stats(self) -> dict:
-        """Print and return summary statistics."""
+        """Print and return summary statistics.
+
+        With a console, a summary panel and a table by kernel type are printed.
+
+        Returns
+        -------
+        dict
+            With the keys ``n_kernels``, ``n_locations``, ``total_bytes`` (the size of the unique
+            content), ``n_duplicates`` (the number of hashes with more than one location),
+            ``n_poisoned`` and ``missions``.
+        """
         n_kernels = self.con.execute(
             "SELECT COUNT(*) FROM kernels"
         ).fetchone()[0]
@@ -3684,15 +4452,20 @@ class KernelDB:
     # ------------------------------------------------------------------
 
     def deduplicate_plan(self) -> list[dict]:
-        """Generate a deduplication plan respecting per-mission settings.
+        """Generate a deduplication plan without executing it.
 
-        For each set of identical files (same hash, multiple locations),
-        pick one canonical location (preferring generic_kernels) and list
-        the rest as removable — but only for missions with dedup enabled.
+        For each set of identical files (same hash, several locations), one canonical copy is
+        chosen, preferring the ``generic`` mission, and the rest are listed as removable. The plan
+        respects the per-mission ``dedup`` setting of the ``missions`` table: files of a mission
+        with deduplication disabled are never listed as removable. A mission that is not in the
+        table defaults to ``dedup=True``.
 
-        Missions not in the ``missions`` table default to dedup=True.
-
-        Returns list of: {filename, size_bytes, keep, remove: [paths]}
+        Returns
+        -------
+        list[dict]
+            One dict per set of identical files that has something to remove, with the keys
+            ``filename``, ``size_bytes``, ``keep`` (the canonical path) and ``remove`` (the list of
+            removable paths).
         """
         # Get missions with dedup explicitly disabled
         no_dedup = {
@@ -3739,8 +4512,19 @@ class KernelDB:
     def deduplicate_with_symlinks(self, dry_run: bool = True) -> list[dict]:
         """Replace duplicate files with symlinks to the canonical copy.
 
-        Args:
-            dry_run: If True (default), only print what would happen.
+        The plan is the one ``deduplicate_plan`` returns. With a console, each replacement and the
+        space saved are printed.
+
+        Parameters
+        ----------
+        dry_run : bool, default True
+            With ``True`` (the default) only print what would happen. Regular files are replaced
+            only with ``dry_run=False``.
+
+        Returns
+        -------
+        list[dict]
+            The plan, as ``deduplicate_plan`` returns it.
         """
         plan = self.deduplicate_plan()
         total_saved = 0
@@ -3808,21 +4592,25 @@ class KernelDB:
         return pruned_paths
 
     def prune_orphan_symlinks(self, dry_run: bool = True) -> list[str]:
-        """Find symlinks under download trees whose target no longer exists.
+        """Find symlinks under the download trees whose target no longer exists.
 
-        Walks every distinct mission's download directory (derived from
-        ``metakernel_registry.mk_path``) recursively and reports
-        dangling symlinks. These accumulate when the underlying kernel
-        store moves or when ``clean --locations`` removes a stale
-        ``locations`` row — the symlinks pointing at that file are not
-        themselves tracked in ``locations``, so they stay on the FS as
-        junk.
+        The method walks every mission's download tree recursively, derived from
+        ``metakernel_registry.mk_path`` (the parent of the ``mk/`` directory), and finds dangling
+        symlinks. These accumulate when an underlying kernel store moves, or after ``prune`` or
+        ``clean --locations`` removes a ``locations`` row. The symlinks pointing at that file are
+        not themselves tracked in ``locations``, so they survive as junk.
 
-        Args:
-            dry_run: If True (default), only report. If False, unlink.
+        Healthy symlinks and regular files are left alone.
 
-        Returns:
-            List of absolute paths that were (or would be) removed.
+        Parameters
+        ----------
+        dry_run : bool, default True
+            With ``True`` (the default) only report. With ``False``, unlink every dangling symlink.
+
+        Returns
+        -------
+        list[str]
+            The absolute paths that were, or with ``dry_run`` would be, removed.
         """
         # Derive download tree roots from the registry. mk_path is
         # typically ``<download_dir>/<mission>/mk/<filename>.tm``, so
@@ -3874,29 +4662,37 @@ class KernelDB:
         delete_files: bool = False,
         timeout: float = 10.0,
     ) -> list[dict]:
-        """Find metakernels whose remote source URL is no longer
-        reachable (typically NAIF rotating old versioned snapshots into
-        ``former_versions/``) and optionally remove their registry rows.
+        """Find registry rows whose remote URL is permanently gone and optionally remove them.
 
-        Sends a HEAD request to each ``metakernel_registry.source_url``
-        and treats 403/404/410 as permanently dead. Network errors
-        (timeouts, DNS failures) are deliberately NOT treated as dead
-        — we'd rather leave a registry row in place than delete it
-        because the user was offline.
+        A HEAD request is sent to each row's URL, and a permanent HTTP error (403, 404 or 410) marks
+        the row as dead. This typically happens when NAIF rotates old versioned snapshots into
+        ``former_versions/``.
 
-        Args:
-            dry_run: If True (default), only report what would be
-                removed.
-            delete_files: If True (and dry_run is False), also unlink
-                the on-disk ``.tm`` file. Symlink trees under the
-                mission's download dir are shared across metakernels
-                and never auto-cleaned.
-            timeout: Per-URL HTTP HEAD timeout in seconds.
+        The probe URL is derived per row: the explicit ``source_url`` if set, otherwise
+        ``mission.mk_dir_url + filename`` (the same fallback as ``update_metakernel``). Rows with
+        neither, typically locally created metakernels with no upstream, are noted in the output and
+        skipped. Use ``skd rm <name>`` to drop them manually.
 
-        Returns:
-            List of dicts, one per dead metakernel:
-            ``{'mk_path', 'filename', 'mission', 'source_url',
-              'status_code'}``.
+        Transient failures (timeouts, DNS errors, 5xx) are deliberately never classified as dead.
+        Leaving a registry row stale is always safer than deleting it on a network blip.
+
+        Parameters
+        ----------
+        dry_run : bool, default True
+            With ``True`` (the default) only report what would be removed. With ``False`` the
+            matching rows are removed from ``metakernel_registry`` and ``metakernel_entries``.
+        delete_files : bool, default False
+            With ``dry_run=False``, also unlink the on-disk ``.tm`` file. Symlink trees under the
+            mission's download directory are shared across metakernels and are never cleaned
+            automatically.
+        timeout : float, default 10.0
+            Timeout of each HEAD request, in seconds.
+
+        Returns
+        -------
+        list[dict]
+            One dict per dead metakernel with the keys ``mk_path``, ``filename``, ``mission``,
+            ``source_url`` and ``status_code``.
         """
         import urllib.request
 

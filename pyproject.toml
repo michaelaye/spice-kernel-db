@@ -33,6 +33,10 @@ dev = [
     "pytest>=7",
     "pytest-tmp-files>=0.0.2",
 ]
+docs = [
+    "great-docs>=0.17",  # the site: generated API reference + the guide in docs/
+    "jupyter",           # quarto convert for the tutorial notebook
+]
 
 [project.scripts]
 spice-kernel-db = "spice_kernel_db.cli:main"
@@ -47,7 +51,7 @@ Issues = "https://github.com/michaelaye/spice-kernel-db/issues"
 packages = ["src/spice_kernel_db"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["Plans/", "MEMORY/"]
+exclude = ["Plans/", "MEMORY/", "great-docs/", "notebooks/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

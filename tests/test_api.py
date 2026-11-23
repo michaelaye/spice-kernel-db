@@ -217,7 +217,16 @@ class TestHostContract:
         assert exit_code(AmbiguousMetakernel("x", ["a.tm", "b.tm"])) == 2
         assert exit_code(AmbiguousKernelRoot("JUICE", [Path("/one"), Path("/two")])) == 2
         assert exit_code(ConfigError("corrupt")) == EXIT_CONFIG == 78
-        assert exit_code(ValueError("not ours")) is None
+        from spice_kernel_db.config import LegacyDatabaseFound
+        from spice_kernel_db.db import (
+            ConcurrentModificationError,
+            MetakernelUnreachableError,
+        )
+
+        assert exit_code(LegacyDatabaseFound("move it")) == 78
+        assert exit_code(MetakernelUnreachableError("https://x/mk/a.tm", 404, "a.tm")) == 2
+        assert exit_code(ConcurrentModificationError("changed under us")) == 1
+        assert exit_code(ValueError("not ours")) is None  # not skd's: a host re-raises it
 
     def test_logging_to_stderr_is_scoped_to_the_run(self, capsys):
         from spice_kernel_db.cli import logging_to_stderr
@@ -234,7 +243,7 @@ class TestHostContract:
 class TestPublicApi:
     def test_all_matches_docs(self):
         """C45: the documented list and __all__ are the same names."""
-        doc = (Path(__file__).parent.parent / "docs" / "api.qmd").read_text()
+        doc = (Path(__file__).parent.parent / "docs" / "index.qmd").read_text()
         section = doc.split("## Public API", 1)[1].split("\n## ", 1)[0]
         block = section.split("```python", 1)[1].split("```", 1)[0]
         names = {
@@ -243,6 +252,17 @@ class TestPublicApi:
             for alias in node.names
         }
         assert names == set(spice_kernel_db.__all__)
+
+    def test_reference_lists_the_public_api(self):
+        """C49: great-docs.yml documents exactly the public API plus the host contract."""
+        listed: list[str] = []
+        for line in (Path(__file__).parent.parent / "great-docs.yml").read_text().splitlines():
+            if re.match(r"\s+- [A-Za-z_][\w.]*$", line):
+                listed.append(line.split("- ", 1)[1].strip())
+        names = {n for n in listed if not n.startswith("cli.")}
+        assert names == set(spice_kernel_db.__all__)
+        assert {n for n in listed if n.startswith("cli.")} == {"cli.exit_code", "cli.logging_to_stderr"}
+        assert len(listed) == len(set(listed))
 
     def test_dir_matches_all(self):
         public = {

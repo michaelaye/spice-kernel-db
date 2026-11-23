@@ -35,7 +35,7 @@ This is error-prone and time-consuming. For researchers who need kernels from mu
 - Stores them in a content-addressed database
 - Creates a local symlink tree that satisfies the metakernel's expected layout
 
-Instead of manually downloading and organizing 40 files, you run one command. See the [`get` command](cli.qmd#get) for details.
+Instead of manually downloading and organizing 40 files, you run one command. See the [`get` command](04-cli.qmd#get) for details.
 
 
 ## Problem 2: Metakernels don't match your local layout
@@ -173,4 +173,4 @@ When resolving kernel filenames, the tool prefers copies from the same mission. 
 1. First look for the file in JUICE's registered locations
 2. Only fall back to other missions if not found in JUICE — and emit a warning when it does
 
-This ensures that mission-specific overrides (e.g., a mission-tuned PCK) take precedence over generic versions, while still benefiting from cross-mission sharing of truly generic files. See [Mission-aware resolution](design.qmd#mission-aware-resolution) for the full priority chain.
+This ensures that mission-specific overrides (e.g., a mission-tuned PCK) take precedence over generic versions, while still benefiting from cross-mission sharing of truly generic files. See [Mission-aware resolution](02-design.qmd#mission-aware-resolution) for the full priority chain.

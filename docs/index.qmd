@@ -52,4 +52,28 @@ spice-kernel-db get https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/juice_cr
 spiceypy.furnsh("/your/storage/path/symlinks/JUICE/juice_crema_5_1.tm")
 ```
 
-See the [Usage Guide](usage.qmd) for the full walkthrough.
+See the [Usage Guide](03-usage.qmd) for the full walkthrough.
+
+## Public API
+
+These are the names `spice_kernel_db` exports, and the list `spice_kernel_db.__all__` carries. They are the stability promise: within a major version they keep their names and the meaning of their arguments, so a dependent such as planetarypy can pin `spice-kernel-db>=0.23,<1`. Everything else in the package (`spice_kernel_db.db`, `.remote`, `.config`, `.cli`) is internal and may change in any release. The [API reference](../reference/index.html) is generated from these names' docstrings.
+
+```python
+from spice_kernel_db import (
+    # the database
+    KernelDB, RegistryRow,
+    # one call against the configured database
+    check, get, metakernels_covering, register_metakernel, resolve_metakernel, scan,
+    # configuration
+    Config, ConfigError, ensure_config, kernel_roots, add_root, remove_root,
+    # metakernel files
+    parse_metakernel, parse_metakernel_text,
+    # exceptions
+    AmbiguousKernelRoot, AmbiguousMetakernel, ConcurrentModificationError,
+    LegacyDatabaseFound, MetakernelNotTracked, MetakernelUnreachableError,
+)
+```
+
+**Hosting the CLI.** A program with its own Typer CLI mounts skd's command tree as one of its groups with `app.add_typer(spice_kernel_db.cli.app, name=...)` (planetarypy does this as `plp spice`), maps the exceptions that escape its app with `spice_kernel_db.cli.exit_code(exc)` (1 for an untracked metakernel or a concurrent modification, 2 for an ambiguous name or root or an unreachable source, 78 for a config error or a legacy database, `None` for anything that is not skd's), and runs the app inside `spice_kernel_db.cli.logging_to_stderr()`, which prints the library's warnings (INFO under `-v`) as bare lines on stderr for that run only. Those three names are the host contract and change only with a major version; the rest of `spice_kernel_db.cli` is internal.
+
+The library is quiet: no function or method prints unless you hand it a `rich.console.Console` (`KernelDB(console=...)`, `get(console=...)`), and warnings go through the `spice_kernel_db` logger, so a script sees them only if it configures logging. The CLI is this API plus a console and one log handler.

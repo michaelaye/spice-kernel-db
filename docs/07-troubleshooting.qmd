@@ -43,7 +43,7 @@ Pass the full registry filename, or stop tracking the snapshot you no longer wan
 
 ## "needs a terminal for its menu" (exit 2)
 
-A command that needed a metakernel was run without one from a script, a notebook or a pipe. At a terminal it would have shown a picker; without one it lists the tracked metakernels on stderr and exits 2 instead of waiting for input. Pass the metakernel as the argument (see [Naming a metakernel](cli.qmd#naming-a-metakernel)).
+A command that needed a metakernel was run without one from a script, a notebook or a pipe. At a terminal it would have shown a picker; without one it lists the tracked metakernels on stderr and exits 2 instead of waiting for input. Pass the metakernel as the argument (see [Naming a metakernel](04-cli.qmd#naming-a-metakernel)).
 
 
 ## "Not found" when resolving a kernel
@@ -235,7 +235,7 @@ Run `skd scan <directory>` on the directory that holds the file. The scan keeps 
 
 A metakernel in skd's default store, for example `~/.local/share/spice-kernel-db/kernels/JUICE/mk/x.tm`, was given the mission `SPICE-KERNEL-DB`. The path guess took the directory that holds the store as the mission. `check` then reported kernels as resolved from another mission, `Cross-mission: 102 kernels` in one case.
 
-Two changes fix it. A tracked metakernel's mission now comes from its registry row (`skd ls` shows it) and is never guessed from the path again. For a file under a configured kernel root, the mission is the first directory below the root (`JUICE`); see [Several kernel roots](cli.qmd#several-kernel-roots).
+Two changes fix it. A tracked metakernel's mission now comes from its registry row (`skd ls` shows it) and is never guessed from the path again. For a file under a configured kernel root, the mission is the first directory below the root (`JUICE`); see [Several kernel roots](04-cli.qmd#several-kernel-roots).
 
 A registry row written by an earlier version keeps its wrong mission until the metakernel is imported again. `skd import <path>` replaces the row, and `--mission JUICE` sets the mission explicitly.
 

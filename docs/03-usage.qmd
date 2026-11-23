@@ -64,7 +64,7 @@ skd config add-root ~/planetarypy_data/spice_kernels
 skd scan
 ```
 
-`config add-root` appends the directory to `kernel_dirs`. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](cli.qmd#several-kernel-roots) for the details.
+`config add-root` appends the directory to `kernel_dirs`. `scan` with no argument then indexes every root, and `which`, `check` and `dedup` see the files of both. A kernel that exists in both stores is recorded once and linked by `dedup`. `skd config remove-root <dir>` takes a root out of the list again and leaves its files and database rows alone. See [Several kernel roots](04-cli.qmd#several-kernel-roots) for the details.
 
 From Python, `add_root(dir)` does the same without a prompt, and `ensure_config(seed_root=dir)` writes a first configuration with `dir` as its root when none exists yet.
 

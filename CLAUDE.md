@@ -15,11 +15,12 @@ pytest tests/
 pytest tests/test_kernel_db.py::TestResolveKernel
 pytest tests/test_kernel_db.py::TestResolveKernel::test_exact_match_preferred_mission
 
-# Preview documentation locally
-cd docs && quarto preview
+# Build / preview the documentation (great-docs: generated API reference + docs/ guide)
+make docs
+make serve
 ```
 
-There is no linter or formatter configured. CI runs pytest across Python 3.11–3.14; the publish workflow deploys Quarto docs to GitHub Pages (chained after CI passes).
+There is no linter or formatter configured. CI runs pytest across Python 3.11–3.14; the publish workflow builds the site with great-docs and deploys it to GitHub Pages (chained after CI passes). The API reference is generated from docstrings (numpy style) for the names in `great-docs.yml` `reference:`, which `tests/test_api.py` keeps equal to `spice_kernel_db.__all__`; the guide pages are the numbered `docs/*.qmd` files, the tutorial notebook in `notebooks/` is converted by `make notebooks`.
 
 ## Architecture
 
@@ -43,7 +44,7 @@ Content-addressed SPICE kernel database. Every kernel file is identified by its 
 | `hashing.py` | `sha256_file()`, `classify_kernel()` (extension→type), `guess_mission(filepath, roots=None)` (path heuristic; the first directory below a configured kernel root wins) |
 | `remote.py` | Network operations: fetch metakernels, resolve URLs, parallel HEAD/download with rich.progress |
 | `config.py` | `Config` (`kernel_dirs`, the list of kernel roots; no root is special, `KernelDB.root_for` derives where a download lands), TOML persistence at `~/.config/spice-kernel-db/config.toml`, `kernel_roots()` / `add_root()` / `remove_root()`; raises `ConfigError`, never prints or prompts |
-| `api.py` | Module-level `get`, `check`, `scan`, `register_metakernel`, `resolve_metakernel`, `metakernels_covering`: one call against the configured database; `__init__.py`'s `__all__` is the public API (#49), mirrored in `docs/api.qmd` § Public API and checked by `tests/test_api.py` |
+| `api.py` | Module-level `get`, `check`, `scan`, `register_metakernel`, `resolve_metakernel`, `metakernels_covering`: one call against the configured database; `__init__.py`'s `__all__` is the public API (#49), mirrored in `docs/index.qmd` § Public API and in `great-docs.yml` `reference:`, both checked by `tests/test_api.py` |
 | `cli/` | Typer CLI, one module per help panel: `browse.py` (browse, get, update), `inspect_cmds.py` (ls, show, which, coverage, stats, check, doctor, plus the hidden aliases list, metakernels/mk, resolve, aliases, duplicates, verify), `transform.py` (scan, import, rewrite, rm, clean, dedup, and the hidden prune), `configure.py` (mission, config, reset); `prompts.py` holds the shared interactive pickers, `_app.py` the `app` object and per-invocation state, `__init__.py` the root options and `main()` |
 
 ### Key Design Decisions
@@ -69,10 +70,10 @@ Steps 1 and 2 go through `find_by_filename`, which joins on `sha256`, so identic
 
 **Docs ship with the feature, not after.** Every new CLI subcommand, every new flag on an existing subcommand, every new public method on `KernelDB`, and every new behavior visible to the user (new error class, new exit code, new output format) must land in the same change as the corresponding documentation update. Concretely:
 
-- New or changed CLI subcommand → entry in `docs/cli.qmd` (table of options + at least one example).
-- New CLI flag → row added to the relevant subcommand's options table in `docs/cli.qmd`.
-- New `KernelDB` method or `__init__.py` export → entry in `docs/api.qmd`.
-- New user-visible error or recovery path → entry in `docs/troubleshooting.qmd`.
+- New or changed CLI subcommand → entry in `docs/04-cli.qmd` (table of options + at least one example).
+- New CLI flag → row added to the relevant subcommand's options table in `docs/04-cli.qmd`.
+- New public name (`__init__.py` export) → a numpy docstring that says everything a user needs, and an entry under `reference:` in `great-docs.yml` (the test fails otherwise). A new `KernelDB` method needs only the docstring.
+- New user-visible error or recovery path → entry in `docs/07-troubleshooting.qmd`.
 - New feature → `CHANGELOG.md` entry under the unreleased section (or current dev version).
 
 A pull request that adds features without updating docs is incomplete. If you spot an existing gap while doing other work, fix it in the same change rather than filing a TODO.

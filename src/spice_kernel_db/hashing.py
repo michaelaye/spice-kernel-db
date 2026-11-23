@@ -84,15 +84,44 @@ def root_containing(path: str | Path, roots: list[Path]) -> Path | None:
 
 
 def guess_mission(filepath: str, roots: list[Path] | None = None) -> str:
-    """Best-effort mission name from path components.
+    """Best-effort mission name for a kernel file, canonicalised like every stored mission name.
 
-    Under one of *roots* (the configured kernel roots, #48) the mission is
-    the first component after the root: skd's own store is laid out as
-    ``<root>/<MISSION>/<type>/<file>``, and reading it any other way gave
-    the store directory as the mission (#43). Elsewhere: a directory before
-    ``kernels/`` that is not a generic infrastructure name, then a
-    kernel-type directory's parent, then filename patterns. Result is run
-    through :func:`canonicalize_mission` for consistent casing.
+    Under one of *roots* (as returned by ``kernel_roots()``, #48) the mission is the first directory
+    below the root, because skd's own store is laid out as ``<root>/<MISSION>/<type>/<file>``.
+    Reading it any other way gave the store directory as the mission (#43). A file under a root but
+    not in a mission directory, for example directly in the root or in a type directory such as
+    ``mk``, is classified from its filename only.
+
+    Outside every root the path heuristic applies. In order: a directory before ``kernels/`` that is
+    not a generic infrastructure name, then the parent of a kernel-type directory, then filename
+    patterns. The result is run through ``canonicalize_mission`` for consistent casing.
+
+    ``register_file``, ``scan_directory`` and ``import_metakernel`` pass ``db.kernel_roots``.
+    ``check_metakernel``, ``rewrite_metakernel``, ``coverage_metakernel`` and the server comparison
+    do not guess for a tracked metakernel. When *mission* is not given they read it from the
+    registry row, and only an untracked file is guessed from its path.
+
+    Parameters
+    ----------
+    filepath : str
+        The path of the kernel file.
+    roots : list[Path] | None, default None
+        The configured kernel roots, as resolved paths.
+
+    Returns
+    -------
+    str
+        The canonical mission name. ``"generic"`` for a generic kernel file and ``"unknown"`` when
+        nothing says.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> from spice_kernel_db.hashing import guess_mission
+    >>> guess_mission("/data/spice/kernels/juice/spk/jup365.bsp", [Path("/data/spice/kernels")])
+    'JUICE'
+    >>> guess_mission("/elsewhere/JUICE/kernels/spk/jup365.bsp")
+    'JUICE'
     """
     path = Path(filepath)
     root = root_containing(path, roots) if roots else None
