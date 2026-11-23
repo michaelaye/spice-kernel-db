@@ -219,6 +219,17 @@ class TestHostContract:
         assert exit_code(ConfigError("corrupt")) == EXIT_CONFIG == 78
         assert exit_code(ValueError("not ours")) is None
 
+    def test_logging_to_stderr_is_scoped_to_the_run(self, capsys):
+        from spice_kernel_db.cli import logging_to_stderr
+
+        log = logging.getLogger("spice_kernel_db.db")
+        with logging_to_stderr():
+            log.warning("inside")
+        log.warning("outside")  # Python's last-resort handler prints this one
+        err = capsys.readouterr().err
+        assert err.count("inside") == 1 and "WARNING" not in err.split("outside")[0]
+        assert not logging.getLogger("spice_kernel_db").handlers
+
 
 class TestPublicApi:
     def test_all_matches_docs(self):

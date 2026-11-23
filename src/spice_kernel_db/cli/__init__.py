@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -53,12 +55,22 @@ def exit_code(exc: BaseException) -> int | None:
     return None
 
 
-def _log_handler() -> logging.Handler:
-    """The library's warnings as bare lines on stderr, what Python's own last-resort
-    handler printed before #49, so a long path is not wrapped or coloured."""
+@contextmanager
+def logging_to_stderr() -> Iterator[None]:
+    """For one CLI run, the library's warnings (INFO under ``-v``) as bare lines
+    on stderr, what Python's last-resort handler printed before #49, so a long
+    path is neither wrapped nor coloured. Removed on exit, so an embedding
+    process keeps its own logging. ``main()`` runs inside it, and so does a
+    host CLI that mounts ``app`` (planetarypy's ``plp``): part of the host
+    contract with ``app`` and ``exit_code``.
+    """
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(message)s"))
-    return handler
+    _LOG.addHandler(handler)
+    try:
+        yield
+    finally:
+        _LOG.removeHandler(handler)
 
 
 def _pkg_version() -> str:
@@ -152,10 +164,9 @@ def main(argv: list[str] | None = None) -> None:
     the way the argparse CLI did: 0 for ``--help`` and ``--version``, 2 for a
     usage error, 130 for Ctrl-C (Typer turns it into ``Exit(130)``).
     """
-    handler = _log_handler()
-    _LOG.addHandler(handler)  # for this run only: an embedding process keeps its own logging
     try:
-        rc = app(args=argv, prog_name="spice-kernel-db", standalone_mode=False)
+        with logging_to_stderr():
+            rc = app(args=argv, prog_name="spice-kernel-db", standalone_mode=False)
     except (AmbiguousMetakernel, AmbiguousKernelRoot, MetakernelNotTracked, ConfigError) as exc:
         # The one mapping for every command (#45), shared with host CLIs.
         print(str(exc), file=sys.stderr)
@@ -168,7 +179,5 @@ def main(argv: list[str] | None = None) -> None:
 
         rich_utils.rich_format_error(exc)
         sys.exit(exc.exit_code)
-    finally:
-        _LOG.removeHandler(handler)
     if isinstance(rc, int):  # Exit codes only; a command's return value is not one
         sys.exit(rc)

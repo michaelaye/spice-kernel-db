@@ -27,9 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CLI. `fetch_metakernel`, `list_remote_metakernels` and
   `resolve_kernel_urls` are no longer exported from the package (they stay
   in `spice_kernel_db.remote`). For a program that mounts the command tree
-  under its own CLI, `spice_kernel_db.cli.app` and
-  `spice_kernel_db.cli.exit_code(exc)` are the host contract (planetarypy's
-  `plp spice`).
+  under its own CLI, `spice_kernel_db.cli.app`,
+  `spice_kernel_db.cli.exit_code(exc)` and
+  `spice_kernel_db.cli.logging_to_stderr()` are the host contract
+  (planetarypy's `plp spice`).
 - **`check` answers three questions, each with its own exit bit** (#46).
   *present* (every listed kernel on disk, bit 1), *resolves* (every entry
   resolves through `PATH_VALUES` to the file the database knows, bit 2) and
