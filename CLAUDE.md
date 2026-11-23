@@ -120,7 +120,7 @@ The version string lives in **three** places and all three move together:
 - **`rattler-build` replaced `conda-build` here** (2026-10-26). It is a
   standalone Rust binary with no Python or conda-build dependency, so nothing
   has to live in `base` or in a work env. Installed via
-  `pixi global install rattler-build`, landing in `~/.pixi/bin`. The recipe is
+  `conda install -n base -c conda-forge rattler-build` (the earlier pixi install was gone by 2026-11-23), so the binary is `~/miniforge3/bin/rattler-build`. The recipe is
   `conda/recipe.yaml` in the v1 format (CEP 13/14); the old
   `conda/meta.yaml` and the `grayskull`/`anaconda-client` steps are gone.
 - The v1 format is also conda-forge's direction, so the recipe should mostly

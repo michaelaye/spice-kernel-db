@@ -14,7 +14,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/${{ pypi_name[0] }}/${{ pypi_name }}/${{ pypi_name }}-${{ version }}.tar.gz
-  sha256: 48ed589ffae61e2f25692a2e08ecb25ea632a934c5dac94682fd4f329ece9d45
+  sha256: a8efe45e1a3ca3cb680908d6ef65c0ab5c144df484e1ba1f422e261bcfb53aca
 
 build:
   noarch: python
