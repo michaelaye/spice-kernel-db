@@ -91,6 +91,7 @@ Tests use `pytest-tmp-files` for temporary directory fixtures. The main fixture 
 The version string lives in **three** places and all three move together:
 `pyproject.toml`, `conda/recipe.yaml` (`context.version`) and `CITATION.cff`.
 
+0. **Audit the README and the guide pages against the release before tagging.** The README is the PyPI page and the docs home; read it top to bottom and fix every statement the release makes stale: how the docs are built, the verbs and config keys the examples use, the Python examples (quiet library: `yes=True`, `console=`), the dependency list, the version note. (Michael, 2026-11-23: 0.30.0 shipped a README that still said the docs were built with Quarto and Python examples that no longer downloaded anything.)
 1. Commit all changes with descriptive messages
 2. Update the version in all three files above (minor for features, patch for fixes)
 3. Add entry to `CHANGELOG.md` (Keep a Changelog format) with comparison link at bottom
