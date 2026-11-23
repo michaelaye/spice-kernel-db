@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-11-23
+
+### Changed
+
+- The README opens with a note on what 0.30 changed at the command line
+  (renamed verbs and their old names, `update` with `--execute`, several
+  kernel roots, exit codes, the quiet library). 0.30.0 went to PyPI before
+  that note existed, so this release carries it to the PyPI page. No code
+  change.
+
 ## [0.30.0] - 2026-11-23
 
 The version jumps from 0.22.3 to 0.30.0 to mark the CLI redesign: there are
@@ -1420,7 +1430,8 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
-[Unreleased]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.1...HEAD
+[0.30.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.3...v0.30.0
 [0.22.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.1...v0.22.2
