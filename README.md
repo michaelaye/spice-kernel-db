@@ -4,6 +4,31 @@
 
 Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives.
 
+> **⚠️ 0.30 cleaned up the command line.** If you used spice-kernel-db before
+> 0.30, these are the changes you will meet (the version jumped from 0.22 to
+> mark them):
+>
+> - **Verbs were renamed:** `list` → `show`, `metakernels`/`mk` → `ls`,
+>   `resolve` and `aliases` → `which`, `duplicates` → `stats`, `verify` → `check`,
+>   `prune` → `clean`. The old names still run, print a one-line note, and go
+>   away in 1.0.
+> - **`update` walks every tracked metakernel** and reports; it downloads only
+>   with `--execute`. `get <name>` re-fetches one.
+> - **Several kernel roots:** `config.toml` holds `kernel_dirs = [...]` (a file
+>   with the old `kernel_dir` still loads). Where a download lands is derived
+>   from what is already on disk; there is no download target to configure.
+> - **Scripts can read the exit code:** `check` returns a sum of bits (1 a
+>   kernel missing, 2 an entry does not resolve, 4 differs from the server),
+>   an untracked name is 1, an ambiguous name or root is 2, a broken config
+>   file is 78; a missing argument shows a picker at a terminal and exits 2
+>   without one.
+> - **The library is quiet** and `spice_kernel_db.__all__` is its public API:
+>   `KernelDB(console=None)` prints nothing and downloads only with `yes=True`.
+>
+> The [CHANGELOG](https://github.com/michaelaye/spice-kernel-db/blob/main/CHANGELOG.md#0300---2026-11-23)
+> has the full list; the [docs](https://michaelaye.github.io/spice-kernel-db/)
+> are now generated from the code.
+
 > **⚠️ CRITICAL: Update to v0.10.0 or later.** Versions before 0.10.0 contained a
 > fuzzy filename matching bug that could silently create symlinks between
 > *completely different* SPICE kernel files, causing **silent scientific data
