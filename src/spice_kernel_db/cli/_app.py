@@ -37,6 +37,23 @@ app = typer.Typer(
 )
 
 
+class HiddenArgsCommand(typer.core.TyperCommand):
+    """A command whose hidden arguments stay out of the usage line too.
+
+    Typer hides a ``hidden=True`` argument from the Arguments panel but still
+    prints it in ``Usage:``; ``update`` keeps one for the pre-#47 form.
+    """
+
+    def collect_usage_pieces(self, ctx: typer.Context) -> list[str]:
+        hidden = {
+            piece
+            for param in self.get_params(ctx)
+            if param.param_type_name == "argument" and getattr(param, "hidden", False)
+            for piece in param.get_usage_pieces(ctx)
+        }
+        return [p for p in super().collect_usage_pieces(ctx) if p not in hidden]
+
+
 def rename_note(old: str, new: str) -> None:
     """The one line every old verb prints before running its new form (#47)."""
     print(f"note: '{old}' is now '{new}'", file=sys.stderr)

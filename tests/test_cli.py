@@ -1318,6 +1318,29 @@ class TestVerbTree:
             assert panel in out
         assert "browse & acquire" not in out and "transform" not in out
 
+    def test_help_pages_are_consistent(self):
+        """Every visible command points onward; metakernel arguments read
+        alike; a hidden argument stays out of the usage line."""
+        import click
+        import typer.main
+
+        from spice_kernel_db.cli import app
+
+        root = typer.main.get_command(app)
+        visible = {n: c for n, c in root.commands.items() if not c.hidden}
+        visible.update(
+            (f"mission {n}", c) for n, c in visible.pop("mission").commands.items())
+        for name, cmd in visible.items():
+            assert "See also" in (cmd.epilog or ""), name
+
+        def mk_help(name: str) -> str:
+            return next(p.help for p in visible[name].params if p.name == "metakernel")
+        assert mk_help("coverage") == mk_help("check") == mk_help("show")
+
+        update = visible["update"]
+        with click.Context(update, info_name="update") as ctx:
+            assert update.collect_usage_pieces(ctx) == ["[OPTIONS]"]
+
     # C17
     @pytest.mark.parametrize("old, new", [
         (("list", "juice_crema_5_2.tm"), ("show", "juice_crema_5_2.tm")),

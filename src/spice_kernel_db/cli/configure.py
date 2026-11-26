@@ -46,7 +46,8 @@ def _mission(ctx: typer.Context) -> None:
         print(f"Usage: spice-kernel-db mission {{{names}}}")
 
 
-@mission_app.command("add", help="Add a new mission (interactive when no arguments)")
+@mission_app.command("add", epilog="See also: mission list, browse",
+                     help="Add a new mission (interactive when no arguments)")
 def mission_add(
     ctx: typer.Context,
     name: Annotated[Optional[str], typer.Argument(
@@ -68,7 +69,8 @@ def mission_add(
             _mission_add_interactive(db, no_dedup)
 
 
-@mission_app.command("list", help="List configured missions")
+@mission_app.command("list", epilog="See also: mission add, ls",
+                     help="List configured missions")
 def mission_list(ctx: typer.Context) -> None:
     with open_db(ctx) as db:
         missions = db.list_missions()
@@ -87,7 +89,8 @@ def mission_list(ctx: typer.Context) -> None:
     console.print(table)
 
 
-@mission_app.command("remove", help="Remove a mission")
+@mission_app.command("remove", epilog="See also: mission list, rm",
+                     help="Remove a mission")
 def mission_remove(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Mission name to remove")],
@@ -137,7 +140,8 @@ def _show_config(cfg: Config) -> None:
     print()
 
 
-@app.command(rich_help_panel=CONFIGURE, help="Show or update configuration")
+@app.command(rich_help_panel=CONFIGURE, epilog="See also: mission add, scan",
+             help="Show or update configuration")
 def config(
     ctx: typer.Context,
     setup: Annotated[bool, typer.Option(
@@ -190,7 +194,8 @@ def _require_config_key(cfg, key: str) -> None:
         sys.exit(1)
 
 
-@app.command(rich_help_panel=MAINTAIN, help="Delete the database and start fresh")
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: doctor, clean",
+             help="Delete the database and start fresh")
 def reset(
     ctx: typer.Context,
     yes: Annotated[bool, typer.Option(

@@ -78,7 +78,8 @@ def import_(
               f"mission's server is configured.")
 
 
-@app.command(rich_help_panel=MAINTAIN, help="Rewrite a metakernel with a local symlink tree")
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: check, which",
+             help="Rewrite a metakernel with a local symlink tree")
 def rewrite(
     ctx: typer.Context,
     metakernel: Annotated[Optional[str], typer.Argument(
@@ -171,7 +172,8 @@ def prune(
           delete_files=delete_files)
 
 
-@app.command(rich_help_panel=MAINTAIN, help="Deduplicate kernel files using symlinks")
+@app.command(rich_help_panel=MAINTAIN, epilog="See also: stats, clean",
+             help="Deduplicate kernel files using symlinks (dry run unless --execute)")
 def dedup(
     ctx: typer.Context,
     execute: Annotated[bool, typer.Option(

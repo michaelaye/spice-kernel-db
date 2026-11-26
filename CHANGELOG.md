@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `KernelDB.coverage_metakernel` then tried to cache its results. It now
   skips the cache on a read-only database and only returns the results, so
   `coverage` also works while another reader holds the database open.
+- `--help` caught up with the 0.30 CLI rework where it had lagged:
+  `coverage` describes its metakernel argument as the other commands do
+  (it accepts a versionless base name too), `update`'s usage line no longer
+  shows the hidden `[metakernel]` kept for the old `update <name>` form,
+  `dedup` says it is a dry run unless `--execute`, and every visible
+  command, `mission add/list/remove` included, ends with a "See also" line.
 
 ## [0.30.1] - 2026-11-23
 

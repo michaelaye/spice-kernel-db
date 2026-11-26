@@ -212,13 +212,13 @@ def doctor(
         sys.exit(1)
 
 
-@app.command(rich_help_panel=INSPECT, help="Check SPK body coverage in a metakernel")
+@app.command(rich_help_panel=INSPECT, epilog="See also: show, check, which",
+             help="Check SPK body coverage in a metakernel")
 def coverage(
     ctx: typer.Context,
     body: Annotated[str, typer.Argument(
         help="NAIF body ID (e.g. 399) or name (e.g. Earth, Mars)")],
-    metakernel: Annotated[Optional[str], typer.Argument(
-        help="Path to .tm file or registry filename (omit to select interactively)")] = None,
+    metakernel: MetakernelArg = None,
     mission: Annotated[Optional[str], typer.Option(
         "--mission", help="Preferred mission for kernel resolution")] = None,
 ) -> None:

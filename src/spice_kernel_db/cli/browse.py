@@ -14,7 +14,7 @@ from spice_kernel_db.db import AmbiguousKernelRoot, KernelDB, MetakernelUnreacha
 from spice_kernel_db.hashing import guess_mission
 from spice_kernel_db.remote import Probe, ProbeResult, probe_url
 
-from ._app import ACQUIRE, app, open_db, rename_note, state
+from ._app import ACQUIRE, HiddenArgsCommand, app, open_db, rename_note, state
 from .prompts import (
     INVALID,
     _interactive_select_metakernel,
@@ -249,6 +249,7 @@ def _refetch(db: KernelDB, name: str, **kwargs) -> None:
 
 
 @app.command(rich_help_panel=ACQUIRE, epilog="See also: get, check",
+             cls=HiddenArgsCommand,
              help="Re-fetch every tracked metakernel from its source and report "
                   "what would change; downloads only with --execute")
 def update(
