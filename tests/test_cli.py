@@ -1321,7 +1321,7 @@ class TestVerbTree:
     def test_help_pages_are_consistent(self):
         """Every visible command points onward; metakernel arguments read
         alike; a hidden argument stays out of the usage line."""
-        import click
+        import typer
         import typer.main
 
         from spice_kernel_db.cli import app
@@ -1338,7 +1338,8 @@ class TestVerbTree:
         assert mk_help("coverage") == mk_help("check") == mk_help("show")
 
         update = visible["update"]
-        with click.Context(update, info_name="update") as ctx:
+        # typer.Context, not click: Typer 0.29 vendors Click, and CI has no click.
+        with typer.Context(update, info_name="update") as ctx:
             assert update.collect_usage_pieces(ctx) == ["[OPTIONS]"]
 
     # C17
