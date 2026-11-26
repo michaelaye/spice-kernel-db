@@ -93,7 +93,9 @@ The command prints two things:
 
 ## The kernel_coverage table
 
-Coverage results are automatically cached in the database's `kernel_coverage` table. Since kernels are content-addressed (identified by SHA-256), coverage data computed once is reusable across missions and sessions.
+When `coverage_metakernel` runs on a writable database, it caches the SPK results in the database's `kernel_coverage` table. Since kernels are content-addressed (identified by SHA-256), coverage data computed once is reusable across missions and sessions.
+
+On a `KernelDB(read_only=True)` database the cache write is skipped and the results are only returned. The `skd coverage` command opens the database read-only, so it never writes the cache; it always reads coverage from the SPK files.
 
 The table stores individual intervals per body per kernel:
 

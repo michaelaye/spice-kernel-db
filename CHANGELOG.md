@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `skd coverage` no longer fails with "Cannot execute statement of type
+  DELETE ... read-only mode" (#42). The command opens the database read-only,
+  and `KernelDB.coverage_metakernel` then tried to cache its results. It now
+  skips the cache on a read-only database and only returns the results, so
+  `coverage` also works while another reader holds the database open.
+
 ## [0.30.1] - 2026-11-23
 
 ### Changed

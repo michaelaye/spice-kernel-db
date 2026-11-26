@@ -4855,8 +4855,10 @@ class KernelDB:
         """Check body coverage for all SPK kernels in a metakernel.
 
         Follows the ``check_metakernel`` pattern: parse → resolve → classify
-        → delegate to ``coverage.check_coverage()``. Results are stored in
-        the ``kernel_coverage`` table.
+        → delegate to ``coverage.check_coverage()``. On a writable database
+        the SPK results are cached in the ``kernel_coverage`` table, where
+        ``query_coverage`` reads them; on a ``read_only=True`` database the
+        cache write is skipped and the results are only returned.
 
         If *mk_path* does not exist on disk, falls back to looking up the
         filename in metakernel_registry.
@@ -4891,7 +4893,10 @@ class KernelDB:
             lsk_path=lsk_path,
         )
 
-        # Store coverage in DB
+        if self.read_only:
+            return results
+
+        # Cache coverage in the DB
         for res in results:
             if res.intervals and res.kernel_type == "spk":
                 # Look up sha256 for the resolved path

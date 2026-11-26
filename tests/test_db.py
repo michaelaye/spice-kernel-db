@@ -998,6 +998,26 @@ class TestCoverage:
         # de432s.bsp, jup365_*.bsp, juice_crema_*.bsp = 3 SPK files
         assert len(spk_results) == 3
         assert all(r.body_found for r in spk_results)
+        # A writable database caches what it computed (one interval per SPK).
+        assert len(populated_db.query_coverage(399)) == 3
+
+    def test_coverage_metakernel_read_only(
+        self, populated_db, tmp_spice_tree,
+    ):
+        """A read-only database computes coverage and skips the cache (#42)."""
+        from spice_kernel_db.coverage import CoverageInterval
+
+        mk = tmp_spice_tree / "JUICE" / "kernels" / "mk" / "juice_test.tm"
+        db_path = populated_db.db_path
+        populated_db.close()
+
+        with patch(
+            "spice_kernel_db.coverage.spk_coverage",
+            return_value=[CoverageInterval(et_start=0.0, et_end=1e8)],
+        ), KernelDB(db_path, read_only=True) as ro:
+            results = ro.coverage_metakernel(mk, body_id=399, mission="JUICE")
+            assert sum(r.body_found for r in results) == 3
+            assert ro.query_coverage(399) == []
 
     def test_store_and_query_coverage(self, populated_db):
         """store_coverage persists, query_coverage retrieves."""
