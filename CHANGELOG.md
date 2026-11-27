@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `clean --registry` deleted the row of a versioned snapshot the server had
+  only moved to `mk/former_versions/`, because its old URL answers 404 (#59).
+  It now probes the `former_versions/` copy first and keeps such rows, naming
+  them in the output; a probe that gets no answer keeps the row too.
 - `get` of a metakernel from `former_versions/` wrote a `.tm` whose
   `PATH_VALUES` pointed one directory too high, so its kernels did not load
   (#58). It is now kept in the local `mk/former_versions/`, as on the server.

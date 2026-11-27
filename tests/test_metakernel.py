@@ -1160,6 +1160,45 @@ class TestPruneMetakernels:
         assert paths[0].exists()
         db.close()
 
+    def test_snapshot_moved_to_former_versions_is_kept(self, tmp_path):
+        """#59: a 404 at mk/ whose copy answers in mk/former_versions/ is
+        archived, not gone, so its row stays (update reports it, #58)."""
+        db, _ = self._seed(tmp_path, [
+            ("snap_v2.tm", "https://naif.example/mk/snap_v2.tm"),
+            ("gone.tm", "https://naif.example/mk/gone.tm"),
+        ])
+        archive = "https://naif.example/mk/former_versions/snap_v2.tm"
+        seen = []
+
+        def head_responses(req, *args, **kwargs):
+            seen.append(req.full_url)
+            if req.full_url == archive:
+                return MagicMock(__enter__=MagicMock(return_value=MagicMock()),
+                                 __exit__=MagicMock(return_value=False))
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+        with patch("urllib.request.urlopen", side_effect=head_responses):
+            dead = db.prune_metakernels(dry_run=False)
+        assert [d["filename"] for d in dead] == ["gone.tm"]
+        assert archive in seen
+        rows = db.con.execute("SELECT filename FROM metakernel_registry").fetchall()
+        assert rows == [("snap_v2.tm",)]
+        db.close()
+
+    def test_unreachable_archive_probe_does_not_remove_row(self, tmp_path):
+        """A 404 at mk/ with no answer from former_versions/ is unknown, not gone."""
+        db, _ = self._seed(tmp_path, [("snap_v2.tm", "https://naif.example/mk/snap_v2.tm")])
+
+        def head_responses(req, *args, **kwargs):
+            if "former_versions" in req.full_url:
+                raise urllib.error.URLError(TimeoutError())
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+        with patch("urllib.request.urlopen", side_effect=head_responses):
+            assert db.prune_metakernels(dry_run=False) == []
+        assert db.con.execute("SELECT COUNT(*) FROM metakernel_registry").fetchone()[0] == 1
+        db.close()
+
     def test_5xx_is_not_dead(self, tmp_path):
         db, paths = self._seed(tmp_path, [
             ("transient.tm", "https://flaky.example/x.tm"),
@@ -1212,7 +1251,9 @@ class TestPruneMetakernelsNullSourceUrl:
             dead = db.prune_metakernels(dry_run=True)
 
         # URL was derived from mission.mk_dir_url + filename
-        assert seen_urls == ["https://example.org/JUICE/kernels/mk/v462.tm"]
+        # then, after the 404, its former_versions/ copy (#59)
+        assert seen_urls == ["https://example.org/JUICE/kernels/mk/v462.tm",
+                             "https://example.org/JUICE/kernels/mk/former_versions/v462.tm"]
         assert len(dead) == 1
         assert dead[0]["filename"] == "v462.tm"
         assert dead[0]["status_code"] == 404

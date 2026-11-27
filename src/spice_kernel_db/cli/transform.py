@@ -139,8 +139,8 @@ def clean(
         help="Dangling symlinks under each mission's download tree")] = False,
     registry: Annotated[bool, typer.Option(
         "--registry",
-        help="Tracked metakernels whose source URL answers 403/404/410 "
-             "(the only class that contacts the server)")] = False,
+        help="Tracked metakernels whose source URL answers 403/404/410 and that "
+             "have no copy in former_versions/ (the only class that contacts the server)")] = False,
     delete_files: Annotated[bool, typer.Option(
         "--delete-files",
         help="With --registry --execute: also unlink the on-disk .tm files")] = False,

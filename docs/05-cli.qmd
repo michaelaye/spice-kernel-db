@@ -653,7 +653,7 @@ skd clean [--execute] [--locations] [--symlinks] [--registry] [--delete-files]
 | `--execute` | Actually remove entries. Default: report only. |
 | `--locations` | Kernel locations whose file no longer exists on disk, then kernel rows left with no location. |
 | `--symlinks` | Dangling symlinks under each mission's download tree. The tree is derived from the tracked metakernels (the parent of each `mk/` directory) and walked recursively. These accumulate when an underlying kernel store moves, or after `--locations` removes a location row. |
-| `--registry` | Tracked metakernels whose source URL answers 403, 404 or 410. Sends one HEAD request per row to its source URL, or to the mission's `mk/` URL plus the filename when no source URL is stored; a row with neither is noted and skipped (`rm` drops it). **The only class that contacts the server.** |
+| `--registry` | Tracked metakernels whose source URL answers 403, 404 or 410 and that have no copy in the server's `mk/former_versions/` either; a snapshot the server only moved there is kept and named in the output (`update` lists it as archived). Sends one HEAD request per row to its source URL, or to the mission's `mk/` URL plus the filename when no source URL is stored; a row with neither is noted and skipped (`rm` drops it). **The only class that contacts the server.** |
 | `--delete-files` | With `--registry --execute`: also unlink the `.tm` files on disk. |
 
 Without a class flag, `--locations` and `--symlinks` run, the two classes that need no network. With one or more class flags, only the named classes run, so the classes can be combined.

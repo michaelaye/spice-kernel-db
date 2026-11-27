@@ -4920,9 +4920,9 @@ class KernelDB:
     ) -> list[dict]:
         """Find registry rows whose remote URL is permanently gone and optionally remove them.
 
-        A HEAD request is sent to each row's URL, and a permanent HTTP error (403, 404 or 410) marks
-        the row as dead. This typically happens when NAIF rotates old versioned snapshots into
-        ``former_versions/``.
+        A HEAD request is sent to each row's URL. A permanent HTTP error (403, 404 or 410) marks the
+        row as dead only when the same file is absent from the server's ``mk/former_versions/`` too:
+        NAIF and ESA move superseded versioned snapshots there, and such a row is kept (#59).
 
         The probe URL is derived per row: the explicit ``source_url`` if set, otherwise
         ``mission.mk_dir_url + filename`` (the same fallback as ``update_metakernel``). Rows with
@@ -4982,6 +4982,7 @@ class KernelDB:
 
         dead: list[dict] = []
         no_url: list[dict] = []
+        archived: list[str] = []
         with Progress(
             transient=True,
         ) as progress:
@@ -5014,19 +5015,33 @@ class KernelDB:
                     with urllib.request.urlopen(req, timeout=timeout):
                         continue  # alive
                 except urllib.error.HTTPError as e:
-                    if e.code in (403, 404, 410):
-                        dead.append({
-                            "mk_path": mk_path,
-                            "filename": filename,
-                            "mission": mission,
-                            "source_url": effective_url,
-                            "status_code": e.code,
-                        })
-                    else:
+                    if e.code not in (403, 404, 410):
                         logger.warning(
                             "HEAD %s returned HTTP %d — not pruning",
                             effective_url, e.code,
                         )
+                        continue
+                    if not is_archive_url(effective_url):
+                        # NAIF and ESA move superseded snapshots to
+                        # mk/former_versions/; there the file still exists (#59).
+                        moved_url = archive_url(effective_url)
+                        moved = probe_url(moved_url, timeout=timeout)
+                        if moved.ok:
+                            archived.append(filename)
+                            continue
+                        if moved.unreachable:
+                            logger.warning(
+                                "HEAD %s failed (%s) — not pruning, may be transient",
+                                moved_url, moved.detail,
+                            )
+                            continue
+                    dead.append({
+                        "mk_path": mk_path,
+                        "filename": filename,
+                        "mission": mission,
+                        "source_url": effective_url,
+                        "status_code": e.code,
+                    })
                 except (urllib.error.URLError, OSError) as e:
                     logger.warning(
                         "HEAD %s failed (%s) — not pruning, may be transient",
@@ -5038,6 +5053,13 @@ class KernelDB:
                 f"[dim]{len(no_url)} row(s) had no probeable URL "
                 f"(no source_url and no mission mk_dir_url). "
                 f"Use `spice-kernel-db rm <name>` to drop them manually.[/dim]"
+            )
+
+        if archived:
+            self._show(
+                f"[dim]{len(archived)} metakernel(s) moved to former_versions/ on the "
+                f"server, kept: {', '.join(archived)}. `spice-kernel-db update` "
+                f"lists them as archived.[/dim]"
             )
 
         if not dead:
