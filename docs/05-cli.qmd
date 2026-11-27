@@ -268,9 +268,10 @@ Kernel sizes: 1515 from today's cache, 0 asked the server (--refresh asks for al
 Dry run: pass --execute to download.
 ```
 
-- Alias rows, where a symlink stands next to its target, are skipped. The target is walked under its own name.
+- An alias is a symlink such as `bc_stp.tm` that points at a versioned snapshot such as `bc_stp_v434_20261024_001.tm`. `update` compares it with the server's `mk/` listing. When the server lists a newer snapshot of that name, the dry run notes `update available: <old> → <new>` together with the kernels the new version would need. `--execute` fetches the new snapshot and points the alias at it, without asking. An alias that is current gets no row.
+- NAIF and ESA move a versioned snapshot to `mk/former_versions/` once a newer one is out. `update` finds it there, notes `archived on the server` and still checks its kernels. When no alias points at the snapshot any more (counting the alias updates of the same run), `--execute` asks once, for all such snapshots, whether to move the local copies to `mk/former_versions/` as well. They keep working there, since their `PATH_VALUES` are absolute. A yes moves each file and its registry row, and downloads what the snapshot is missing; a no leaves them in `mk/` with the note `kept in mk/`. In Python, `update_all(archive=True)` or `archive=False` answers the question in advance.
 - A row with no stored source URL is fetched from the mission's `mk/` URL plus the filename. If the mission has no `mk/` URL, the row gets a note in the summary table.
-- A source that answers 403, 404 or 410 gets a note in the summary table (`source gone (HTTP 404): skd clean --registry`) and the walk goes on. The exit code stays 0.
+- A source that answers 403, 404 or 410 and has no copy in `former_versions/` either gets a note in the summary table (`source gone (HTTP 404): skd clean --registry`) and the walk goes on. The exit code stays 0.
 - A source that cannot be reached at all is noted the same way and does not stop the walk.
 
 Use `get <name>` to update one metakernel.

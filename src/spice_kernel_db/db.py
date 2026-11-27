@@ -47,12 +47,17 @@ from spice_kernel_db.parser import (
     write_metakernel,
 )
 from spice_kernel_db.remote import (
+    ARCHIVE_DIR,
     SPICE_SERVERS,
+    archive_url,
+    is_archive_url,
     SizeCache,
     download_kernel,
     download_kernels_parallel,
     _fetch_metakernel,
+    RemoteMetakernel,
     list_remote_metakernels,
+    probe_url,
     list_remote_missions,
     query_remote_sizes,
     server_label_for,
@@ -2958,6 +2963,7 @@ class KernelDB:
         mission: str,
         source_url: str,
         alias_filename: str,
+        quiet: bool = False,
     ) -> None:
         """Create a symlink ``alias_path → target.name`` and register it.
 
@@ -2985,9 +2991,8 @@ class KernelDB:
             (mk_path, mission, source_url, filename, acquired_at)
             VALUES (?, ?, ?, ?, current_timestamp)
         """, [str(alias_path), mission, source_url, alias_filename])
-        self._show(
-            f"  Created alias [bold]{alias_filename}[/bold] → {target.name}"
-        )
+        if not quiet:
+            self._show(f"  Created alias [bold]{alias_filename}[/bold] → {target.name}")
 
     def get_metakernel(
         self,
@@ -3129,7 +3134,11 @@ class KernelDB:
         # Auto-detect an HTTP-redirect alias the caller did not pass explicitly
         if alias_filename is None and requested_filename != mk_filename:
             alias_filename = requested_filename
-        mk_dest = download_dir / mission / "mk" / mk_filename
+        # A metakernel the server moved to mk/former_versions/ is kept there
+        # locally too (#58): its PATH_VALUES ('../..') assume that depth, and the
+        # archived versions stay apart from the live ones, as on the server.
+        mk_dest = (download_dir / mission / "mk" / (ARCHIVE_DIR if is_archive_url(final_url) else "")
+                   / mk_filename)
 
         # Resolve each PATH_VALUE relative to the mk/ directory and make absolute
         # Validate that resolved paths stay within download_dir (Issue 1)
@@ -3153,7 +3162,7 @@ class KernelDB:
             if alias_filename and alias_filename != mk_filename:
                 alias_path = mk_dir / alias_filename
                 self._create_metakernel_alias(
-                    alias_path, mk_dest, mission, url, alias_filename,
+                    alias_path, mk_dest, mission, url, alias_filename, quiet=quiet,
                 )
 
             # 1c. Write .spice-server marker for scan auto-detection
@@ -3645,8 +3654,55 @@ class KernelDB:
                 f"for updated kernels.[/dim]"
             )
 
+    def _newer_alias_target(self, alias: RegistryRow, listings: dict) -> RemoteMetakernel | None:
+        """The newest versioned snapshot the server lists under *alias*'s name, if the alias
+        does not point at it already (#58). ``None`` when the listing cannot be read.
+
+        *listings* caches one directory listing per ``mk/`` URL for the walk.
+        """
+        source = alias.source_url or ""
+        mk_dir_url = source.rsplit("/", 1)[0] + "/" if source else None
+        if mk_dir_url and mk_dir_url.rstrip("/").endswith(ARCHIVE_DIR):
+            mk_dir_url = mk_dir_url.rstrip("/").rsplit("/", 1)[0] + "/"
+        if not mk_dir_url:
+            m = self.get_mission(alias.mission) if alias.mission else None
+            mk_dir_url = m.get("mk_dir_url") if m else None
+        if not mk_dir_url:
+            return None
+        if mk_dir_url not in listings:
+            try:
+                listings[mk_dir_url] = list_remote_metakernels(mk_dir_url)
+            except (OSError, http.client.HTTPException) as exc:
+                logger.debug("Could not list %s: %s", mk_dir_url, exc)
+                listings[mk_dir_url] = []
+        snapshots = [e for e in listings[mk_dir_url]
+                     if e.base_name == alias.filename and e.version_tag]
+        if not snapshots:
+            return None
+        newest = max(snapshots, key=lambda e: (e.date, e.version_tag))
+        current = Path(os.readlink(alias.mk_path)).name
+        return None if newest.filename == current else newest
+
+    def _archive_local_copy(self, row: RegistryRow, url: str) -> Path:
+        """Move a tracked metakernel into ``mk/former_versions/``, as the server did (#58).
+
+        The ``.tm`` carries absolute ``PATH_VALUES``, so the moved file loads as before. Its
+        registry row and entries follow it, with *url* (the archive URL) as the new source.
+        """
+        src = Path(row.mk_path)
+        dest = src.parent / ARCHIVE_DIR / src.name
+        if dest.exists():
+            raise FileExistsError(f"{dest} already exists")
+        dest.parent.mkdir(exist_ok=True)
+        src.rename(dest)
+        self.con.execute("DELETE FROM metakernel_entries WHERE mk_path = ?", [str(src)])
+        self.con.execute("DELETE FROM metakernel_registry WHERE mk_path = ?", [str(src)])
+        self._track_metakernel(dest, row.mission, url, official=row.official)
+        return dest
+
     def update_all(
         self, dry_run: bool = False, verbose: bool = False, refresh: bool = False,
+        archive: bool | None = None,
     ) -> list[dict]:
         """Re-fetch every tracked metakernel from its source, as ``skd update`` does (#47).
 
@@ -3658,38 +3714,64 @@ class KernelDB:
         URL not seen yet today is still asked. Each metakernel's ``.tm`` is fetched on every call,
         so a new version is always noticed. ``refresh=True`` asks the server for every size.
 
-        With ``dry_run`` each metakernel's status table is shown and nothing is written to the
-        database or the kernel roots (only the size cache file). Otherwise the
-        missing kernels are downloaded without a per-metakernel prompt (the CLI's ``--execute`` is
-        the confirmation), and the directories the metakernels point at are re-indexed once at the
-        end. The ``skd update`` command passes ``dry_run=True`` unless ``--execute`` is given.
+        With ``dry_run`` nothing is written to the database or the kernel roots (only the size
+        cache file); the summary says what would happen. Otherwise the missing kernels are
+        downloaded without a per-metakernel prompt (the CLI's ``--execute`` is the confirmation),
+        and the directories the metakernels point at are re-indexed once at the end. The ``skd
+        update`` command passes ``dry_run=True`` unless ``--execute`` is given.
 
-        Alias rows, where a symlink stands next to its target, are skipped. A source that has gone
-        from the server, a source that cannot be reached, and a row with no source URL are reported
-        in the summary table and never raise.
+        Aliases and archived versions (#58):
+
+        - An alias, a symlink such as ``bc_stp.tm`` next to a versioned snapshot, is checked
+          against the server's ``mk/`` listing. When a newer snapshot of that name is listed, the
+          dry run reports the update as available and a real run fetches the snapshot and points
+          the alias at it. An alias that is current is not listed.
+        - A versioned snapshot the server moved to ``mk/former_versions/`` is reported as archived
+          and its kernels are checked against the archived copy. When no alias points at it any
+          more, a real run offers, in one question for all of them, to move the local copy to
+          ``mk/former_versions/`` too. Its absolute ``PATH_VALUES`` keep it loadable there.
+
+        A source that is gone from both places, a source that cannot be reached, and a row with no
+        source URL are reported in the summary table and never raise.
 
         Parameters
         ----------
         dry_run : bool, default False
             Show what would be downloaded and write nothing.
         verbose : bool, default False
-            Name each directory as it is rescanned.
+            Print each metakernel's status table and name each directory as it is rescanned.
         refresh : bool, default False
             Ignore today's cached sizes and ask the server for all of them (``skd update
             --refresh``). The answers are cached again.
+        archive : bool | None, default None
+            Whether a real run moves archived, un-aliased snapshots to ``mk/former_versions/``.
+            ``None`` asks on the console, and with no console the answer is no.
 
         Returns
         -------
         list[dict]
-            One dict per registry row walked, with the keys ``filename``, ``mission``, ``count``,
-            ``missing_kernels`` (``(filename, size)`` pairs) and
-            ``error``. ``count`` is the number of missing kernels in a dry run and the number of
-            downloaded kernels otherwise. ``error`` is ``None`` or a one-line reason.
+            One dict per row in the summary, with the keys ``filename``, ``mission``, ``count``,
+            ``missing_kernels`` (``(filename, size)`` pairs), ``note`` and ``error``. ``count`` is
+            the number of missing kernels in a dry run and the number of downloaded kernels
+            otherwise. ``note`` names an alias update or an archived snapshot; ``error`` is
+            ``None`` or a one-line reason.
         """
         report: list[dict] = []
         scan_dirs: dict[Path, str] = {}
         size_cache = SizeCache(Path(self.db_path).parent / "remote_sizes.json", refresh=refresh)
-        rows = [r for r in self.registry_rows() if not Path(r.mk_path).is_symlink()]
+        all_rows = self.registry_rows()
+        aliases = [r for r in all_rows if Path(r.mk_path).is_symlink()]
+        rows = [r for r in all_rows if not Path(r.mk_path).is_symlink()]
+        listings: dict = {}
+        archived: list[tuple[RegistryRow, str, dict]] = []  # row, archive URL, report entry
+        left_behind: set[Path] = set()  # snapshots an alias update moves away from
+
+        def record(entry: dict, result: dict) -> None:
+            entry["count"] = len(result["missing" if dry_run else "downloaded"])
+            entry["missing_kernels"] = result.get("missing_kernels", [])
+            for sd in result.get("scan_dirs", ()):
+                scan_dirs.setdefault(sd, entry["mission"])
+
         # A live bar while the metakernels are checked, the current one named on
         # the line below (#57); a download bar nests inside it. --verbose prints
         # each metakernel's full status table.
@@ -3700,30 +3782,104 @@ class KernelDB:
             MofNCompleteColumn(),
             console=self.console, disable=self.console is None, transient=True,
         ) as progress:
-            task_id = progress.add_task("Checking metakernels", total=len(rows), name="")
+            task_id = progress.add_task(
+                "Checking metakernels", total=len(aliases) + len(rows), name="")
+            # Aliases first: a real run repoints them before the archive question,
+            # so the snapshot an alias left behind counts as un-aliased.
+            for alias in aliases:
+                progress.update(task_id, name=alias.filename)
+                newer = self._newer_alias_target(alias, listings)
+                progress.advance(task_id)
+                if newer is None:
+                    continue
+                entry = {"filename": alias.filename, "mission": alias.mission, "count": 0,
+                         "missing_kernels": [], "note": None, "error": None}
+                current = Path(os.readlink(alias.mk_path)).name
+                left_behind.add(Path(alias.mk_path).resolve())
+                try:
+                    result = self.get_metakernel(
+                        newer.url, download_dir=self.root_for(alias.mission, alias.mk_path),
+                        mission=alias.mission, yes=True, dry_run=dry_run,
+                        alias_filename=alias.filename, size_cache=size_cache,
+                        quiet=not verbose, verbose=verbose,
+                    )
+                    record(entry, result)
+                    entry["note"] = (f"update available: {current} → {newer.filename}" if dry_run
+                                     else f"now → {newer.filename} (was {current})")
+                except (LookupError, ValueError, urllib.error.URLError, OSError) as e:
+                    entry["error"] = f"alias update to {newer.filename} failed: {e}"
+                report.append(entry)
+
             for row in rows:
                 progress.update(task_id, name=row.filename)
-                entry = {"filename": row.filename, "mission": row.mission,
-                         "count": 0, "missing_kernels": [], "error": None}
+                entry = {"filename": row.filename, "mission": row.mission, "count": 0,
+                         "missing_kernels": [], "note": None, "error": None}
                 if verbose:
                     self._show(f"\n[bold]{row.filename}[/bold] ({row.mission})")
                 try:
-                    result = self.update_metakernel(
+                    record(entry, self.update_metakernel(
                         row.mk_path, yes=True, verbose=verbose, dry_run=dry_run, rescan=False,
                         size_cache=size_cache, quiet=not verbose,
-                    )
-                    entry["count"] = len(result["missing" if dry_run else "downloaded"])
-                    entry["missing_kernels"] = result.get("missing_kernels", [])
-                    for sd in result.get("scan_dirs", ()):
-                        scan_dirs.setdefault(sd, row.mission)
+                    ))
                 except MetakernelUnreachableError as e:
-                    entry["error"] = f"source gone (HTTP {e.status}): skd clean --registry"
+                    archive_at = archive_url(e.url)
+                    if is_archive_url(e.url) or not probe_url(archive_at).ok:
+                        entry["error"] = f"source gone (HTTP {e.status}): skd clean --registry"
+                    else:
+                        entry["note"] = "archived on the server"
+                        try:  # what the archived copy still needs, written nowhere
+                            record(entry, self.get_metakernel(
+                                archive_at, download_dir=self.root_for(row.mission, row.mk_path),
+                                mission=row.mission, dry_run=True, quiet=True,
+                                size_cache=size_cache,
+                            ))
+                            if not dry_run:
+                                entry["count"] = 0  # nothing downloaded for it yet
+                        except (LookupError, ValueError, urllib.error.URLError, OSError) as exc:
+                            logger.debug("Archived copy %s unreadable: %s", archive_at, exc)
+                        archived.append((row, archive_at, entry))
                 except LookupError as e:
                     entry["error"] = str(e)
                 except (urllib.error.URLError, OSError) as e:
                     entry["error"] = f"could not reach the source: {e}"
                 report.append(entry)
                 progress.advance(task_id)
+
+        # The offer to archive locally (#58): only snapshots no alias points at
+        # now. A dry run counts the alias updates it reported as done.
+        alias_targets = {Path(a.mk_path).resolve() for a in self.registry_rows()
+                         if Path(a.mk_path).is_symlink()}
+        if dry_run:
+            alias_targets -= left_behind
+        offer = [(r, u, e) for r, u, e in archived
+                 if Path(r.mk_path).resolve() not in alias_targets]
+        offered = {id(e) for _, _, e in offer}
+        for _, _, e in archived:
+            if id(e) not in offered:
+                e["note"] += "; an alias still points at it"
+        if dry_run:
+            for _, _, e in offer:
+                e["note"] += f"; --execute offers to move it to mk/{ARCHIVE_DIR}/"
+        elif offer:
+            names = "\n".join(f"  {r.filename}" for r, _, _ in offer)
+            move = archive if archive is not None else self._confirm(
+                f"\nThe server moved these to mk/{ARCHIVE_DIR}/:\n{names}\n"
+                f"Move the local copies there too? They stay usable. [y/N]: "
+            )
+            for row, url, entry in offer:
+                if not move:
+                    entry["note"] += "; kept in mk/"
+                    continue
+                try:
+                    dest = self._archive_local_copy(row, url)
+                    record(entry, self.get_metakernel(
+                        url, download_dir=self.root_for(row.mission, str(dest)),
+                        mission=row.mission, yes=True, quiet=not verbose, size_cache=size_cache,
+                    ))
+                    entry["note"] = f"moved to mk/{ARCHIVE_DIR}/, as on the server"
+                except (FileExistsError, LookupError, ValueError,
+                        urllib.error.URLError, OSError) as e:
+                    entry["error"] = f"could not move it to mk/{ARCHIVE_DIR}/: {e}"
 
         for sd, mission in sorted(scan_dirs.items()):
             self._rescan({sd}, mission, verbose=verbose)
@@ -3739,7 +3895,8 @@ class KernelDB:
             size = sum(sz or 0 for _, sz in missing)
             table.add_row(e["mission"] or "", e["filename"],
                           "" if e["error"] else str(e["count"]),
-                          _format_size(size) if missing else "", e["error"] or "")
+                          _format_size(size) if missing else "",
+                          e["error"] or e["note"] or "")
             if dry_run:  # name what a dry run would fetch, under its metakernel
                 for fname, sz in missing:
                     table.add_row("", f"[dim]  {fname}[/dim]", "",

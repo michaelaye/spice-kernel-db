@@ -5,6 +5,7 @@ Split out of the former tests/test_kernel_db.py.
 
 from __future__ import annotations
 import logging
+import os
 import shutil
 import textwrap
 import urllib.error
@@ -1726,3 +1727,112 @@ class TestVerifyAgainstServer:
                 main(["check", str(mk), "--spice"])
         assert exc.value.code == 2
         assert "needs --remote" in capsys.readouterr().err
+
+
+class TestArchivedMetakernel:
+    """A metakernel ESA moved to ``mk/former_versions/`` (#58).
+
+    The archived copy says ``PATH_VALUES = ( '../..' )``, one level deeper than
+    the live one, so the local copy belongs in ``mk/former_versions/`` too.
+    """
+
+    ARCHIVE_URL = "https://example.com/JUICE/kernels/mk/former_versions/juice_x_v001.tm"
+    TEXT = (
+        "\\begindata\nPATH_VALUES = ( '../..' )\nPATH_SYMBOLS = ( 'KERNELS' )\n"
+        "KERNELS_TO_LOAD = ( '$KERNELS/lsk/naif0012.tls' )\n\\begintext\n"
+    )
+
+    def _db(self, tmp_path):
+        root = tmp_path / "kernels"
+        lsk = root / "JUICE" / "lsk" / "naif0012.tls"
+        lsk.parent.mkdir(parents=True)
+        lsk.write_text("LSK CONTENT")
+        db = KernelDB(tmp_path / "test.duckdb")
+        db.add_mission("JUICE", "https://example.com/", "https://example.com/JUICE/kernels/mk/", True)
+        db.register_file(lsk, mission="JUICE")
+        return db, root
+
+    def test_get_from_archive_lands_in_former_versions(self, tmp_path):
+        db, root = self._db(tmp_path)
+        with patch("spice_kernel_db.db._fetch_metakernel",
+                   return_value=(self.TEXT, self.ARCHIVE_URL)), \
+             patch("spice_kernel_db.db.query_remote_sizes", return_value={}):
+            db.get_metakernel(self.ARCHIVE_URL, download_dir=root, mission="JUICE", yes=True)
+        written = root / "JUICE" / "mk" / "former_versions" / "juice_x_v001.tm"
+        assert written.is_file()
+        parsed = parse_metakernel(str(written))
+        assert parsed.path_values == [str((root / "JUICE").resolve())]
+        db.close()
+
+    LIVE_DIR = "https://example.com/JUICE/kernels/mk/"
+    LIVE_TEXT = TEXT.replace("'../..'", "'..'")
+
+    def _tracked(self, tmp_path, alias: bool):
+        """A tracked snapshot juice_x_v001.tm in mk/, optionally under the alias juice_x.tm."""
+        db, root = self._db(tmp_path)
+        url = self.LIVE_DIR + "juice_x_v001.tm"
+        with patch("spice_kernel_db.db._fetch_metakernel", return_value=(self.LIVE_TEXT, url)), \
+             patch("spice_kernel_db.db.query_remote_sizes", return_value={}):
+            db.get_metakernel(url, download_dir=root, mission="JUICE", yes=True,
+                              alias_filename="juice_x.tm" if alias else None)
+        return db, root, root / "JUICE" / "mk"
+
+    def _update(self, db, root, *, dry_run, archive=None, listing=()):
+        """update_all where mk/juice_x_v001.tm is gone and former_versions/ has it."""
+        def fetch(url, *a, **k):
+            if url == self.LIVE_DIR + "juice_x_v001.tm":
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            text = self.TEXT if "former_versions" in url else self.LIVE_TEXT
+            return text, url
+
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
+             patch("spice_kernel_db.db.query_remote_sizes", return_value={}), \
+             patch("spice_kernel_db.db.probe_url", return_value=Probe(ProbeResult.PRESENT)), \
+             patch("spice_kernel_db.db.list_remote_metakernels", return_value=list(listing)), \
+             patch.object(KernelDB, "root_for", return_value=root):
+            return {e["filename"]: e for e in db.update_all(dry_run=dry_run, archive=archive)}
+
+    def test_dry_run_reports_archived_and_offers_the_move(self, tmp_path):
+        db, root, mk = self._tracked(tmp_path, alias=False)
+        report = self._update(db, root, dry_run=True)
+        note = report["juice_x_v001.tm"]["note"]
+        assert "archived on the server" in note and "--execute offers" in note
+        assert (mk / "juice_x_v001.tm").is_file()
+        db.close()
+
+    def test_execute_moves_the_unaliased_snapshot_on_yes(self, tmp_path):
+        db, root, mk = self._tracked(tmp_path, alias=False)
+        report = self._update(db, root, dry_run=False, archive=True)
+        moved = mk / "former_versions" / "juice_x_v001.tm"
+        assert moved.is_file() and not (mk / "juice_x_v001.tm").exists()
+        row = db.registry_row(str(moved))
+        assert row.source_url == self.LIVE_DIR + "former_versions/juice_x_v001.tm"
+        assert parse_metakernel(str(moved)).path_values == [str((root / "JUICE").resolve())]
+        assert "moved to mk/former_versions/" in report["juice_x_v001.tm"]["note"]
+        db.close()
+
+    def test_execute_keeps_the_snapshot_on_no(self, tmp_path):
+        db, root, mk = self._tracked(tmp_path, alias=False)
+        report = self._update(db, root, dry_run=False, archive=False)
+        assert (mk / "juice_x_v001.tm").is_file()
+        assert "kept in mk/" in report["juice_x_v001.tm"]["note"]
+        db.close()
+
+    def test_alias_update_is_reported_then_done_with_execute(self, tmp_path):
+        db, root, mk = self._tracked(tmp_path, alias=True)
+        newer = RemoteMetakernel(
+            filename="juice_x_v002.tm", url=self.LIVE_DIR + "juice_x_v002.tm",
+            date="2026-11-26 10:00", size="1K", base_name="juice_x.tm",
+            version_tag="v002",
+        )
+        report = self._update(db, root, dry_run=True, listing=[newer])
+        assert "update available: juice_x_v001.tm → juice_x_v002.tm" in report["juice_x.tm"]["note"]
+        assert os.readlink(mk / "juice_x.tm") == "juice_x_v001.tm"
+        # the snapshot the alias would leave behind is offered for archiving
+        assert "--execute offers" in report["juice_x_v001.tm"]["note"]
+
+        report = self._update(db, root, dry_run=False, archive=False, listing=[newer])
+        assert os.readlink(mk / "juice_x.tm") == "juice_x_v002.tm"
+        assert (mk / "juice_x_v002.tm").is_file()
+        assert "now → juice_x_v002.tm" in report["juice_x.tm"]["note"]
+        db.close()

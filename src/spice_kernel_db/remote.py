@@ -100,6 +100,21 @@ class RemoteMetakernel:
     version_tag: str | None  # "v461_20251127_001" or None
 
 
+ARCHIVE_DIR = "former_versions"
+"""Where NAIF and ESA move a versioned metakernel once a newer one is out (#58)."""
+
+
+def archive_url(url: str) -> str:
+    """The ``mk/former_versions/`` URL of the metakernel at *url* in ``mk/``."""
+    mk_dir, filename = url.rsplit("/", 1)
+    return f"{mk_dir}/{ARCHIVE_DIR}/{filename}"
+
+
+def is_archive_url(url: str) -> bool:
+    """Whether *url* names a file in a ``former_versions/`` directory."""
+    return url.rsplit("/", 2)[-2] == ARCHIVE_DIR if url.count("/") >= 2 else False
+
+
 def _progress(*columns, console: Console | None, transient: bool = False) -> Progress:
     """A progress bar on *console*; without one it is disabled, so a library call draws nothing (#49)."""
     return Progress(*columns, console=console, disable=console is None, transient=transient)

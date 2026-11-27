@@ -26,8 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "source gone" note is shorter (`skd clean --registry`). In Python:
   `get_metakernel` and `update_metakernel` take `quiet`, and their results
   and `update_all`'s carry `missing_kernels`. Needs rich 14.2 or newer.
+- `skd update` handles snapshots the server archived and aliases that fell
+  behind (#58). A snapshot moved to `mk/former_versions/` is reported as
+  archived, not as "source gone", and its kernels are still checked; when no
+  alias points at it, `--execute` offers to move the local copy to
+  `mk/former_versions/` too. An alias such as `bc_stp.tm` whose server lists
+  a newer snapshot is reported as an available update and repointed by
+  `--execute`. Before, aliases were skipped, so they stayed on old versions.
+  In Python: `update_all(archive=...)`, and each summary row has a `note`.
 
 ### Fixed
+
+- `get` of a metakernel from `former_versions/` wrote a `.tm` whose
+  `PATH_VALUES` pointed one directory too high, so its kernels did not load
+  (#58). It is now kept in the local `mk/former_versions/`, as on the server.
 
 - `skd coverage` no longer fails with "Cannot execute statement of type
   DELETE ... read-only mode" (#42). The command opens the database read-only,

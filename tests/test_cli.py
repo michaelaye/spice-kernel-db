@@ -1432,6 +1432,8 @@ class TestVerbTree:
                  "https://example.com/pck/new.tpc": 5}
         with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
              remote_sizes(sizes), \
+             patch("spice_kernel_db.db.probe_url",  # not archived either (#58)
+                   return_value=Probe(ProbeResult.ABSENT, "HTTP 404")), \
              patch("spice_kernel_db.db.download_kernels_parallel",
                    side_effect=AssertionError("update downloaded without --execute")) as dl:
             assert tracked.run("update") == 0
@@ -1446,6 +1448,8 @@ class TestVerbTree:
 
         with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
              remote_sizes(sizes), \
+             patch("spice_kernel_db.db.probe_url",
+                   return_value=Probe(ProbeResult.ABSENT, "HTTP 404")), \
              patch("spice_kernel_db.db.download_kernels_parallel",
                    return_value=([], [])) as dl:
             assert tracked.run("update", "--execute") == 0
