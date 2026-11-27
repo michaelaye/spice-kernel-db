@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every size again. `get` and `check --remote` never use the cache. In
   Python: `KernelDB.update_all(refresh=...)`, and `get_metakernel` /
   `update_metakernel` take a `size_cache`.
+- A new user can browse without `mission add` first (#60). `skd browse JUICE`
+  with JUICE unconfigured looks the name up on NAIF and ESA, adds the mission
+  and browses it; when both servers list it, ESA is used and the output prints
+  the commands to switch. `skd browse` with no missions runs the mission picker
+  in a terminal, and prints both server addresses otherwise.
 
 ### Changed
 

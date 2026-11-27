@@ -92,7 +92,7 @@ Interactive dialog: choose a server (NASA NAIF / ESA SPICE) → pick a mission f
 spice-kernel-db browse JUICE
 ```
 
-Shows all `.tm` files in the mission's remote `mk/` directory, grouped by base name with version counts.
+Shows all `.tm` files in the mission's remote `mk/` directory, grouped by base name with version counts. This works on a fresh install too: a mission that is not configured yet is looked up on NAIF and ESA and added (ESA when both list it), so `mission add` is only needed to choose a server yourself.
 
 ### Get a metakernel
 

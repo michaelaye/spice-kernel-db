@@ -23,6 +23,7 @@ from spice_kernel_db.config import (
 )
 from spice_kernel_db.db import KernelDB
 from spice_kernel_db.remote import (
+    PREFERRED_SERVER,
     SPICE_SERVERS,
     check_mk_availability,
     discover_mk_url,
@@ -345,7 +346,7 @@ def _choose_dedup(mission_name: str) -> bool:
 
 def _save_mission(
     db: KernelDB, mission_name: str, server_label: str, server_url: str,
-    mk_dir_url: str, dedup: bool,
+    mk_dir_url: str, dedup: bool, *, next_steps: bool = True,
 ) -> None:
     """Persist the mission row and print a confirmation block."""
     db.add_mission(mission_name, server_url, mk_dir_url, dedup)
@@ -353,38 +354,96 @@ def _save_mission(
     print(f"\nMission '{mission_name}' ({server_label}) configured.")
     print(f"  Deduplication: {dedup_str}")
     print(f"  mk/ directory: {mk_dir_url}")
+    if not next_steps:
+        return
     print("\nNext steps:")
     print(f"  spice-kernel-db browse {mission_name}")
     print(f"  spice-kernel-db get <metakernel>.tm --mission {mission_name}")
 
 
-def _mission_add_interactive(db: KernelDB, no_dedup: bool) -> None:
-    """Interactive mission setup: choose server → pick mission → configure."""
+def _mission_add_interactive(
+    db: KernelDB, no_dedup: bool, *, next_steps: bool = True,
+) -> str | None:
+    """Interactive mission setup: choose server → pick mission → configure.
+
+    Returns the saved mission name, or None when the user aborted.
+    """
     _require_interactive("mission add")
     server_label, server_url = _choose_server()
     chosen = _choose_mission(server_url, server_label)
     if chosen is None:
-        return
+        return None
     mission_name, mk_dir_url = chosen
     dedup = False if no_dedup else _choose_dedup(mission_name)
-    _save_mission(db, mission_name, server_label, server_url, mk_dir_url, dedup)
+    _save_mission(db, mission_name, server_label, server_url, mk_dir_url, dedup,
+                  next_steps=next_steps)
+    return mission_name
 
 
-def _servers_hosting(name: str) -> list[str]:
-    """Every known server that lists *name*, in SPICE_SERVERS order."""
+def _servers_hosting(name: str) -> dict[str, str]:
+    """Every known server that lists *name*, in SPICE_SERVERS order.
+
+    Maps each server URL to the mission name as that server spells it.
+    """
     from concurrent.futures import ThreadPoolExecutor
 
     urls = list(SPICE_SERVERS.values())
 
-    def _has_mission(url: str) -> bool:
+    def _listed_as(url: str) -> str | None:
         try:
-            return _match_ci(name, list_remote_missions(url)) is not None
+            return _match_ci(name, list_remote_missions(url))
         except (OSError, http.client.HTTPException):  # server down, or not a listing
-            return False
+            return None
 
     with ThreadPoolExecutor(max_workers=len(urls)) as pool:
-        found = list(pool.map(_has_mission, urls))
-    return [url for url, ok in zip(urls, found) if ok]
+        found = list(pool.map(_listed_as, urls))
+    return {url: listed for url, listed in zip(urls, found) if listed}
+
+
+def _find_mk_dirs(name: str, server_url: str) -> list[str]:
+    """Metakernel directories for *name* on *server_url*: default mk/, then the registry."""
+    reg_candidates = registry.registry_candidates(name, server_url)
+    return discover_mk_url(server_url, name, registry_candidates=reg_candidates)
+
+
+def add_mission_by_name(db: KernelDB, name: str) -> str | None:
+    """Look *name* up on the known servers and configure it, for ``browse <name>``.
+
+    When more than one server lists the mission, PREFERRED_SERVER is used and
+    the output says how to choose another. Returns the saved mission name, or
+    None (with the reason on stderr) when it cannot be configured.
+    """
+    print(f"'{name}' is not configured yet; looking it up on the known servers...")
+    hosting = _servers_hosting(name)
+    if not hosting:
+        checked = ", ".join(f"{label} ({url})" for label, url in SPICE_SERVERS.items())
+        print(f"No known server lists a mission called '{name}'.\n"
+              f"  Servers checked: {checked}\n"
+              f"  Run 'spice-kernel-db mission add' to pick from their lists.",
+              file=sys.stderr)
+        return None
+    preferred = SPICE_SERVERS[PREFERRED_SERVER]
+    server_url = preferred if preferred in hosting else next(iter(hosting))
+    mission_name = hosting[server_url]
+    server_label = server_label_for(server_url)
+
+    hits = _find_mk_dirs(mission_name, server_url)
+    if len(hits) != 1:
+        found = "no metakernel directory" if not hits else "several metakernel directories"
+        print(f"{mission_name} on {server_label}: {found} found.\n"
+              f"  Run 'spice-kernel-db mission add {mission_name} "
+              f"--server-url {server_url} --mk-dir-url <url>' to set it by hand.",
+              file=sys.stderr)
+        return None
+
+    _save_mission(db, mission_name, server_label, server_url, hits[0], True,
+                  next_steps=False)
+    for other in (u for u in hosting if u != server_url):
+        print(f"  Also listed on {server_label_for(other)}. To use that copy instead:\n"
+              f"    spice-kernel-db mission remove {mission_name}\n"
+              f"    spice-kernel-db mission add {mission_name} --server-url {other}")
+    print()
+    return mission_name
 
 
 def _infer_server_url(name: str, server_url_arg: str | None) -> str | None:
@@ -402,7 +461,7 @@ def _infer_server_url(name: str, server_url_arg: str | None) -> str | None:
     if server_url_arg:
         return server_url_arg if server_url_arg.endswith("/") else server_url_arg + "/"
 
-    hits = _servers_hosting(name)
+    hits = list(_servers_hosting(name))
     if len(hits) > 1:
         raise AmbiguousServer(name, hits)
     return hits[0] if hits else None
@@ -453,8 +512,7 @@ def _mission_add_noninteractive(
             )
             sys.exit(1)
     else:
-        reg_candidates = registry.registry_candidates(name, server_url)
-        hits = discover_mk_url(server_url, name, registry_candidates=reg_candidates)
+        hits = _find_mk_dirs(name, server_url)
         if not hits:
             print(
                 f"mission add: no metakernel directory found for "

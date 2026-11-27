@@ -12,11 +12,13 @@ from rich.panel import Panel
 
 from spice_kernel_db.db import AmbiguousKernelRoot, KernelDB, MetakernelUnreachableError
 from spice_kernel_db.hashing import guess_mission
-from spice_kernel_db.remote import Probe, ProbeResult, probe_url
+from spice_kernel_db.remote import SPICE_SERVERS, Probe, ProbeResult, probe_url
 
 from ._app import ACQUIRE, HiddenArgsCommand, app, open_db, rename_note, state
+from .configure import _mission_add_interactive, add_mission_by_name
 from .prompts import (
     INVALID,
+    _interactive,
     _interactive_select_metakernel,
     _mission_table,
     _pick_index,
@@ -85,12 +87,10 @@ def browse(
             if not url.startswith("http"):
                 m = db.get_mission(url)
                 if not m:
-                    print(
-                        f"No configured mission '{url}'.\n"
-                        f"Use 'spice-kernel-db mission add' to configure it.",
-                        file=sys.stderr,
-                    )
-                    return
+                    added = add_mission_by_name(db, url)
+                    if added is None:
+                        return
+                    m = db.get_mission(added)
                 url = m["mk_dir_url"]
                 mission = mission or m["name"]
             url = _maybe_archive(url)
@@ -112,9 +112,17 @@ def browse(
         # No args — pick a mission to browse interactively
         missions = db.list_missions()
         if not missions:
-            print("No configured missions.")
-            print("Use 'spice-kernel-db mission add' to set one up.")
-            return
+            if not _interactive():
+                servers = "\n".join(f"  {label}: {u}" for label, u in SPICE_SERVERS.items())
+                print("No configured missions. Name one to look it up on the "
+                      "known servers, e.g. 'spice-kernel-db browse JUICE', or run "
+                      f"'spice-kernel-db mission add' to pick from their lists:\n{servers}")
+                return
+            print("No configured missions yet. Pick one from a server:")
+            added = _mission_add_interactive(db, no_dedup=False, next_steps=False)
+            if added is None:
+                return
+            missions = [db.get_mission(added)]
         if len(missions) == 1:
             m = missions[0]
             console.print(f"Browsing [bold]{m['name']}[/bold]...\n")

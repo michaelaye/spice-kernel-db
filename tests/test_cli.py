@@ -955,6 +955,89 @@ class TestMissionAddAmbiguousServer:
         assert "naif.jpl.nasa.gov" in err and "esac.esa.int" in err
 
 
+class TestBrowseForANewUser:
+    """Issue #60: browse works with an empty database, using the known servers."""
+
+    def _cfg(self, tmp_path):
+        return Config(db_path=str(tmp_path / "t.duckdb"),
+                      kernel_dirs=[str(tmp_path / "k")])
+
+    def _browse(self, tmp_path, argv, *, listings, tty=False):
+        """Run `browse` with each server listing the missions in *listings*."""
+        from spice_kernel_db.cli import main
+        from spice_kernel_db.remote import SPICE_SERVERS
+
+        captured: dict = {}
+
+        def fake_browse(self, url, **kwargs):
+            captured["url"] = url
+            captured["mission"] = kwargs.get("mission")
+
+        def listing(url):
+            label = next(k for k, v in SPICE_SERVERS.items() if v == url)
+            return listings.get(label, [])
+
+        def discover(server_url, name, **kwargs):
+            return [f"{server_url}{name}/kernels/mk/"]
+
+        with patch("spice_kernel_db.config.load_config", return_value=self._cfg(tmp_path)), \
+             patch("spice_kernel_db.cli.configure.list_remote_missions", side_effect=listing), \
+             patch("spice_kernel_db.cli.configure.discover_mk_url", side_effect=discover), \
+             patch("sys.stdin.isatty", return_value=tty), \
+             patch.object(KernelDB, "browse_remote_metakernels", fake_browse):
+            main(argv)
+        return captured
+
+    def test_name_on_both_servers_uses_esa_and_says_so(self, tmp_path, capsys):
+        from spice_kernel_db.remote import SPICE_SERVERS
+
+        got = self._browse(tmp_path, ["browse", "juice"],
+                           listings={"NASA": ["JUICE"], "ESA": ["JUICE"]})
+        assert got["url"] == f"{SPICE_SERVERS['ESA']}JUICE/kernels/mk/"
+        assert got["mission"] == "JUICE"  # the server's spelling, not the typed one
+        out = capsys.readouterr().out
+        assert "(ESA) configured" in out
+        assert f"--server-url {SPICE_SERVERS['NASA']}" in out
+        db = KernelDB(tmp_path / "t.duckdb")
+        assert [m["name"] for m in db.list_missions()] == ["JUICE"]
+        db.close()
+
+    def test_name_on_one_server_uses_that_server(self, tmp_path, capsys):
+        from spice_kernel_db.remote import SPICE_SERVERS
+
+        got = self._browse(tmp_path, ["browse", "mro"], listings={"NASA": ["MRO"]})
+        assert got["url"] == f"{SPICE_SERVERS['NASA']}MRO/kernels/mk/"
+        assert "Also listed" not in capsys.readouterr().out
+
+    def test_unknown_name_adds_nothing(self, tmp_path, capsys):
+        got = self._browse(tmp_path, ["browse", "nosuch"], listings={"NASA": ["MRO"]})
+        assert got == {}
+        assert "No known server lists a mission called 'nosuch'" in capsys.readouterr().err
+        db = KernelDB(tmp_path / "t.duckdb")
+        assert db.list_missions() == []
+        db.close()
+
+    def test_no_missions_without_a_terminal_lists_the_servers(self, tmp_path, capsys):
+        from spice_kernel_db.remote import SPICE_SERVERS
+
+        got = self._browse(tmp_path, ["browse"], listings={})
+        assert got == {}
+        out = capsys.readouterr().out
+        assert all(url in out for url in SPICE_SERVERS.values())
+        assert "spice-kernel-db browse JUICE" in out
+
+    def test_no_missions_in_a_terminal_runs_the_picker_then_browses(self, tmp_path):
+        from spice_kernel_db.remote import SPICE_SERVERS
+
+        esa = SPICE_SERVERS["ESA"]
+        with patch("spice_kernel_db.cli.configure._choose_server", return_value=("ESA", esa)), \
+             patch("spice_kernel_db.cli.configure._choose_mission",
+                   return_value=("JUICE", f"{esa}JUICE/kernels/mk/")), \
+             patch("spice_kernel_db.cli.configure._choose_dedup", return_value=True):
+            got = self._browse(tmp_path, ["browse"], listings={}, tty=True)
+        assert got == {"url": f"{esa}JUICE/kernels/mk/", "mission": "JUICE"}
+
+
 class TestPromptsWithoutATerminal:
     """Issue #14: interactive prompts raised EOFError when stdin was not a tty."""
 

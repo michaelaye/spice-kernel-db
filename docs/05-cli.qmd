@@ -78,15 +78,20 @@ The last column says what changed with the rename in issue #47. The old names ar
 
 ## `browse`
 
-Browse remote metakernels in a NAIF mission `mk/` directory, or list known directories.
+Browse remote metakernels in a mission's `mk/` directory on NAIF or ESA.
 
 ```bash
 skd browse [url] [--mission NAME]
 ```
 
+A new user can browse straight away: both server addresses are built in.
+
+- `skd browse JUICE` with JUICE not yet configured looks the name up on both servers, adds the mission (deduplication on) and browses it. When both servers list it, ESA is used, because NAIF mirrors ESA missions and the mirror can lag. The output names the server and prints the two commands that switch to the other one.
+- `skd browse` with no configured missions runs the `mission add` picker (server, then mission) and browses the result. Without a terminal it prints the two server addresses and a hint instead.
+
 | Option | Description |
 |--------|-------------|
-| `url` | URL to a mission's `mk/` directory, or a mission name (omit to list known directories) |
+| `url` | URL to a mission's `mk/` directory, or a mission name (omit to pick from the configured missions) |
 | `--mission` | Override auto-detected mission name |
 | `--show-versioned` | Show versioned snapshots under each metakernel |
 | `--sort {name,date}` | Row ordering. `name` (default) is alphabetical. `date` sorts by the **Latest** remote modification date ascending, so the most recently updated metakernels appear at the bottom — handy for spotting fresh updates at a glance. |
@@ -94,10 +99,11 @@ skd browse [url] [--mission NAME]
 | `--filter SUBSTRING` | Case-insensitive substring filter on metakernel filenames. Particularly useful when combined with `--archived` to narrow listings of a thousand-plus entries. |
 
 ```bash
-# List all known mk/ directories (from missions table and previously acquired metakernels)
+# Pick one of the configured missions (or set the first one up)
 skd browse
 
-# Browse by mission name (prefix matching, case-insensitive)
+# Browse by mission name (prefix matching, case-insensitive);
+# an unconfigured name is looked up on NAIF and ESA and added
 skd browse JUICE
 skd browse bepi    # matches BEPICOLOMBO
 

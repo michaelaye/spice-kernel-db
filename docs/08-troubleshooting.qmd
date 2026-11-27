@@ -26,6 +26,15 @@ spice-kernel-db browse MISSION  # see what's available
 spice-kernel-db get             # download one interactively
 ```
 
+`browse MISSION` also sets the mission up when it is not configured yet, so the first line is optional.
+
+
+## "No known server lists a mission called '…'"
+
+`browse <name>` looked the name up on NAIF and ESA and neither lists it. Check the spelling against the servers' lists with `spice-kernel-db mission add` (interactive), or configure a mission hosted elsewhere with `mission add <name> --server-url <url> --mk-dir-url <url>`.
+
+When the name is found but no single metakernel directory answers, the message names the server and the `mission add ... --mk-dir-url` command to set it by hand; see "Mission has no metakernel directory at the default path" below.
+
 
 ## "matches several tracked metakernels" (exit 2)
 

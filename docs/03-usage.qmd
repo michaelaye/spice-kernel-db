@@ -186,11 +186,13 @@ This removes the mission configuration from the database. It doesn't delete any 
 
 ## Browsing remote metakernels
 
-Once you've configured a mission, you can browse the available metakernels on the remote server:
+Browse the available metakernels on the remote server by mission name:
 
 ```bash
 spice-kernel-db browse JUICE
 ```
+
+The mission does not have to be configured first. An unknown name is looked up on NAIF and ESA, added as a mission and browsed; when both servers list it, ESA is used and the output says how to switch.
 
 The tool fetches the listing of `.tm` files from the mission's `mk/` directory and groups them by base name (ignoring version tags like `_v461_20251127_001`):
 

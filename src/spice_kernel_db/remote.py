@@ -67,6 +67,10 @@ SPICE_SERVERS: dict[str, str] = {
     "ESA": "https://spiftp.esac.esa.int/data/SPICE/",
 }
 
+# Server used when a mission is listed on more than one known server. NAIF
+# mirrors ESA missions, and the mirror can lag behind ESA (#13).
+PREFERRED_SERVER = "ESA"
+
 # Regex for Apache mod_autoindex directory entries (trailing /)
 # Handles both plain-text (NASA) and table-based (ESA) formats.
 _DIR_ENTRY_RE = re.compile(
