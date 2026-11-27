@@ -147,7 +147,7 @@ def _root(
     db: Annotated[Optional[str], typer.Option(
         "--db", help="Path to DuckDB database file (default: from config)")] = None,
     verbose: Annotated[bool, typer.Option(
-        "-v", "--verbose", help="Show detailed output (per-file warnings, etc.)")] = False,
+        "-v", "--verbose", help="Show detailed output (per-file warnings, update's per-metakernel tables)")] = False,
     version: Annotated[bool, typer.Option(
         "--version", help="Show program's version number and exit",
         callback=_version, is_eager=True)] = False,
@@ -185,8 +185,7 @@ def _show_default_summary() -> None:
     if not db_path.is_file():
         console.print(
             "No database yet. Quick start:\n"
-            "  [bold]spice-kernel-db mission add[/bold]    # configure a mission\n"
-            "  [bold]spice-kernel-db browse[/bold] MISSION  # see available metakernels\n"
+            "  [bold]spice-kernel-db browse[/bold] MISSION  # see available metakernels (adds the mission)\n"
             "  [bold]spice-kernel-db get[/bold]             # download one interactively\n"
         )
         return

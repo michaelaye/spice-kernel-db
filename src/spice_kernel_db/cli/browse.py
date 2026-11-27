@@ -44,12 +44,13 @@ class SortBy(str, Enum):
 
 
 @app.command(rich_help_panel=ACQUIRE, epilog="See also: get, mission add",
-             help="Browse remote metakernels in a NAIF mk/ directory")
+             help="Browse remote metakernels in a mission's mk/ directory on NAIF or ESA")
 def browse(
     ctx: typer.Context,
     url: Annotated[Optional[str], typer.Argument(
         help="URL to a mission's mk/ directory, or a mission name "
-             "(omit to list known directories)")] = None,
+             "(omit to pick from the configured missions; an unconfigured "
+             "name is looked up on NAIF and ESA and added)")] = None,
     mission: MissionOverride = None,
     show_versioned: Annotated[bool, typer.Option(
         "--show-versioned", help="Show versioned snapshots under each metakernel")] = False,

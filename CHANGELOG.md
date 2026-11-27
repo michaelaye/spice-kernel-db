@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `skd update --help` and the CLI page describe `--execute` as performing all
   available updates (missing kernels, alias moves, the archive offer), not
   only downloading missing kernels.
+- Help texts follow #60: the root quick start and the no-database message
+  start at `browse MISSION` (`mission add` only to pick a server yourself),
+  `browse` names NAIF and ESA and says what omitting its argument does, and
+  `-v` mentions `update`'s per-metakernel tables.
 - `skd update` prints one summary table instead of every metakernel's full
   kernel table (#57). A progress bar, with the current metakernel on the line below it, shows the walk and disappears; the
   table gains a size column and lists each missing kernel under its
