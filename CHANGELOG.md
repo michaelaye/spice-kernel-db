@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `skd update` asks the server for kernel sizes once per calendar day (#56).
+  The sizes are cached in `remote_sizes.json` next to the database and reused
+  by every later `update` that day; a kernel not asked about yet today is still
+  asked, and each metakernel's `.tm` is fetched on every run. `--refresh` asks
+  for every size again. `get` and `check --remote` never use the cache. In
+  Python: `KernelDB.update_all(refresh=...)`, and `get_metakernel` /
+  `update_metakernel` take a `size_cache`.
+
 ### Fixed
 
 - `skd coverage` no longer fails with "Cannot execute statement of type

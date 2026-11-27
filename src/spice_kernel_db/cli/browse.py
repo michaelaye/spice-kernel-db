@@ -257,6 +257,10 @@ def update(
     metakernel: Annotated[Optional[str], typer.Argument(hidden=True)] = None,
     execute: Annotated[bool, typer.Option(
         "--execute", help="Download the missing kernels (default: report only)")] = False,
+    refresh: Annotated[bool, typer.Option(
+        "--refresh",
+        help="Ask the server for every kernel size again (default: reuse the sizes it "
+             "gave earlier today)")] = False,
     # The three below serve only the pre-#47 form `update <name>`.
     mission: Annotated[Optional[str], typer.Option("--mission", hidden=True)] = None,
     yes: Annotated[bool, typer.Option("-y", "--yes", hidden=True)] = False,
@@ -269,6 +273,6 @@ def update(
     # No --download-dir here: each metakernel re-fetches into its own root
     # (root_for), and one directory for every root's metakernels would undo that.
     with open_db(ctx, read_only=not execute) as db:
-        db.update_all(dry_run=not execute, verbose=state(ctx).verbose)
+        db.update_all(dry_run=not execute, verbose=state(ctx).verbose, refresh=refresh)
     if not execute:
         console.print("[dim]Dry run: pass --execute to download.[/dim]")

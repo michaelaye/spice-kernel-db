@@ -47,6 +47,7 @@ from spice_kernel_db.parser import (
 )
 from spice_kernel_db.remote import (
     SPICE_SERVERS,
+    SizeCache,
     download_kernel,
     download_kernels_parallel,
     _fetch_metakernel,
@@ -2774,6 +2775,22 @@ class KernelDB:
     # Acquire (remote metakernel)
     # ------------------------------------------------------------------
 
+    def _remote_sizes(
+        self, urls: list[str], size_cache: SizeCache | None,
+    ) -> dict[str, int | None]:
+        """Server sizes of *urls*, today's cached ones reused when there is a cache (#56)."""
+        known = size_cache.lookup(urls) if size_cache else {}
+        todo = [u for u in urls if u not in known]
+        fresh = query_remote_sizes(todo, console=self.console) if todo else {}
+        if size_cache:
+            size_cache.store(fresh)
+            if known:
+                self._show(
+                    f"  [dim]Sizes: {len(known)} from today's cache, {len(todo)} asked "
+                    f"the server (update --refresh asks for all)[/dim]"
+                )
+        return {**known, **fresh}
+
     def _snapshot_kernel_hashes(
         self, filenames: list[str], mission: str,
     ) -> dict[str, set[str]]:
@@ -2965,6 +2982,7 @@ class KernelDB:
         alias_filename: str | None = None,
         verbose: bool = False,
         dry_run: bool = False,
+        size_cache: SizeCache | None = None,
     ) -> dict:
         """Fetch a remote metakernel, show its status, and download the missing kernels.
 
@@ -3018,6 +3036,9 @@ class KernelDB:
         dry_run : bool, default False
             Stop after the status table. Nothing is written to disk or to the database and no kernel
             is downloaded. This is what ``skd update`` runs without ``--execute`` (#47).
+        size_cache : SizeCache | None, default None
+            Reuse the kernel sizes the server gave earlier today, and remember the new answers
+            (#56). ``update_all`` passes one; ``None`` asks the server for every size.
 
         Returns
         -------
@@ -3175,7 +3196,7 @@ class KernelDB:
             # Release lock during network I/O so other processes aren't blocked.
             self.release()
             try:
-                sizes = query_remote_sizes(kernel_urls, console=self.console)
+                sizes = self._remote_sizes(kernel_urls, size_cache)
             finally:
                 self.reacquire()
             # Issue 5: Check if state changed during lock release
@@ -3432,6 +3453,7 @@ class KernelDB:
         verbose: bool = False,
         dry_run: bool = False,
         rescan: bool = True,
+        size_cache: SizeCache | None = None,
     ) -> dict:
         """Re-fetch a metakernel from its source URL and download new or missing kernels.
 
@@ -3463,6 +3485,9 @@ class KernelDB:
         rescan : bool, default True
             Re-index the directories the metakernel points at after the download. ``update_all``
             passes ``False`` and scans each distinct directory once at the end.
+        size_cache : SizeCache | None, default None
+            Passed to ``get_metakernel``: reuse today's server sizes (#56). ``update_all`` passes
+            one; ``None`` asks the server for every size.
 
         Returns
         -------
@@ -3515,6 +3540,7 @@ class KernelDB:
                 yes=yes,
                 force=force,
                 dry_run=dry_run,
+                size_cache=size_cache,
             )
         except urllib.error.HTTPError as e:
             if e.code in (403, 404, 410):
@@ -3586,12 +3612,21 @@ class KernelDB:
                 f"for updated kernels.[/dim]"
             )
 
-    def update_all(self, dry_run: bool = False, verbose: bool = False) -> list[dict]:
+    def update_all(
+        self, dry_run: bool = False, verbose: bool = False, refresh: bool = False,
+    ) -> list[dict]:
         """Re-fetch every tracked metakernel from its source, as ``skd update`` does (#47).
 
         Each metakernel lands in the root that holds it (``root_for``). There is no directory
-        argument, since one directory for metakernels from several roots would undo that. With
-        ``dry_run`` each metakernel's status table is shown and nothing is written. Otherwise the
+        argument, since one directory for metakernels from several roots would undo that.
+
+        The server's kernel sizes are asked once per calendar day (#56). The answers are kept in
+        ``remote_sizes.json`` beside the database and reused by every later call that day; a kernel
+        URL not seen yet today is still asked. Each metakernel's ``.tm`` is fetched on every call,
+        so a new version is always noticed. ``refresh=True`` asks the server for every size.
+
+        With ``dry_run`` each metakernel's status table is shown and nothing is written to the
+        database or the kernel roots (only the size cache file). Otherwise the
         missing kernels are downloaded without a per-metakernel prompt (the CLI's ``--execute`` is
         the confirmation), and the directories the metakernels point at are re-indexed once at the
         end. The ``skd update`` command passes ``dry_run=True`` unless ``--execute`` is given.
@@ -3606,6 +3641,9 @@ class KernelDB:
             Show what would be downloaded and write nothing.
         verbose : bool, default False
             Name each directory as it is rescanned.
+        refresh : bool, default False
+            Ignore today's cached sizes and ask the server for all of them (``skd update
+            --refresh``). The answers are cached again.
 
         Returns
         -------
@@ -3616,6 +3654,7 @@ class KernelDB:
         """
         report: list[dict] = []
         scan_dirs: dict[Path, str] = {}
+        size_cache = SizeCache(Path(self.db_path).parent / "remote_sizes.json", refresh=refresh)
         for row in self.registry_rows():
             if Path(row.mk_path).is_symlink():
                 continue  # the alias of a row walked under its own name
@@ -3625,6 +3664,7 @@ class KernelDB:
             try:
                 result = self.update_metakernel(
                     row.mk_path, yes=True, verbose=verbose, dry_run=dry_run, rescan=False,
+                    size_cache=size_cache,
                 )
                 entry["count"] = len(result["missing" if dry_run else "downloaded"])
                 for sd in result.get("scan_dirs", ()):

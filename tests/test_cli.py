@@ -1452,6 +1452,37 @@ class TestVerbTree:
         assert dl.call_count == 1
         assert [t[2] for t in dl.call_args.args[0]] == ["new.tpc"]
 
+    # C62, C63, C65
+    def test_update_asks_for_sizes_once_a_day(self, tracked, capsys):
+        old = "https://example.com/pck/pck00011.tpc"
+        new = "https://example.com/pck/new.tpc"
+        entries = ["$K/pck/pck00011.tpc"]
+
+        def fetch(url, *a, **k):
+            return ("\\begindata\nPATH_VALUES = ( '..' )\nPATH_SYMBOLS = ( 'K' )\n"
+                    f"KERNELS_TO_LOAD = ( {' '.join(repr(e) for e in entries)} )\n"
+                    "\\begintext\n"), url
+
+        asked: list[list[str]] = []
+
+        def query(urls, **k):
+            asked.append(sorted(urls))
+            return {u: 16 for u in urls}
+
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
+             patch("spice_kernel_db.db.query_remote_sizes", side_effect=query), \
+             patch("spice_kernel_db.db.download_kernels_parallel", return_value=([], [])):
+            assert tracked.run("update") == 0
+            assert tracked.run("update") == 0
+            assert "1 from today's cache, 0 asked" in capsys.readouterr().out
+            entries.append("$K/pck/new.tpc")  # a new version lists one more kernel
+            assert tracked.run("update") == 0
+            assert tracked.run("update", "--refresh") == 0
+            assert tracked.run("get", "juice_crema_5_2", "--yes") == 0
+        assert asked == [[old], [new], [new, old], [new, old]]
+        cache = json.loads((tracked.tmp / "remote_sizes.json").read_text())
+        assert set(cache) == {old, new}
+
     # C20
     def test_inspect_verbs(self, tracked, capsys):
         assert tracked.run("ls", "juice") == 0

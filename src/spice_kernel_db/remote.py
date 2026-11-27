@@ -489,6 +489,72 @@ def query_remote_sizes(
     return out
 
 
+class SizeCache:
+    """Server sizes of kernel URLs, reused until the next calendar day (#56).
+
+    ``skd update`` asks the server for the size of every kernel of every tracked
+    metakernel. The answers rarely change within a day, so they are kept in a
+    small JSON file, ``{url: [size, "YYYY-MM-DD"]}``. The file lives beside the
+    database, never inside it: the dry run opens the database read-only (#42).
+
+    An entry from an earlier day is never used and is dropped on the next save.
+    A URL whose request returned no size is not stored, so it is asked again. A
+    missing or unreadable file counts as empty.
+
+    Parameters
+    ----------
+    path : Path
+        The JSON file.
+    refresh : bool, default False
+        Ignore the stored sizes; the fresh answers are still saved.
+    today : str | None, default None
+        ISO date that counts as today (for tests). The local date otherwise.
+    """
+
+    def __init__(self, path: Path, *, refresh: bool = False, today: str | None = None):
+        import datetime
+        import json
+
+        self.path = Path(path)
+        self.refresh = refresh
+        self.today = today or datetime.date.today().isoformat()
+        try:
+            raw = json.loads(self.path.read_text())
+            self._entries = {
+                url: (int(size), day) for url, (size, day) in raw.items()
+                if day == self.today
+            }
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._entries = {}
+
+    def lookup(self, urls: list[str]) -> dict[str, int]:
+        """Today's stored size of each URL that has one (none with ``refresh``)."""
+        if self.refresh:
+            return {}
+        return {u: self._entries[u][0] for u in urls if u in self._entries}
+
+    def store(self, sizes: dict[str, int | None]) -> None:
+        """Remember the answered sizes under today's date and write the file.
+
+        A failed write is ignored: it only costs the next run its cache.
+        """
+        import json
+        import os
+        import tempfile
+
+        for url, size in sizes.items():
+            if size is not None:
+                self._entries[url] = (size, self.today)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                json.dump({u: [s, d] for u, (s, d) in sorted(self._entries.items())}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+
 def download_kernel(
     url: str, dest: Path, *, progress: Progress | None = None,
     task_id: int | None = None, expected_hash: str | None = None,

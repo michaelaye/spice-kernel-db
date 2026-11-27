@@ -225,12 +225,15 @@ If both the live and `former_versions/` URLs 404, the error names both attempted
 Re-fetch every tracked metakernel from its source and report what is missing. Nothing is written unless you pass `--execute`.
 
 ```bash
-skd update [--execute]
+skd update [--execute] [--refresh]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--execute` | Download the missing kernels. Default: report only. `--execute` is the confirmation; there is no per-metakernel prompt. |
+| `--refresh` | Ask the server for every kernel size again, instead of reusing the sizes it gave earlier today. |
+
+`update` asks the server for each kernel's size once per calendar day. The answers are kept in `remote_sizes.json` next to the database, and every later `update` that day reuses them, which turns hundreds of size requests into none. A kernel the server has not been asked about today, for example one that a new metakernel version adds, is still asked. Each metakernel's `.tm` file is fetched on every run, so a new version is always noticed. `get` and `check --remote` never use the cache. Deleting `remote_sizes.json` is always safe.
 
 Each metakernel re-fetches into the root that holds it (see [Several kernel roots](#several-kernel-roots)), so there is no `--download-dir`; one directory for metakernels from several roots would undo that. `get <name>` takes it for a single metakernel.
 

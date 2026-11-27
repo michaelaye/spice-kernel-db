@@ -5,6 +5,7 @@ Split out of the former tests/test_kernel_db.py.
 
 from __future__ import annotations
 import hashlib
+import json
 import logging
 import shutil
 import textwrap
@@ -664,3 +665,35 @@ class TestEveryRequestHasATimeout:
         """5 s sat below the p90 handshake recorded in remote.py (5.44 s)."""
         from spice_kernel_db.remote import PROBE_TIMEOUT
         assert PROBE_TIMEOUT >= 12.58, "must clear the measured handshake max"
+
+
+class TestSizeCache:
+    """#56: server sizes kept for the calendar day (C64)."""
+
+    def test_entries_from_an_earlier_day_are_ignored_and_dropped(self, tmp_path):
+        from spice_kernel_db.remote import SizeCache
+
+        path = tmp_path / "remote_sizes.json"
+        SizeCache(path, today="2026-11-25").store({"https://a/x.bsp": 10})
+        cache = SizeCache(path, today="2026-11-26")
+        assert cache.lookup(["https://a/x.bsp"]) == {}
+        cache.store({"https://a/y.bsp": 20})
+        assert json.loads(path.read_text()) == {"https://a/y.bsp": [20, "2026-11-26"]}
+
+    def test_same_day_hit_and_unanswered_url_not_stored(self, tmp_path):
+        from spice_kernel_db.remote import SizeCache
+
+        path = tmp_path / "remote_sizes.json"
+        SizeCache(path, today="2026-11-26").store({"https://a/x.bsp": 10, "https://a/z.bsp": None})
+        cache = SizeCache(path, today="2026-11-26")
+        assert cache.lookup(["https://a/x.bsp", "https://a/z.bsp"]) == {"https://a/x.bsp": 10}
+        assert SizeCache(path, today="2026-11-26", refresh=True).lookup(["https://a/x.bsp"]) == {}
+
+    @pytest.mark.parametrize("content", ["", "not json", "[1, 2]", '{"u": "bad"}'])
+    def test_missing_or_corrupt_file_is_empty(self, tmp_path, content):
+        from spice_kernel_db.remote import SizeCache
+
+        path = tmp_path / "remote_sizes.json"
+        if content:
+            path.write_text(content)
+        assert SizeCache(path, today="2026-11-26").lookup(["u"]) == {}
