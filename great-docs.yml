@@ -59,9 +59,18 @@ reference:
 
 # The agent skill (skill.md, .well-known/agent-skills/) is generated from the
 # docstrings; these keys add the judgment a reader cannot get from signatures.
-# Every `use` below names a public function or a KernelDB attribute (tests/test_api.py).
+# Every `use` below names a public function, a KernelDB attribute, or a visible
+# CLI command written as `skd <verb>` (tests/test_api.py).
 skill:
   decision_table:
+    - need: "From a shell: the metakernels a mission publishes"
+      use: "skd browse MISSION; an unconfigured mission is looked up on NAIF and ESA and added"
+    - need: "From a shell: one metakernel and its kernels, without prompts"
+      use: "skd get URL -y"
+    - need: "From a shell: what changed on the servers for everything skd tracks"
+      use: "skd update to see the available updates, skd update --execute to perform them"
+    - need: "From a shell: whether a tracked metakernel is complete"
+      use: "skd check NAME, exit code as for check()"
     - need: "A metakernel from a NAIF or ESA server, with the kernels it lists"
       use: "get(url, yes=True)"
     - need: "The on-disk path of a metakernel skd tracks, from a filename, base name, path or URL"
@@ -83,7 +92,8 @@ skill:
     - "check()'s exit_code is a sum of bits: 1 a kernel missing, 2 an entry does not resolve, 4 differs from the server (only with remote=True). 78 is a configuration error, never a verdict."
     - "The .tm skd writes carries absolute PATH_VALUES, so it works from any working directory."
     - "Warnings go through the spice_kernel_db logger; configure logging to see them."
-  best_practices:
+    - "skd update without --execute changes nothing: it fetches every tracked .tm, reuses kernel sizes the server gave earlier today (--refresh asks again), and lists the available updates. --execute performs all of them: missing kernels, aliases moved to newer snapshots, and one question about moving archived snapshots to mk/former_versions/."
+    - "Without a terminal skd never prompts: pass -y to get, and a name (plus --server-url when NAIF and ESA both list it) to mission add. browse NAME needs neither and picks ESA when both list the mission."
     - "Pin the release you tested with an upper bound below the next major (for example >=0.30,<1): spice_kernel_db.__all__ is the stability promise."
     - "Use the module-level functions for one call and a KernelDB for several; open it read_only=True for queries."
     - "A tracked name (juice_crema_5_2) is more stable than a URL: get() by URL once, then resolve_metakernel() and check() by name."

@@ -258,13 +258,15 @@ def _refetch(db: KernelDB, name: str, **kwargs) -> None:
 
 @app.command(rich_help_panel=ACQUIRE, epilog="See also: get, check",
              cls=HiddenArgsCommand,
-             help="Re-fetch every tracked metakernel from its source and report "
-                  "what would change; downloads only with --execute")
+             help="Check every tracked metakernel against its server and report "
+                  "the available updates; --execute performs them")
 def update(
     ctx: typer.Context,
     metakernel: Annotated[Optional[str], typer.Argument(hidden=True)] = None,
     execute: Annotated[bool, typer.Option(
-        "--execute", help="Download the missing kernels (default: report only)")] = False,
+        "--execute", help="Perform the available updates: download missing kernels, "
+                          "move aliases to newer snapshots, offer to move archived "
+                          "snapshots to former_versions/ (default: report only)")] = False,
     refresh: Annotated[bool, typer.Option(
         "--refresh",
         help="Ask the server for every kernel size again (default: reuse the sizes it "
@@ -283,4 +285,4 @@ def update(
     with open_db(ctx, read_only=not execute) as db:
         db.update_all(dry_run=not execute, verbose=state(ctx).verbose, refresh=refresh)
     if not execute:
-        console.print("[dim]Dry run: pass --execute to download.[/dim]")
+        console.print("[dim]Dry run: pass --execute to perform these updates.[/dim]")

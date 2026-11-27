@@ -21,9 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and browses it; when both servers list it, ESA is used and the output prints
   the commands to switch. `skd browse` with no missions runs the mission picker
   in a terminal, and prints both server addresses otherwise.
+- The agent skill (`skill.md`) covers the CLI as well as the Python API: shell
+  rows in its decision table (`skd browse`, `get -y`, `update`, `check`) and
+  gotchas for `update` and for running without a terminal.
 
 ### Changed
 
+- `skd update --help` and the CLI page describe `--execute` as performing all
+  available updates (missing kernels, alias moves, the archive offer), not
+  only downloading missing kernels.
 - `skd update` prints one summary table instead of every metakernel's full
   kernel table (#57). A progress bar, with the current metakernel on the line below it, shows the walk and disappears; the
   table gains a size column and lists each missing kernel under its

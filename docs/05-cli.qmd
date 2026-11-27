@@ -228,7 +228,7 @@ If both the live and `former_versions/` URLs 404, the error names both attempted
 
 ## `update`
 
-Re-fetch every tracked metakernel from its source and report what is missing. Nothing is written unless you pass `--execute`.
+Check every tracked metakernel against its server and report the available updates: missing kernels, aliases with a newer snapshot, snapshots the server archived. Each run fetches every `.tm`; the kernel sizes are asked once per day and cached. Nothing is written unless you pass `--execute`, which performs all of them.
 
 ```bash
 skd update [--execute] [--refresh]
@@ -236,7 +236,7 @@ skd update [--execute] [--refresh]
 
 | Option | Description |
 |--------|-------------|
-| `--execute` | Download the missing kernels. Default: report only. `--execute` is the confirmation; there is no per-metakernel prompt. |
+| `--execute` | Perform the available updates: download the missing kernels and move each alias to its newer snapshot. Moving archived snapshots into `mk/former_versions/` is asked once. Default: report only. `--execute` is the confirmation; there is no per-metakernel prompt. |
 | `--refresh` | Ask the server for every kernel size again, instead of reusing the sizes it gave earlier today. |
 
 `update` asks the server for each kernel's size once per calendar day. The answers are kept in `remote_sizes.json` next to the database, and every later `update` that day reuses them, which turns hundreds of size requests into none. A kernel the server has not been asked about today, for example one that a new metakernel version adds, is still asked. Each metakernel's `.tm` file is fetched on every run, so a new version is always noticed. `get` and `check --remote` never use the cache. Deleting `remote_sizes.json` is always safe.
@@ -253,7 +253,7 @@ skd update
 skd update --execute
 ```
 
-For each tracked metakernel, `update` fetches it from its source URL and checks which of its kernels are in the database. A progress bar shows how far the walk is, with the metakernel being checked named on the line below, and disappears when it ends. With `--execute` the missing kernels are downloaded, with a download bar, and the directories the metakernel points at are re-indexed. The output is one summary table, one row per metakernel, with the count of missing kernels (dry run) or downloaded kernels (`--execute`) and their total size. In a dry run each missing kernel is listed with its size under its metakernel; a complete metakernel takes one row. A line under the table says how many sizes came from today's cache, and a dry run ends with `Dry run: pass --execute to download.`
+For each tracked metakernel, `update` fetches it from its source URL and checks which of its kernels are in the database. A progress bar shows how far the walk is, with the metakernel being checked named on the line below, and disappears when it ends. With `--execute` the missing kernels are downloaded, with a download bar, and the directories the metakernel points at are re-indexed. The output is one summary table, one row per metakernel, with the count of missing kernels (dry run) or downloaded kernels (`--execute`) and their total size. In a dry run each missing kernel is listed with its size under its metakernel; a complete metakernel takes one row. A line under the table says how many sizes came from today's cache, and a dry run ends with `Dry run: pass --execute to perform these updates.`
 
 `skd -v update` also prints each metakernel's full status table, the one `get` shows, before the summary.
 
@@ -271,7 +271,7 @@ For each tracked metakernel, `update` fetches it from its source URL and checks 
 │ JUICE       │ juice_crema_5_2.tm                     │       0 │         │                                         │
 └─────────────┴────────────────────────────────────────┴─────────┴─────────┴─────────────────────────────────────────┘
 Kernel sizes: 1515 from today's cache, 0 asked the server (--refresh asks for all).
-Dry run: pass --execute to download.
+Dry run: pass --execute to perform these updates.
 ```
 
 - An alias is a symlink such as `bc_stp.tm` that points at a versioned snapshot such as `bc_stp_v434_20261024_001.tm`. `update` compares it with the server's `mk/` listing. When the server lists a newer snapshot of that name, the dry run notes `update available: <old> → <new>` together with the kernels the new version would need. `--execute` fetches the new snapshot and points the alias at it, without asking. An alias that is current gets no row.

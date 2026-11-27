@@ -265,15 +265,23 @@ class TestPublicApi:
         assert len(listed) == len(set(listed))
 
     def test_skill_decision_table_names_real_functions(self):
-        """C56: every `use` in the generated skill's decision table names a public function."""
-        from spice_kernel_db import KernelDB
+        """C56: every `use` in the generated skill's decision table names a public
+        function, or a visible CLI command written as `skd <verb>`."""
+        import typer
 
+        from spice_kernel_db import KernelDB
+        from spice_kernel_db.cli import app
+
+        visible = {name for name, cmd in typer.main.get_command(app).commands.items()
+                   if not cmd.hidden}
         text = (Path(__file__).parent.parent / "great-docs.yml").read_text()
         uses = re.findall(r'^\s+use: "([^"]+)"', text, flags=re.MULTILINE)
         assert len(uses) >= 5
         for use in uses:
+            verbs = re.findall(r"\bskd ([a-z]+)", use)
+            assert set(verbs) <= visible, (use, verbs)
             names = re.findall(r"\b([A-Za-z_]\w*)\s*\(", use)
-            assert names, use
+            assert names or verbs, use
             for name in names:
                 if name.startswith("KernelDB."):
                     name = name.split(".", 1)[1]
