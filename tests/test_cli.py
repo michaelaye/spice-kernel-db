@@ -1483,6 +1483,25 @@ class TestVerbTree:
         cache = json.loads((tracked.tmp / "remote_sizes.json").read_text())
         assert set(cache) == {old, new}
 
+    def test_update_prints_one_summary(self, tracked, capsys):
+        """update shows one table naming only the missing kernels; -v adds the per-metakernel tables (#57)."""
+        def fetch(url, *a, **k):
+            return ("\\begindata\nPATH_VALUES = ( '..' )\nPATH_SYMBOLS = ( 'K' )\n"
+                    "KERNELS_TO_LOAD = ( '$K/pck/pck00011.tpc' '$K/pck/new.tpc' )\n"
+                    "\\begintext\n"), url
+
+        with patch("spice_kernel_db.db._fetch_metakernel", side_effect=fetch), \
+             patch("spice_kernel_db.db.query_remote_sizes",
+                   side_effect=lambda urls, **k: {u: 2048 for u in urls}):
+            assert tracked.run("update") == 0
+            out = capsys.readouterr().out
+            assert "Fetching" not in out and "Metakernel:" not in out
+            assert "new.tpc" in out and "2.0 KB" in out
+            assert "pck00011.tpc" not in out  # in the database, so not listed
+            assert tracked.run("-v", "update") == 0
+            out = capsys.readouterr().out
+            assert "Fetching" in out and "Metakernel:" in out and "pck00011.tpc" in out
+
     # C20
     def test_inspect_verbs(self, tracked, capsys):
         assert tracked.run("ls", "juice") == 0

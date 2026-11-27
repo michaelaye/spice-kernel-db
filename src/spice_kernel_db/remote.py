@@ -517,6 +517,8 @@ class SizeCache:
 
         self.path = Path(path)
         self.refresh = refresh
+        self.reused = 0  # sizes answered from the file, counted by the caller
+        self.asked = 0  # sizes that went to the server
         self.today = today or datetime.date.today().isoformat()
         try:
             raw = json.loads(self.path.read_text())

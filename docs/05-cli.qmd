@@ -247,11 +247,30 @@ skd update
 skd update --execute
 ```
 
-For each tracked metakernel, `update` fetches it from its source URL and prints the same status table as `get`. A dry run stops there. With `--execute` the missing kernels are downloaded and the directories the metakernel points at are re-indexed. A summary table closes the run, one row per metakernel, with the count of missing kernels (dry run) or downloaded kernels (`--execute`). A dry run ends with the line `Dry run: pass --execute to download.`
+For each tracked metakernel, `update` fetches it from its source URL and checks which of its kernels are in the database. A progress bar shows how far the walk is, with the metakernel being checked named on the line below, and disappears when it ends. With `--execute` the missing kernels are downloaded, with a download bar, and the directories the metakernel points at are re-indexed. The output is one summary table, one row per metakernel, with the count of missing kernels (dry run) or downloaded kernels (`--execute`) and their total size. In a dry run each missing kernel is listed with its size under its metakernel; a complete metakernel takes one row. A line under the table says how many sizes came from today's cache, and a dry run ends with `Dry run: pass --execute to download.`
+
+`skd -v update` also prints each metakernel's full status table, the one `get` shows, before the summary.
+
+```text
+                                      update: all tracked metakernels (dry run)
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Mission     ┃ Metakernel                             ┃ Missing ┃    Size ┃ Note                                    ┃
+┡━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ BEPICOLOMBO │ bc_ltp.tm                              │       3 │ 13.2 MB │                                         │
+│             │   bc_mpo_sa_flp_001_00228_20270314_20… │         │  3.6 MB │                                         │
+│             │   bc_mpo_sa_flp_002_00233_20270701_20… │         │  6.5 MB │                                         │
+│             │   bc_mpo_sc_slp_001_20270314_20270704… │         │  3.0 MB │                                         │
+│ BEPICOLOMBO │ bc_ltp_v434_20261024_001.tm            │         │         │ source gone (HTTP 404): skd clean       │
+│             │                                        │         │         │ --registry                              │
+│ JUICE       │ juice_crema_5_2.tm                     │       0 │         │                                         │
+└─────────────┴────────────────────────────────────────┴─────────┴─────────┴─────────────────────────────────────────┘
+Kernel sizes: 1515 from today's cache, 0 asked the server (--refresh asks for all).
+Dry run: pass --execute to download.
+```
 
 - Alias rows, where a symlink stands next to its target, are skipped. The target is walked under its own name.
 - A row with no stored source URL is fetched from the mission's `mk/` URL plus the filename. If the mission has no `mk/` URL, the row gets a note in the summary table.
-- A source that answers 403, 404 or 410 gets a note in the summary table (`source gone (HTTP 404); spice-kernel-db clean --registry`) and the walk goes on. The exit code stays 0.
+- A source that answers 403, 404 or 410 gets a note in the summary table (`source gone (HTTP 404): skd clean --registry`) and the walk goes on. The exit code stays 0.
 - A source that cannot be reached at all is noted the same way and does not stop the walk.
 
 Use `get <name>` to update one metakernel.

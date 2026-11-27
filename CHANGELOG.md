@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Python: `KernelDB.update_all(refresh=...)`, and `get_metakernel` /
   `update_metakernel` take a `size_cache`.
 
+### Changed
+
+- `skd update` prints one summary table instead of every metakernel's full
+  kernel table (#57). A progress bar, with the current metakernel on the line below it, shows the walk and disappears; the
+  table gains a size column and lists each missing kernel under its
+  metakernel. `skd -v update` keeps the per-metakernel tables. The
+  "source gone" note is shorter (`skd clean --registry`). In Python:
+  `get_metakernel` and `update_metakernel` take `quiet`, and their results
+  and `update_all`'s carry `missing_kernels`. Needs rich 14.2 or newer.
+
 ### Fixed
 
 - `skd coverage` no longer fails with "Cannot execute statement of type

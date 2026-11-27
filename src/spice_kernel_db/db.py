@@ -26,8 +26,9 @@ from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from rich.text import Text
 
 from spice_kernel_db.config import kernel_roots
 from spice_kernel_db.hashing import (
@@ -418,6 +419,20 @@ def _warn_if_renamed(warnings: list[str], filename: str, hit: dict) -> None:
             f"{filename}: no file of that name registered, using "
             f"byte-identical {actual} in [{hit['mission']}]"
         )
+
+
+class _WalkProgress(Progress):
+    """A progress bar with the item in work on a second line (#57).
+
+    Filenames differ a lot in length; on the bar's own line they pushed it back
+    and forth. Each task's ``name`` field is shown below the bar instead.
+    """
+
+    def get_renderables(self):
+        yield self.make_tasks_table(self.tasks)
+        for task in self.tasks:
+            yield Text(f"  {task.fields.get('name', '')}", style="dim",
+                       no_wrap=True, overflow="ellipsis")
 
 
 def _format_size(n: int) -> str:
@@ -2776,19 +2791,21 @@ class KernelDB:
     # ------------------------------------------------------------------
 
     def _remote_sizes(
-        self, urls: list[str], size_cache: SizeCache | None,
+        self, urls: list[str], size_cache: SizeCache | None, *, quiet: bool = False,
     ) -> dict[str, int | None]:
-        """Server sizes of *urls*, today's cached ones reused when there is a cache (#56)."""
+        """Server sizes of *urls*, today's cached ones reused when there is a cache (#56).
+
+        The cache counts what it answered and what went to the server; ``update_all``
+        reports the totals once. *quiet* hides the per-request progress bar.
+        """
         known = size_cache.lookup(urls) if size_cache else {}
         todo = [u for u in urls if u not in known]
-        fresh = query_remote_sizes(todo, console=self.console) if todo else {}
+        console = None if quiet else self.console
+        fresh = query_remote_sizes(todo, console=console) if todo else {}
         if size_cache:
             size_cache.store(fresh)
-            if known:
-                self._show(
-                    f"  [dim]Sizes: {len(known)} from today's cache, {len(todo)} asked "
-                    f"the server (update --refresh asks for all)[/dim]"
-                )
+            size_cache.reused += len(known)
+            size_cache.asked += len(todo)
         return {**known, **fresh}
 
     def _snapshot_kernel_hashes(
@@ -2983,6 +3000,7 @@ class KernelDB:
         verbose: bool = False,
         dry_run: bool = False,
         size_cache: SizeCache | None = None,
+        quiet: bool = False,
     ) -> dict:
         """Fetch a remote metakernel, show its status, and download the missing kernels.
 
@@ -3039,13 +3057,18 @@ class KernelDB:
         size_cache : SizeCache | None, default None
             Reuse the kernel sizes the server gave earlier today, and remember the new answers
             (#56). ``update_all`` passes one; ``None`` asks the server for every size.
+        quiet : bool, default False
+            Show nothing but the download progress: no status table, no totals, no result panel.
+            ``update_all`` passes it and reports every metakernel in one summary table (#57). The
+            confirmation question is still asked unless ``yes=True``.
 
         Returns
         -------
         dict
             With the keys ``found`` and ``missing`` (the indices of the metakernel's kernel entries
-            that are in the database and that are not), ``downloaded`` (the paths of the registered
-            files) and ``warnings``. After a dry run the dict also has ``dry_run: True`` and
+            that are in the database and that are not), ``missing_kernels`` (a ``(filename, size)``
+            pair per missing entry, the size ``None`` when the server gave none), ``downloaded``
+            (the paths of the registered files) and ``warnings``. After a dry run the dict also has ``dry_run: True`` and
             ``downloaded`` is empty. It has ``aborted: True`` when nothing was downloaded because
             there was no console to ask on, or because the question was answered no. In the second
             case the registry is restored to its state before the call.
@@ -3091,7 +3114,8 @@ class KernelDB:
         download_dir = Path(download_dir).expanduser().resolve()
 
         # 1. Fetch and parse
-        self._show(f"Fetching [bold]{url}[/bold] ...")
+        if not quiet:
+            self._show(f"Fetching [bold]{url}[/bold] ...")
         text, final_url = _fetch_metakernel(url)
         parsed = parse_metakernel_text(text, final_url)
 
@@ -3196,7 +3220,7 @@ class KernelDB:
             # Release lock during network I/O so other processes aren't blocked.
             self.release()
             try:
-                sizes = self._remote_sizes(kernel_urls, size_cache)
+                sizes = self._remote_sizes(kernel_urls, size_cache, quiet=quiet)
             finally:
                 self.reacquire()
             # Issue 5: Check if state changed during lock release
@@ -3207,52 +3231,55 @@ class KernelDB:
         total = len(filenames)
         n_found = len(found_indices)
         n_missing = len(missing_indices)
-        download_bytes = sum(
-            sizes.get(kernel_urls[i]) or 0 for i in missing_indices
-        )
+        missing_kernels = [
+            (filenames[i], sizes.get(kernel_urls[i])) for i in missing_indices
+        ]
+        download_bytes = sum(sz or 0 for _, sz in missing_kernels)
 
-        # (+N aliases): flag in-db kernels whose content is shared under
-        # other filenames, pointing the user at `aliases <name>`.
-        alias_extra = self.alias_counts_by_name(
-            [filenames[i] for i in found_indices]
-        ) if self.console is not None else {}
-        table = Table(title=f"Metakernel: {mk_name} ({total} kernels)")
-        table.add_column("Kernel")
-        table.add_column("Size", justify="right")
-        table.add_column("Status")
-        for i in range(total):
-            fname = filenames[i]
-            sz = sizes.get(kernel_urls[i])
-            sz_str = _format_size(sz) if sz is not None else "unknown"
-            status = "in db" if i in found_indices else "missing"
-            style = "green" if status == "in db" else "red"
-            label = fname
-            n_alias = alias_extra.get(fname)
-            if n_alias:
-                label = (
-                    f"{fname} [cyan](+{n_alias} "
-                    f"alias{'es' if n_alias > 1 else ''})[/cyan]"
-                )
-            table.add_row(label, sz_str, f"[{style}]{status}[/{style}]")
-        self._show(table)
+        if not quiet:
+            # (+N aliases): flag in-db kernels whose content is shared under
+            # other filenames, pointing the user at `aliases <name>`.
+            alias_extra = self.alias_counts_by_name(
+                [filenames[i] for i in found_indices]
+            ) if self.console is not None else {}
+            table = Table(title=f"Metakernel: {mk_name} ({total} kernels)")
+            table.add_column("Kernel")
+            table.add_column("Size", justify="right")
+            table.add_column("Status")
+            for i in range(total):
+                fname = filenames[i]
+                sz = sizes.get(kernel_urls[i])
+                sz_str = _format_size(sz) if sz is not None else "unknown"
+                status = "in db" if i in found_indices else "missing"
+                style = "green" if status == "in db" else "red"
+                label = fname
+                n_alias = alias_extra.get(fname)
+                if n_alias:
+                    label = (
+                        f"{fname} [cyan](+{n_alias} "
+                        f"alias{'es' if n_alias > 1 else ''})[/cyan]"
+                    )
+                table.add_row(label, sz_str, f"[{style}]{status}[/{style}]")
+            self._show(table)
 
-        if verbose:
-            self._show("[dim]Resolved URLs:[/dim]")
-            for relpath, kurl in zip(relpaths, kernel_urls):
-                self._show(f"  [dim]{relpath} -> {kurl}[/dim]")
+            if verbose:
+                self._show("[dim]Resolved URLs:[/dim]")
+                for relpath, kurl in zip(relpaths, kernel_urls):
+                    self._show(f"  [dim]{relpath} -> {kurl}[/dim]")
 
-        self._show(Panel(
-            f"Total: [bold]{total}[/bold] | "
-            f"In DB: [green]{n_found}[/green] | "
-            f"Missing: [red]{n_missing}[/red] | "
-            f"Download: [bold]{_format_size(download_bytes)}[/bold]",
-            title=mk_name,
-        ))
+            self._show(Panel(
+                f"Total: [bold]{total}[/bold] | "
+                f"In DB: [green]{n_found}[/green] | "
+                f"Missing: [red]{n_missing}[/red] | "
+                f"Download: [bold]{_format_size(download_bytes)}[/bold]",
+                title=mk_name,
+            ))
 
         if dry_run:
             return {
                 "found": found_indices,
                 "missing": missing_indices,
+                "missing_kernels": missing_kernels,
                 "downloaded": [],
                 "warnings": [],
                 "dry_run": True,
@@ -3265,14 +3292,16 @@ class KernelDB:
                 n_linked = self._link_existing_kernels(
                     found_indices, filenames, relpaths, download_dir, mission,
                 )
-            lines = ["[green]All kernels already in database.[/green]"]
-            if n_linked:
-                lines.append(f"Linked {n_linked} existing kernels into download tree.")
-            lines.append(f"\nMetakernel ready: [bold]{mk_dest}[/bold]")
-            self._show(Panel("\n".join(lines), title="Result"))
+            if not quiet:
+                lines = ["[green]All kernels already in database.[/green]"]
+                if n_linked:
+                    lines.append(f"Linked {n_linked} existing kernels into download tree.")
+                lines.append(f"\nMetakernel ready: [bold]{mk_dest}[/bold]")
+                self._show(Panel("\n".join(lines), title="Result"))
             return {
                 "found": found_indices,
                 "missing": [],
+                "missing_kernels": [],
                 "downloaded": [],
                 "warnings": [],
             }
@@ -3454,6 +3483,7 @@ class KernelDB:
         dry_run: bool = False,
         rescan: bool = True,
         size_cache: SizeCache | None = None,
+        quiet: bool = False,
     ) -> dict:
         """Re-fetch a metakernel from its source URL and download new or missing kernels.
 
@@ -3488,6 +3518,8 @@ class KernelDB:
         size_cache : SizeCache | None, default None
             Passed to ``get_metakernel``: reuse today's server sizes (#56). ``update_all`` passes
             one; ``None`` asks the server for every size.
+        quiet : bool, default False
+            Passed to ``get_metakernel``: show only the download progress (#57).
 
         Returns
         -------
@@ -3541,6 +3573,7 @@ class KernelDB:
                 force=force,
                 dry_run=dry_run,
                 size_cache=size_cache,
+                quiet=quiet,
             )
         except urllib.error.HTTPError as e:
             if e.code in (403, 404, 410):
@@ -3648,34 +3681,49 @@ class KernelDB:
         Returns
         -------
         list[dict]
-            One dict per registry row walked, with the keys ``filename``, ``mission``, ``count`` and
+            One dict per registry row walked, with the keys ``filename``, ``mission``, ``count``,
+            ``missing_kernels`` (``(filename, size)`` pairs) and
             ``error``. ``count`` is the number of missing kernels in a dry run and the number of
             downloaded kernels otherwise. ``error`` is ``None`` or a one-line reason.
         """
         report: list[dict] = []
         scan_dirs: dict[Path, str] = {}
         size_cache = SizeCache(Path(self.db_path).parent / "remote_sizes.json", refresh=refresh)
-        for row in self.registry_rows():
-            if Path(row.mk_path).is_symlink():
-                continue  # the alias of a row walked under its own name
-            entry = {"filename": row.filename, "mission": row.mission,
-                     "count": 0, "error": None}
-            self._show(f"\n[bold]{row.filename}[/bold] ({row.mission})")
-            try:
-                result = self.update_metakernel(
-                    row.mk_path, yes=True, verbose=verbose, dry_run=dry_run, rescan=False,
-                    size_cache=size_cache,
-                )
-                entry["count"] = len(result["missing" if dry_run else "downloaded"])
-                for sd in result.get("scan_dirs", ()):
-                    scan_dirs.setdefault(sd, row.mission)
-            except MetakernelUnreachableError as e:
-                entry["error"] = f"source gone (HTTP {e.status}); spice-kernel-db clean --registry"
-            except LookupError as e:
-                entry["error"] = str(e)
-            except (urllib.error.URLError, OSError) as e:
-                entry["error"] = f"could not reach the source: {e}"
-            report.append(entry)
+        rows = [r for r in self.registry_rows() if not Path(r.mk_path).is_symlink()]
+        # A live bar while the metakernels are checked, the current one named on
+        # the line below (#57); a download bar nests inside it. --verbose prints
+        # each metakernel's full status table.
+        with _WalkProgress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=self.console, disable=self.console is None, transient=True,
+        ) as progress:
+            task_id = progress.add_task("Checking metakernels", total=len(rows), name="")
+            for row in rows:
+                progress.update(task_id, name=row.filename)
+                entry = {"filename": row.filename, "mission": row.mission,
+                         "count": 0, "missing_kernels": [], "error": None}
+                if verbose:
+                    self._show(f"\n[bold]{row.filename}[/bold] ({row.mission})")
+                try:
+                    result = self.update_metakernel(
+                        row.mk_path, yes=True, verbose=verbose, dry_run=dry_run, rescan=False,
+                        size_cache=size_cache, quiet=not verbose,
+                    )
+                    entry["count"] = len(result["missing" if dry_run else "downloaded"])
+                    entry["missing_kernels"] = result.get("missing_kernels", [])
+                    for sd in result.get("scan_dirs", ()):
+                        scan_dirs.setdefault(sd, row.mission)
+                except MetakernelUnreachableError as e:
+                    entry["error"] = f"source gone (HTTP {e.status}): skd clean --registry"
+                except LookupError as e:
+                    entry["error"] = str(e)
+                except (urllib.error.URLError, OSError) as e:
+                    entry["error"] = f"could not reach the source: {e}"
+                report.append(entry)
+                progress.advance(task_id)
 
         for sd, mission in sorted(scan_dirs.items()):
             self._rescan({sd}, mission, verbose=verbose)
@@ -3684,11 +3732,22 @@ class KernelDB:
         table.add_column("Mission")
         table.add_column("Metakernel")
         table.add_column("Missing" if dry_run else "Downloaded", justify="right")
+        table.add_column("Size", justify="right")
         table.add_column("Note")
         for e in report:
+            missing = e["missing_kernels"]
+            size = sum(sz or 0 for _, sz in missing)
             table.add_row(e["mission"] or "", e["filename"],
-                          "" if e["error"] else str(e["count"]), e["error"] or "")
+                          "" if e["error"] else str(e["count"]),
+                          _format_size(size) if missing else "", e["error"] or "")
+            if dry_run:  # name what a dry run would fetch, under its metakernel
+                for fname, sz in missing:
+                    table.add_row("", f"[dim]  {fname}[/dim]", "",
+                                  f"[dim]{_format_size(sz) if sz is not None else 'unknown'}[/dim]", "")
         self._show(table)
+        if size_cache.reused:
+            self._show(f"[dim]Kernel sizes: {size_cache.reused} from today's cache, "
+                       f"{size_cache.asked} asked the server (--refresh asks for all).[/dim]")
         return report
 
     def import_metakernel(
