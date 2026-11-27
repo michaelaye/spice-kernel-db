@@ -830,12 +830,24 @@ class TestAliasPicker:
             db.close()
 
 
-def test_version_matches_installed_metadata():
-    from importlib.metadata import version
+def test_version_is_the_same_in_all_three_places(capsys):
+    """_version.py, CITATION.cff and the conda recipe move together, and
+    --version reports _version.py, not the installed metadata (which an
+    editable install leaves at the version it was installed with)."""
+    import re
 
     import spice_kernel_db
+    from spice_kernel_db.cli import main
 
-    assert spice_kernel_db.__version__ == version("spice-kernel-db")
+    root = Path(__file__).resolve().parents[1]
+    citation = re.search(r"^version: (\S+)$", (root / "CITATION.cff").read_text(), re.M)
+    recipe = re.search(r'^  version: "([^"]+)"$', (root / "conda/recipe.yaml").read_text(), re.M)
+    assert citation.group(1) == spice_kernel_db.__version__
+    assert recipe.group(1) == spice_kernel_db.__version__
+
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert capsys.readouterr().out.strip() == f"spice-kernel-db {spice_kernel_db.__version__}"
 
 
 class TestGetDistinguishesMissingFromUnreachable:

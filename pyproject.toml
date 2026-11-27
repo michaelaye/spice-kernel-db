@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spice-kernel-db"
-version = "0.30.1"
+dynamic = ["version"]
 description = "Browse, get, and manage SPICE kernels and metakernels across NASA and ESA mission archives"
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,11 @@ skd = "spice_kernel_db.cli:main"
 Homepage = "https://github.com/michaelaye/spice-kernel-db"
 Repository = "https://github.com/michaelaye/spice-kernel-db"
 Issues = "https://github.com/michaelaye/spice-kernel-db/issues"
+
+# The version is written once, in _version.py; the package imports it from
+# there, so an editable install never reports a stale number.
+[tool.hatch.version]
+path = "src/spice_kernel_db/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spice_kernel_db"]

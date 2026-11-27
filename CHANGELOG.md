@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The version is written once, in `spice_kernel_db/_version.py`, and both
+  `spice_kernel_db.__version__` and `skd --version` read it there instead of
+  the installed package metadata. An editable install therefore reports the
+  current version after a bump without being reinstalled. `pyproject.toml`
+  takes the version from the same file at build time.
 - `skd update --help` and the CLI page describe `--execute` as performing all
   available updates (missing kernels, alias moves, the archive offer), not
   only downloading missing kernels.

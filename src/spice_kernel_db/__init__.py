@@ -5,6 +5,7 @@ documented in the generated reference, and held stable within a major version
 (#49). Everything else is internal.
 """
 
+from spice_kernel_db._version import __version__
 from spice_kernel_db.api import (
     check,
     get,
@@ -58,12 +59,3 @@ __all__ = [
     "scan",
 ]
 
-
-def __getattr__(name: str):
-    # ``__version__`` is looked up on first access: importlib.metadata costs
-    # ~20 ms to import and most imports of the package never read it (#26).
-    if name == "__version__":
-        from importlib.metadata import version
-
-        return version("spice-kernel-db")
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

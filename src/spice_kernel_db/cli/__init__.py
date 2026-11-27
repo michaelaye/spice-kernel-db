@@ -15,6 +15,7 @@ from typing import Annotated, Optional
 
 import typer
 
+from spice_kernel_db._version import __version__
 from spice_kernel_db.config import ConfigError, LegacyDatabaseFound
 from spice_kernel_db.db import (
     AmbiguousKernelRoot,
@@ -127,17 +128,9 @@ def logging_to_stderr() -> Iterator[None]:
         _LOG.removeHandler(handler)
 
 
-def _pkg_version() -> str:
-    # importlib.metadata is imported on demand: it costs ~20 ms and only
-    # ``--version`` and the no-args summary need it (#26).
-    from importlib.metadata import version
-
-    return version("spice-kernel-db")
-
-
 def _version(flag: bool) -> None:
     if flag:
-        print(f"spice-kernel-db {_pkg_version()}")
+        print(f"spice-kernel-db {__version__}")
         raise typer.Exit()
 
 
@@ -171,7 +164,7 @@ def _show_default_summary() -> None:
     from spice_kernel_db.config import load_config
 
     console.print(
-        f"[bold]spice-kernel-db[/bold] {_pkg_version()}\n"
+        f"[bold]spice-kernel-db[/bold] {__version__}\n"
     )
 
     config = load_config()
