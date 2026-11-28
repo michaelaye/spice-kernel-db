@@ -38,6 +38,7 @@ requirements:
     - requests >=2.31
     - rich >=14.2
     - typer >=0.27
+    - yarl >=1.9
 
 tests:
   - python:

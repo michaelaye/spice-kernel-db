@@ -153,8 +153,9 @@ Both use the same `<server>/<MISSION>/kernels/mk/` directory structure.
 
 - Python >= 3.11
 - [DuckDB](https://duckdb.org/) >= 1.0
-- [rich](https://rich.readthedocs.io/) >= 13.0
+- [rich](https://rich.readthedocs.io/) >= 14.2
 - [Typer](https://typer.tiangolo.com/) >= 0.27
+- [yarl](https://yarl.aio-libs.org/) >= 1.9
 - [requests](https://requests.readthedocs.io/) >= 2.31
 - optional: [spiceypy](https://spiceypy.readthedocs.io/) >= 6.0 for `coverage` (`pip install 'spice-kernel-db[spice]'`)
 

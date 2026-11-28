@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from rich.console import Console
+from yarl import URL
 from spice_kernel_db import KernelDB, parse_metakernel
 from spice_kernel_db.config import Config, load_config, save_config
 from tests.helpers import REMOTE_MK_TEXT, fake_download
@@ -203,6 +204,21 @@ class TestParseMetakernelText:
         assert parsed.path_symbols == ["KERNELS"]
         assert len(parsed.kernels) == 2
         assert "$KERNELS/lsk/naif0012.tls" in parsed.kernels
+
+    def test_url_source_round_trips_unchanged(self):
+        """#54: a URL source keeps its '//' (it was a Path, which collapsed it)."""
+        url = "https://naif.jpl.nasa.gov/pub/naif/JUICE/kernels/mk/test.tm"
+        parsed = parse_metakernel_text(self.SAMPLE_MK, url)
+        assert isinstance(parsed.source, URL)
+        assert str(parsed.source) == url
+
+    def test_plain_name_source_is_a_path(self):
+        assert parse_metakernel_text(self.SAMPLE_MK, "test.tm").source == Path("test.tm")
+
+    def test_file_source_is_the_resolved_path(self, tmp_path):
+        mk = tmp_path / "test.tm"
+        mk.write_text(self.SAMPLE_MK)
+        assert parse_metakernel(mk).source == mk.resolve()
 
     def test_kernel_filenames_from_text(self):
         parsed = parse_metakernel_text(self.SAMPLE_MK, "test.tm")

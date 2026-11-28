@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ParsedMetakernel.source` replaces `source_path` (#54). A metakernel parsed
+  from a URL with `parse_metakernel_text` now keeps the URL unchanged, as a
+  `yarl.URL`; it was stored as a `Path`, which turned `https://` into
+  `https:/`. A file parsed with `parse_metakernel` gives its resolved `Path`,
+  as before. `source_path` is gone; read `source` instead. New dependency:
+  `yarl`.
+
 - `get <name>` on a tracked snapshot the server had moved to
   `mk/former_versions/` failed with "unreachable" (#61). It now asks
   whether you want the archived copy (`-y` answers yes; without a terminal it

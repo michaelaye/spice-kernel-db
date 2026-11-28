@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from yarl import URL
+
 
 @dataclass
 class ParsedMetakernel:
@@ -20,9 +22,10 @@ class ParsedMetakernel:
 
     Attributes
     ----------
-    source_path : Path
-        Absolute path to the source file when parsed with ``parse_metakernel``. When parsed with
-        ``parse_metakernel_text`` it is the *source* string given there, as a ``Path``.
+    source : Path | yarl.URL
+        Where the text came from. ``parse_metakernel`` gives the absolute path of the file.
+        ``parse_metakernel_text`` gives a ``yarl.URL`` when *source* has a scheme (``https://...``),
+        unchanged, and a ``Path`` otherwise.
     header : str
         Everything before the first ``\\begindata``.
     path_values : list[str]
@@ -46,7 +49,7 @@ class ParsedMetakernel:
         Relative paths with ``$SYMBOL`` stripped (``list[str]``).
     """
 
-    source_path: Path
+    source: Path | URL
     header: str
     path_values: list[str] = field(default_factory=list)
     path_symbols: list[str] = field(default_factory=list)
@@ -235,7 +238,7 @@ def _extract_assignments(data_text: str) -> dict[str, list[str]]:
     return out
 
 
-def _parse_text(text: str, source_path: Path) -> ParsedMetakernel:
+def _parse_text(text: str, source: Path | URL) -> ParsedMetakernel:
     """Parse metakernel content from text.
 
     Handles multiple ``\\begindata`` / ``\\begintext`` blocks as per
@@ -245,7 +248,7 @@ def _parse_text(text: str, source_path: Path) -> ParsedMetakernel:
     header, data_text = _split_data_regions(text)
     assignments = _extract_assignments(data_text)
     return ParsedMetakernel(
-        source_path=source_path,
+        source=source,
         header=header,
         path_values=assignments.get("PATH_VALUES", []),
         path_symbols=assignments.get("PATH_SYMBOLS", []),
@@ -267,7 +270,7 @@ def parse_metakernel(path: str | Path) -> ParsedMetakernel:
     -------
     ParsedMetakernel
         The parsed ``PATH_VALUES``, ``PATH_SYMBOLS`` and ``KERNELS_TO_LOAD``, with the header.
-        ``source_path`` is the absolute path of the file.
+        ``source`` is the absolute path of the file.
 
     Raises
     ------
@@ -298,8 +301,9 @@ def parse_metakernel_text(text: str, source: str) -> ParsedMetakernel:
     text : str
         The metakernel text content.
     source : str
-        A source identifier, for example the URL. It is stored as the ``source_path`` attribute of
-        the result, converted to a ``Path``. A URL therefore loses one slash of its ``://``.
+        Where the text came from, usually the URL it was fetched from. It is stored as the
+        ``source`` attribute of the result: a ``yarl.URL`` when it has a scheme, a ``Path``
+        otherwise.
 
     Returns
     -------
@@ -324,8 +328,11 @@ def parse_metakernel_text(text: str, source: str) -> ParsedMetakernel:
     ['lsk/naif0012.tls', 'spk/jup365.bsp']
     >>> mk.resolve(mk.kernels[0])
     '/data/kernels/lsk/naif0012.tls'
+    >>> str(mk.source)
+    'https://example.org/mk/demo.tm'
     """
-    return _parse_text(text, Path(source))
+    url = URL(source)
+    return _parse_text(text, url if url.scheme else Path(source))
 
 
 def write_metakernel(
