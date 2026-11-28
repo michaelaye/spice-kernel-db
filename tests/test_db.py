@@ -694,6 +694,69 @@ class TestArchiveOnScan:
 
         db.close()
 
+    def test_archived_metakernel_is_tracked_where_it_now_lives(self, tmp_path):
+        """#51: the registry row names the moved .tm, ls counts its entries,
+        and a re-scan of the old tree (now symlinks) adds no second row."""
+        src_dir = tmp_path / "old_tree"
+        src_dir.mkdir()
+        (src_dir / "naif0012.tls").write_text("FAKE LSK naif0012")
+        (src_dir / "demo.tm").write_text(textwrap.dedent("""\
+            KPL/MK
+            \\begindata
+              PATH_VALUES  = ( '.' )
+              PATH_SYMBOLS = ( 'K' )
+              KERNELS_TO_LOAD = ( '$K/naif0012.tls' )
+            \\begintext
+        """))
+        archive_dir = tmp_path / "archive"
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        try:
+            db.scan_directory(
+                src_dir, mission="JUICE", archive=True, archive_roots={"JUICE": archive_dir},
+            )
+            moved = (archive_dir / "JUICE" / "mk" / "demo.tm").resolve()
+            assert Path(db.registry_row("demo.tm").mk_path) == moved
+
+            [row] = db.list_metakernels(show=False)
+            assert row["n_kernels"] == 1
+
+            db.scan_directory(src_dir, mission="JUICE")
+            assert [r["mk_path"] for r in db.list_metakernels(show=False)] == [str(moved)]
+        finally:
+            db.close()
+
+    def test_row_written_under_the_old_symlink_is_moved_on_rescan(self, tmp_path):
+        """#51: a row the old code wrote under the symlink moves to the file,
+        keeping its source URL; an alias symlink of another name stays."""
+        root = tmp_path / "root" / "JUICE" / "mk"
+        root.mkdir(parents=True)
+        mk = root / "demo_v1.tm"
+        mk.write_text("KPL/MK\n\\begindata\n  KERNELS_TO_LOAD = ( 'a.tls' )\n\\begintext\n")
+        old_tree = tmp_path / "old"
+        old_tree.mkdir()
+        (old_tree / "demo_v1.tm").symlink_to(mk)
+        (root / "demo.tm").symlink_to(mk.name)
+
+        db = KernelDB(tmp_path / "test.duckdb")
+        try:
+            insert = ("INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, "
+                      "acquired_at) VALUES (?, 'JUICE', ?, ?, current_timestamp)")
+            db.con.execute(insert, [str(old_tree / "demo_v1.tm"), "https://x/mk/demo_v1.tm",
+                                    "demo_v1.tm"])
+            db.con.execute(insert, [str(root / "demo.tm"), None, "demo.tm"])
+
+            db.scan_directory(old_tree, mission="JUICE")
+
+            rows = {r["filename"]: r for r in db.list_metakernels(show=False)}
+            assert rows["demo_v1.tm"]["mk_path"] == str(mk.resolve())
+            assert rows["demo_v1.tm"]["source_url"] == "https://x/mk/demo_v1.tm"
+            assert rows["demo_v1.tm"]["n_kernels"] == 1
+            assert rows["demo.tm"]["mk_path"] == str(root / "demo.tm")
+            assert len(rows) == 2
+        finally:
+            db.close()
+
     def test_archive_skips_already_archived(self, tmp_path):
         """If file is already at the archive destination, no move needed."""
         archive_dir = tmp_path / "archive"

@@ -1870,7 +1870,29 @@ class KernelDB:
         otherwise leaves the row alone. The re-scan that follows every
         ``get`` used to rewrite it, wiping the source URL and the
         acquisition time (2026-11-21).
+
+        The row is keyed by the resolved path, as the entries are (#51): a
+        scan over a symlink left by ``scan --archive`` names the file where it
+        now lives, and a later scan of that symlink finds the same row. A row
+        written before that, under a symlink of the same name that resolves
+        here, is moved to this path with its source and acquisition time.
+        An alias has a name of its own and is never moved.
         """
+        mk_path = Path(mk_path).resolve()
+        for (old,) in self.con.execute(
+            "SELECT mk_path FROM metakernel_registry WHERE filename = ? AND mk_path <> ?",
+            [mk_path.name, str(mk_path)],
+        ).fetchall():
+            if Path(old).resolve() == mk_path:
+                self.con.execute(
+                    "DELETE FROM metakernel_entries WHERE mk_path = ?", [old])
+                self.con.execute(
+                    "DELETE FROM metakernel_registry WHERE mk_path = ? AND EXISTS "
+                    "(SELECT 1 FROM metakernel_registry WHERE mk_path = ?)",
+                    [old, str(mk_path)])
+                self.con.execute(
+                    "UPDATE metakernel_registry SET mk_path = ? WHERE mk_path = ?",
+                    [str(mk_path), old])
         self.index_metakernel(mk_path)
         if official is None and self.con.execute(
             "SELECT 1 FROM metakernel_registry WHERE mk_path = ?", [str(mk_path)],

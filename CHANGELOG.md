@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `scan --archive` tracked a moved metakernel under the symlink it left
+  behind, so `ls` showed it with 0 kernels while `show` listed them all (#51).
+  The registry row now names the file where it lives. A row written that way
+  before is moved to the file, with its source and acquisition time, by the
+  next scan of either the old tree or the new place; re-scanning the old tree
+  no longer adds a second row. Alias symlinks (`bc_map.tm`) stay as they are.
+
 - `ParsedMetakernel.source` replaces `source_path` (#54). A metakernel parsed
   from a URL with `parse_metakernel_text` now keeps the URL unchanged, as a
   `yarl.URL`; it was stored as a `Path`, which turned `https://` into
