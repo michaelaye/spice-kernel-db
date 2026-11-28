@@ -3577,8 +3577,9 @@ class KernelDB:
             The metakernel was added by ``scan`` or ``import`` without a source URL, and its mission
             has no ``mk/`` URL.
         MetakernelUnreachableError
-            The remote returns HTTP 403, 404 or 410. This is typically NAIF rotating the file into
-            ``former_versions/``. Use ``prune_metakernels`` to clean up the stale registry row.
+            The remote returns HTTP 403, 404 or 410, and either ``archived`` is ``False`` or
+            ``former_versions/`` has no copy either. Only in the second case is the row stale;
+            ``prune_metakernels`` removes such rows and keeps archived ones.
         AmbiguousKernelRoot
             ``download_dir`` is not given and ``root_for`` cannot choose.
         """

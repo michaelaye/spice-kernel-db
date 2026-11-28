@@ -548,7 +548,7 @@ skd -v scan /data/spice/MRO/kernels
 skd scan /tmp/downloaded_kernels --mission JUICE --archive
 ```
 
-With `--archive`, each kernel file is moved into a kernel root (organized as `{root}/{mission}/{type}/{filename}`) and a symlink is left at the original location. A file already inside a configured root stays in that root; any other file goes to the root that already holds its mission, or to the only root. When a mission is held by no root, or by several, the command lists the roots and asks at a terminal, once per such mission, and exits 2 in a script; nothing moves until every file has its root (`--mission NAME` makes every scanned file that mission). This lets you import kernels from anywhere while keeping the original paths functional.
+With `--archive`, each kernel file is moved into a kernel root (organized as `{root}/{mission}/{type}/{filename}`) and a symlink is left at the original location. A file already inside a configured root stays in that root; any other file goes to the root that already holds its mission, or to the only root. When a mission is held by no root, or by several, the command lists the roots and asks at a terminal, once per such mission, and exits 2 in a script; nothing moves until every file has its root (`--mission NAME` makes every scanned file that mission). This lets you import kernels from anywhere while keeping the original paths functional. A metakernel moved this way is tracked where it now lives, and scanning the old tree again (now symlinks) adds no second row.
 
 A `.tm` file that `scan` meets is tracked as well. When it is already tracked, `scan` keeps the mission and the `official` flag of its registry row, because a scan only guesses them. `get` and `import` state them and replace the row.
 
