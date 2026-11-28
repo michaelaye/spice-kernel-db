@@ -169,17 +169,28 @@ spice-kernel-db clean --execute
 Without a class flag, `clean` drops the locations whose file is gone and the dangling symlinks left in each mission's download tree. Neither needs the network.
 
 
+## `get` says a metakernel is archived on the server
+
+NAIF and ESA move a versioned metakernel snapshot into `mk/former_versions/` once a newer one is out. The URL your database stored then answers 404. `get <name>` checks `former_versions/` and asks:
+
+```
+juice_crema_5_2_v470_20260603_001.tm is archived on the server (former_versions/). Get it anyway? [y/N]:
+```
+
+A yes fetches it from there and downloads the kernels it lists. The local copy moves to `mk/former_versions/` as well, as on the server. The server writes the archived file's `PATH_VALUES` for that location, so it loads there. A no leaves everything as it is. Without a terminal, `get` asks for `-y` and exits 2. The same question comes for a filename you have not tracked yet that the server has only in `former_versions/`.
+
+If an alias still points at the snapshot, `get` refuses and names the alias: `update --execute` moves the alias to the newer snapshot first.
+
 ## `get` fails with "Metakernel unreachable" / HTTP 404
 
-NAIF (and ESA) routinely rotate older versioned metakernel snapshots into a `former_versions/` subdirectory. Once that happens, the original URL stored in your local `metakernel_registry` returns 404, and `spice-kernel-db get <mk>` on that tracked metakernel aborts with a red panel like:
+When the stored source answers 403, 404 or 410 and the server's `former_versions/` has no copy either, `spice-kernel-db get <mk>` on that tracked metakernel stops with a red panel like:
 
 ```
 ╭─── Metakernel unreachable ───╮
 │ The remote metakernel is no longer available.
 │   URL:      …/mk/juice_crema_5_1_…_v462_20260223_001.tm
 │   Status:   HTTP 404
-│ NAIF (and ESA) routinely rotate old versioned snapshots into a
-│ former_versions/ subdirectory, which makes the original URL 404.
+│ It is not in the server's former_versions/ either.
 ╰──────────────────────────────╯
 ```
 
@@ -211,13 +222,7 @@ spice-kernel-db rm juice_crema_5_1_…_v462_20260223_001.tm
 
 Then re-acquire the current version with `browse` → `get`.
 
-**Want to re-fetch the *archived* version instead?** `get` automatically retries under `former_versions/` when the live `mk/` URL 404s, so:
-
-```bash
-spice-kernel-db get juice_crema_5_1_…_v462_20260223_001.tm --mission JUICE
-```
-
-…will transparently download the archived metakernel and its referenced kernels (which ESA keeps live in `kernels/{spk,fk,…}/` even after a `.tm` is rotated out). This is the recommended way to reproduce analyses against a specific older metakernel version.
+**Want an *archived* version?** Name it: `get` finds it in `former_versions/` and asks before fetching it (see the section above). ESA keeps the kernels an archived `.tm` lists in `kernels/{spk,fk,…}/`, so this is the way to reproduce an analysis against an older metakernel version.
 
 
 ## `check` says the metakernel does not resolve (exit 2)

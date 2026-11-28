@@ -57,6 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `get <name>` on a tracked snapshot the server had moved to
+  `mk/former_versions/` failed with "unreachable" (#61). It now asks
+  whether you want the archived copy (`-y` answers yes; without a terminal it
+  exits 2 with that hint), then fetches it from there and moves the local
+  copy to `mk/former_versions/`, as on the server. An untracked filename
+  found only in `former_versions/` gets the same question instead of being
+  fetched silently. In Python: `update_metakernel(archived=...)`.
+- The red *Metakernel unreachable* panel of `get <name>` never showed and
+  `get` exited 1 instead of 2: the handler for its base class `LookupError`
+  came first. The panel is now shown, only for a file gone from both `mk/`
+  and `former_versions/`.
 - `clean --registry` deleted the row of a versioned snapshot the server had
   only moved to `mk/former_versions/`, because its old URL answers 404 (#59).
   It now probes the `former_versions/` copy first and keeps such rows, naming

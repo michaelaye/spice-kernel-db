@@ -12,12 +12,15 @@ from rich.panel import Panel
 
 from spice_kernel_db.db import AmbiguousKernelRoot, KernelDB, MetakernelUnreachableError
 from spice_kernel_db.hashing import guess_mission
-from spice_kernel_db.remote import SPICE_SERVERS, Probe, ProbeResult, probe_url
+from spice_kernel_db.remote import (
+    SPICE_SERVERS, Probe, ProbeResult, archive_url, is_archive_url, probe_url,
+)
 
 from ._app import ACQUIRE, HiddenArgsCommand, app, open_db, rename_note, state
 from .configure import _mission_add_interactive, add_mission_by_name
 from .prompts import (
     INVALID,
+    _confirm,
     _interactive,
     _interactive_select_metakernel,
     _mission_table,
@@ -141,8 +144,11 @@ def browse(
         _show(db, _maybe_archive(m["mk_dir_url"]), m["name"])
 
 
-def _locate_remote_metakernel(mk_dir_url: str, filename: str) -> str:
-    """URL of *filename* under mk/ or former_versions/; exits when neither answers."""
+def _locate_remote_metakernel(mk_dir_url: str, filename: str, yes: bool = False) -> str:
+    """URL of *filename* under mk/ or former_versions/; exits when neither answers.
+
+    A file found only in former_versions/ is used on a yes or with -y (#61).
+    """
     live_url = mk_dir_url + filename
     archive_url = mk_dir_url + "former_versions/" + filename
     live = probe_url(live_url)
@@ -150,11 +156,18 @@ def _locate_remote_metakernel(mk_dir_url: str, filename: str) -> str:
     if live.ok:
         return live_url
     if archive.ok:
-        console.print(
-            f"[dim]Not in mk/, using archived copy: "
-            f"former_versions/{filename}[/dim]"
-        )
-        return archive_url
+        if yes:
+            console.print(f"[dim]Not in mk/, using archived copy: former_versions/{filename}[/dim]")
+            return archive_url
+        if not _interactive():
+            print(f"{filename} is archived on the server:\n  {archive_url}\n"
+                  f"Pass -y to get it from there.", file=sys.stderr)
+            sys.exit(2)
+        if _confirm(f"{filename} is archived on the server (former_versions/). "
+                    f"Get it anyway? [y/N]: "):
+            return archive_url
+        print(f"Not fetched: {filename}.")
+        sys.exit(0)
     if live.unreachable or archive.unreachable:
         # The server never gave us a status, so we do not know whether the
         # file is there. Saying "not found" here was issue #10: a slow ESA
@@ -215,7 +228,7 @@ def get(
             mk_dir_url, mission_name = _resolve_mission_mk_dir(db, mission)
             if not mk_dir_url:
                 return
-            url = _locate_remote_metakernel(mk_dir_url, url)
+            url = _locate_remote_metakernel(mk_dir_url, url, yes=yes)
             mission = mission or mission_name
         kwargs = {"mission": mission, "yes": yes, "force": force,
                   "alias_filename": alias_filename, "verbose": st.verbose}
@@ -229,24 +242,28 @@ def get(
 
 
 def _refetch(db: KernelDB, name: str, **kwargs) -> None:
-    """``update_metakernel`` with the no-source and unreachable-source messages."""
+    """``update_metakernel`` with the archived, no-source and unreachable-source messages."""
+    if not kwargs.get("yes") and not _interactive():
+        archived = False  # nobody to ask; the archived case gets its -y hint below
+    else:
+        archived = None
     try:
-        db.update_metakernel(name, **kwargs)
+        result = db.update_metakernel(name, archived=archived, **kwargs)
     except AmbiguousKernelRoot:
         raise  # main() maps it to exit 2; it is a LookupError too
-    except LookupError as e:
-        # Tracked by scan or import: no source URL and no mission mk/ URL.
-        print(f"{e}", file=sys.stderr)
-        sys.exit(1)
     except MetakernelUnreachableError as e:
+        # Checked before LookupError, its base class: until #61 the panel never showed.
+        archive_at = archive_url(e.url)
+        if not is_archive_url(e.url) and probe_url(archive_at).ok:
+            print(f"{e.filename} is archived on the server:\n  {archive_at}\n"
+                  f"Pass -y to get it from there.", file=sys.stderr)
+            sys.exit(2)
         console.print(Panel(
             f"[red]The remote metakernel is no longer available.[/red]\n\n"
             f"  URL:      {e.url}\n"
             f"  Status:   HTTP {e.status}\n"
             f"  Filename: {e.filename}\n\n"
-            f"NAIF (and ESA) routinely rotate old versioned snapshots "
-            f"into a [italic]former_versions/[/italic] subdirectory, "
-            f"which makes the original URL 404.\n\n"
+            f"It is not in the server's [italic]former_versions/[/italic] either.\n\n"
             f"To drop every registry row whose source is gone, run:\n"
             f"  [bold]spice-kernel-db clean --registry[/bold]\n"
             f"or remove just this one:\n"
@@ -255,6 +272,12 @@ def _refetch(db: KernelDB, name: str, **kwargs) -> None:
             border_style="red",
         ))
         sys.exit(2)
+    except LookupError as e:
+        # Tracked by scan or import: no source URL and no mission mk/ URL.
+        print(f"{e}", file=sys.stderr)
+        sys.exit(1)
+    if result.get("archived"):
+        print(f"Not fetched: {name} stays as it is.")
 
 
 @app.command(rich_help_panel=ACQUIRE, epilog="See also: get, check",

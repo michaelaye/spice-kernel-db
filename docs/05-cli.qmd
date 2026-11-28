@@ -214,13 +214,13 @@ The tool fetches the remote metakernel, resolves each kernel entry to a full URL
 
 **Metakernels without a source URL.** A metakernel added by `scan` or `import` has no stored source URL. `get <name>` then tries the mission's `mk/` URL plus the filename. If the mission has no `mk/` URL, it fails with `This metakernel was added via scan, not downloaded.` and asks for a URL.
 
-**A source that has gone.** When the stored source answers 403, 404 or 410, `get <name>` prints a red *Metakernel unreachable* panel with the URL, the HTTP status and the filename, and exits 2. The panel names the two ways out: `skd clean --registry` for every such row, or `skd rm <name>` for this one.
+**A source that has gone.** When the stored source answers 403, 404 or 410 and the server's `former_versions/` has no copy either, `get <name>` prints a red *Metakernel unreachable* panel with the URL, the HTTP status and the filename, and exits 2. The panel names the two ways out: `skd clean --registry` for every such row, or `skd rm <name>` for this one.
 
-**Archived metakernels.** ESA (and some NAIF directories) rotate older versioned metakernels into a `former_versions/` subdirectory once a newer version supersedes them. When a filename you request is not present in the live `mk/` listing, `get` automatically retries under `former_versions/<filename>` before failing. The kernels referenced by the older metakernel are typically still available at their original locations (ESA in particular is purely additive — old kernel files are kept alongside new ones), so the rest of the download proceeds unchanged:
+**Archived metakernels.** ESA (and some NAIF directories) rotate older versioned metakernels into a `former_versions/` subdirectory once a newer version supersedes them. When a filename you request, tracked or not, is not in the live `mk/` listing, `get` looks under `former_versions/<filename>` and asks whether you want the archived copy; `-y` answers yes, and without a terminal `get` exits 2 with that hint. A tracked snapshot fetched this way moves to the local `mk/former_versions/`, as on the server, where the server's own `PATH_VALUES` keep it loadable. The kernels referenced by the older metakernel are typically still available at their original locations (ESA in particular is purely additive — old kernel files are kept alongside new ones), so the rest of the download proceeds unchanged:
 
 ```bash
-# A 2022-era versioned metakernel — auto-fetched from former_versions/
-skd get juice_crema_2_0_ops_v200.tm --mission JUICE
+# A 2022-era versioned metakernel, fetched from former_versions/ without the question
+skd get juice_crema_2_0_ops_v200.tm --mission JUICE -y
 ```
 
 If both the live and `former_versions/` URLs 404, the error names both attempted URLs so you can diagnose archive layouts that don't follow this convention. If the server does not answer at all, `get` says so and exits 1 instead of reporting the file as missing.

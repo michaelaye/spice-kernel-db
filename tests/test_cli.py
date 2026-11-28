@@ -520,11 +520,32 @@ class TestGetArchiveFallback:
         with patch("spice_kernel_db.config.load_config", return_value=cfg), \
              patch("spice_kernel_db.cli.browse.probe_url", side_effect=fake_probe), \
              patch.object(KernelDB, "get_metakernel", fake_get_metakernel):
-            main(["get", "juice_crema_2_0_ops_v200.tm", "--mission", "JUICE"])
+            main(["get", "juice_crema_2_0_ops_v200.tm", "--mission", "JUICE", "-y"])
 
         assert captured["url"] == (
             self.MK_DIR + "former_versions/juice_crema_2_0_ops_v200.tm"
         )
+
+    def test_archive_only_without_y_or_terminal_exits_2(self, tmp_path, capsys):
+        """#61: a file found only in former_versions/ is fetched only on a yes."""
+        from spice_kernel_db.cli import main
+
+        cfg = self._setup(tmp_path)
+        fetched = []
+
+        def fake_probe(url, timeout=None):
+            return (Probe(ProbeResult.PRESENT) if "former_versions/" in url
+                    else Probe(ProbeResult.ABSENT, "HTTP 404"))
+
+        with patch("spice_kernel_db.config.load_config", return_value=cfg), \
+             patch("spice_kernel_db.cli.browse.probe_url", side_effect=fake_probe), \
+             patch("spice_kernel_db.cli.browse._interactive", return_value=False), \
+             patch.object(KernelDB, "get_metakernel", lambda self, url, **kw: fetched.append(url)):
+            with pytest.raises(SystemExit) as exc:
+                main(["get", "juice_crema_2_0_ops_v200.tm", "--mission", "JUICE"])
+        assert exc.value.code == 2
+        assert fetched == []
+        assert "Pass -y" in capsys.readouterr().err
 
     def test_live_url_takes_priority(self, tmp_path):
         """When the live URL HEADs 200, archive must not be probed and the
@@ -1830,3 +1851,50 @@ class TestCheckVerdicts:
         doc = json.loads(capsys.readouterr().out)
         assert doc["exit_code"] == 1 and doc["present"]["missing"] == ["$K/lsk/b.tls"]
         assert [v["ok"] for v in doc["verdicts"]] == [False, True, None]
+
+
+class TestRefetchArchived:
+    """#61 at the CLI: `get NAME` for a snapshot the server archived."""
+
+    def _db(self, exc=None, result=None):
+        db = MagicMock()
+        db.update_metakernel.side_effect = exc
+        db.update_metakernel.return_value = result
+        return db
+
+    def _err(self):
+        from spice_kernel_db.db import MetakernelUnreachableError
+        return MetakernelUnreachableError(
+            "https://esa.example/JUICE/kernels/mk/snap_v2.tm", 404, "snap_v2.tm")
+
+    def test_without_a_terminal_it_asks_for_y(self, monkeypatch, capsys):
+        from spice_kernel_db.cli import browse
+        from spice_kernel_db.remote import Probe, ProbeResult
+        monkeypatch.setattr(browse, "_interactive", lambda: False)
+        monkeypatch.setattr(browse, "probe_url", lambda u: Probe(ProbeResult.PRESENT))
+        db = self._db(exc=self._err())
+        with pytest.raises(SystemExit) as exc:
+            browse._refetch(db, "snap_v2.tm", yes=False)
+        assert exc.value.code == 2
+        assert db.update_metakernel.call_args.kwargs["archived"] is False
+        err = capsys.readouterr().err
+        assert "archived on the server" in err and "former_versions/snap_v2.tm" in err
+        assert "Pass -y" in err
+
+    def test_gone_in_both_places_shows_the_panel_and_exits_2(self, monkeypatch, capsys):
+        """The panel was dead code before #61: LookupError, its base class, was caught first."""
+        from spice_kernel_db.cli import browse
+        from spice_kernel_db.remote import Probe, ProbeResult
+        monkeypatch.setattr(browse, "probe_url", lambda u: Probe(ProbeResult.ABSENT))
+        with pytest.raises(SystemExit) as exc:
+            browse._refetch(self._db(exc=self._err()), "snap_v2.tm", yes=True)
+        assert exc.value.code == 2
+        assert "Metakernel unreachable" in capsys.readouterr().out
+
+    def test_answering_no_fetches_nothing(self, monkeypatch, capsys):
+        from spice_kernel_db.cli import browse
+        monkeypatch.setattr(browse, "_interactive", lambda: True)
+        db = self._db(result={"aborted": True, "archived": "https://x/former_versions/s.tm"})
+        browse._refetch(db, "snap_v2.tm", yes=False)
+        assert db.update_metakernel.call_args.kwargs["archived"] is None
+        assert "Not fetched" in capsys.readouterr().out

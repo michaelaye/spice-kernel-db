@@ -1877,3 +1877,89 @@ class TestArchivedMetakernel:
         assert (mk / "juice_x_v002.tm").is_file()
         assert "now → juice_x_v002.tm" in report["juice_x.tm"]["note"]
         db.close()
+
+
+from spice_kernel_db import MetakernelUnreachableError  # noqa: E402
+
+
+class TestGetArchivedSnapshot:
+    """#61: re-fetching a tracked snapshot the server moved to
+    mk/former_versions/ asks first, then fetches it from there and moves the
+    local copy alongside, keeping one registry row."""
+
+    URL = "https://esa.example/JUICE/kernels/mk/snap_v2.tm"
+    ARCHIVE = "https://esa.example/JUICE/kernels/mk/former_versions/snap_v2.tm"
+
+    def _seed(self, tmp_path, console=None):
+        db = KernelDB(tmp_path / "test.duckdb", console=console, kernel_roots=[tmp_path])
+        mk = tmp_path / "JUICE" / "mk" / "snap_v2.tm"
+        mk.parent.mkdir(parents=True)
+        mk.write_text("\\begintext\n")
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, ?, ?, ?, current_timestamp)",
+            [str(mk), "JUICE", self.URL, "snap_v2.tm"],
+        )
+        return db, mk
+
+    def _fake_get(self, calls):
+        def get(url, **kwargs):
+            calls.append((url, kwargs.get("yes")))
+            if url == self.URL:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return {"found": [], "missing": [], "downloaded": [], "warnings": []}
+        return get
+
+    def _run(self, db, calls, present=True, **kwargs):
+        from spice_kernel_db.remote import Probe, ProbeResult
+        probe = Probe(ProbeResult.PRESENT if present else ProbeResult.ABSENT)
+        with patch.object(KernelDB, "get_metakernel", side_effect=self._fake_get(calls)), \
+             patch("spice_kernel_db.db.probe_url", return_value=probe):
+            return db.update_metakernel("snap_v2.tm", **kwargs)
+
+    def test_default_still_raises_for_update_all(self, tmp_path):
+        db, mk = self._seed(tmp_path)
+        with pytest.raises(MetakernelUnreachableError):
+            self._run(db, [])
+        assert mk.exists()
+        db.close()
+
+    def test_yes_fetches_the_archive_and_moves_the_local_copy(self, tmp_path):
+        db, mk = self._seed(tmp_path)
+        calls = []
+        self._run(db, calls, archived=None, yes=True)
+        assert calls[-1] == (self.ARCHIVE, True)
+        moved = mk.parent / "former_versions" / "snap_v2.tm"
+        assert moved.exists() and not mk.exists()
+        rows = db.con.execute("SELECT mk_path, source_url FROM metakernel_registry").fetchall()
+        assert rows == [(str(moved), self.ARCHIVE)]
+        db.close()
+
+    def test_no_answer_fetches_nothing(self, tmp_path):
+        db, mk = self._seed(tmp_path)  # no console: the question is answered no
+        calls = []
+        result = self._run(db, calls, archived=None)
+        assert result["aborted"] and result["archived"] == self.ARCHIVE
+        assert [u for u, _ in calls] == [self.URL]
+        assert mk.exists()
+        db.close()
+
+    def test_gone_in_both_places_raises(self, tmp_path):
+        db, _ = self._seed(tmp_path)
+        with pytest.raises(MetakernelUnreachableError):
+            self._run(db, [], present=False, archived=None, yes=True)
+        db.close()
+
+    def test_an_alias_on_the_snapshot_is_refused(self, tmp_path):
+        db, mk = self._seed(tmp_path)
+        alias = mk.parent / "snap.tm"
+        alias.symlink_to(mk)
+        db.con.execute(
+            "INSERT INTO metakernel_registry (mk_path, mission, source_url, filename, acquired_at) "
+            "VALUES (?, ?, ?, ?, current_timestamp)",
+            [str(alias), "JUICE", "https://esa.example/JUICE/kernels/mk/snap.tm", "snap.tm"],
+        )
+        with pytest.raises(LookupError, match="alias snap.tm"):
+            self._run(db, [], archived=None, yes=True)
+        assert mk.exists()
+        db.close()

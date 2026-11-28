@@ -369,8 +369,9 @@ class MetakernelUnreachableError(LookupError):
     """The remote copy of a tracked metakernel is gone.
 
     Raised by ``KernelDB.update_metakernel`` when the remote server answers with a permanent HTTP
-    error (403, 404 or 410). The usual cause is that NAIF rotated the file into
-    ``former_versions/``. The local registry row is then an obsolete pointer. Subclass of
+    error (403, 404 or 410). With ``archived=False``, the default, it is raised also when the
+    server only moved the file into ``mk/former_versions/``; otherwise only when the file is in
+    neither place, and the local registry row is then an obsolete pointer. Subclass of
     ``LookupError``.
 
     To clean it up, call ``db.prune_metakernels(dry_run=False)`` or run
@@ -3493,6 +3494,7 @@ class KernelDB:
         rescan: bool = True,
         size_cache: SizeCache | None = None,
         quiet: bool = False,
+        archived: bool | None = False,
     ) -> dict:
         """Re-fetch a metakernel from its source URL and download new or missing kernels.
 
@@ -3529,11 +3531,18 @@ class KernelDB:
             one; ``None`` asks the server for every size.
         quiet : bool, default False
             Passed to ``get_metakernel``: show only the download progress (#57).
+        archived : bool | None, default False
+            What to do when the source answers 403, 404 or 410 and the server has the same file in
+            ``mk/former_versions/`` (#61). ``False`` raises ``MetakernelUnreachableError``, as
+            ``update_all`` needs. ``True`` fetches the archived copy. ``None`` asks first, and
+            ``yes=True`` answers the question. The local copy then moves to ``mk/former_versions/``,
+            as on the server; the server's own ``PATH_VALUES`` there keep it loadable.
 
         Returns
         -------
         dict
-            The dict ``get_metakernel`` returns. After a real run (neither ``dry_run`` nor
+            The dict ``get_metakernel`` returns. When the archived copy was not wanted, nothing is
+            fetched and the dict has ``aborted: True`` and ``archived``, its URL. After a real run (neither ``dry_run`` nor
             ``force``) it also has ``scan_dirs``, the set of directories the metakernel points at.
 
         Raises
@@ -3585,15 +3594,22 @@ class KernelDB:
                 quiet=quiet,
             )
         except urllib.error.HTTPError as e:
-            if e.code in (403, 404, 410):
-                # NAIF (and ESA) routinely rotate old versioned
-                # metakernel snapshots into former_versions/, so the
-                # registry's source_url goes permanently 404. Raise a
-                # structured error the CLI can pretty-print.
-                raise MetakernelUnreachableError(
-                    source_url, e.code, mk_filename,
-                ) from e
-            raise
+            if e.code not in (403, 404, 410):
+                raise
+            # NAIF and ESA move superseded snapshots to mk/former_versions/,
+            # so the stored source answers 404 while the file is still there.
+            archive_at = archive_url(source_url)
+            if (archived is False or is_archive_url(source_url)
+                    or not probe_url(archive_at).ok):
+                raise MetakernelUnreachableError(source_url, e.code, mk_filename) from e
+            if archived is None and not yes and not self._confirm(
+                f"{mk_filename} is archived on the server ({ARCHIVE_DIR}/). "
+                f"Get it anyway? [y/N]: "
+            ):
+                return {"found": [], "missing": [], "downloaded": [], "warnings": [],
+                        "aborted": True, "archived": archive_at}
+            return self._refetch_archived(row, archive_at, download_dir, mission,
+                                          yes=yes, force=force, dry_run=dry_run, quiet=quiet)
 
         # Re-scan the kernel directories referenced by the metakernel
         # so that new/renamed files on disk get indexed.  Skip if --force
@@ -3682,6 +3698,31 @@ class KernelDB:
         newest = max(snapshots, key=lambda e: (e.date, e.version_tag))
         current = Path(os.readlink(alias.mk_path)).name
         return None if newest.filename == current else newest
+
+    def _refetch_archived(
+        self, row: RegistryRow, url: str, download_dir: Path, mission: str, *,
+        yes: bool, force: bool, dry_run: bool, quiet: bool,
+    ) -> dict:
+        """Fetch *row*'s snapshot from the server's ``former_versions/`` *url* (#61).
+
+        The local copy moves there first, so one registry row keeps tracking the file. An alias
+        pointing at the snapshot would break, so that case is refused.
+        """
+        local = Path(row.mk_path)
+        if not dry_run and local.parent.name != ARCHIVE_DIR:
+            aliases = [a.filename for a in self.registry_rows()
+                       if Path(a.mk_path).is_symlink()
+                       and Path(a.mk_path).resolve() == local.resolve()]
+            if aliases:
+                raise LookupError(
+                    f"{row.filename} is archived on the server, and the alias "
+                    f"{', '.join(aliases)} still points at it. Run 'spice-kernel-db update "
+                    f"--execute' to move the alias to the newer snapshot first."
+                )
+            if local.exists():
+                self._archive_local_copy(row, url)
+        return self.get_metakernel(url, download_dir=download_dir, mission=mission, yes=yes,
+                                   force=force, dry_run=dry_run, quiet=quiet)
 
     def _archive_local_copy(self, row: RegistryRow, url: str) -> Path:
         """Move a tracked metakernel into ``mk/former_versions/``, as the server did (#58).
