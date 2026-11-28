@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-11-28
+
 ### Added
 
 - `skd update` asks the server for kernel sizes once per calendar day (#56).
@@ -1529,7 +1531,8 @@ spice-kernel-db check <your-metakernel.tm>
   reference)
 - Comprehensive test suite (30 tests)
 
-[Unreleased]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.1...HEAD
+[Unreleased]: https://github.com/michaelaye/spice-kernel-db/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/michaelaye/spice-kernel-db/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.3...v0.30.0
 [0.22.3]: https://github.com/michaelaye/spice-kernel-db/compare/v0.22.2...v0.22.3

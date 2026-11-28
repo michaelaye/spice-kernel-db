@@ -15,8 +15,8 @@ authors:
 repository-code: https://github.com/michaelaye/spice-kernel-db
 url: https://michaelaye.github.io/spice-kernel-db
 license: MIT
-version: 0.30.1
-date-released: "2026-10-26"
+version: 0.31.0
+date-released: "2026-11-28"
 keywords:
   - SPICE
   - NAIF
